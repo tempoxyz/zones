@@ -195,7 +195,7 @@ impl SpamDeposits {
                     calls: vec![Call {
                         to: TxKind::Call(self.portal),
                         value: U256::ZERO,
-                        input: Bytes::from(calldata.clone()),
+                        input: Bytes::from(calldata),
                     }],
                     nonce_key,
                     nonce: 0,

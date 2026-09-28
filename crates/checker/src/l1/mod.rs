@@ -1,4 +1,4 @@
-//! Collection of all temporary evidence for one anchored Tempo/L1 block.
+//! Collection of authenticated Tempo/L1 evidence through a full-import anchor.
 
 mod events;
 
@@ -53,10 +53,9 @@ impl From<L1ReadError> for AttemptError {
     }
 }
 
-/// Recognized Portal events for one exact anchored L1 block.
-#[derive(Debug)]
+/// Recognized Portal events for an authenticated L1 block or contiguous range, in chain order.
+#[derive(Debug, Default)]
 pub(crate) struct L1BlockEvidence {
-    block: BlockNumHash,
     events: Vec<L1PortalEvent>,
 }
 
@@ -89,31 +88,54 @@ pub(crate) fn validate_rpc_header(
 }
 
 impl L1BlockEvidence {
-    pub(crate) const fn block(&self) -> BlockNumHash {
-        self.block
-    }
-
     /// Return authenticated Portal events in receipt order.
     pub(crate) fn portal_events(&self) -> impl Iterator<Item = &L1PortalEvent> {
         self.events.iter()
     }
 }
 
-/// Fetch the exact anchored Tempo block that extends `parent`.
-pub(crate) async fn collect_l1_block_at(
+/// Fetch every Tempo block in `(parent, expected]`, authenticating the complete parent chain.
+pub(crate) async fn collect_l1_range_at(
     provider: &DynProvider<TempoNetwork>,
     tracker: &L1BlockTracker,
     portal: Address,
     parent: BlockNumHash,
     expected: BlockNumHash,
 ) -> Result<L1BlockEvidence, L1ReadError> {
-    if let Some(evidence) = tracker
-        .authenticated_portal_logs(expected)
-        .map_err(finding)?
-    {
-        return collect_tracked_l1_block_evidence(portal, parent, evidence);
+    if expected.number <= parent.number {
+        return Err(finding(eyre::eyre!(
+            "Tempo full import must advance its accounting anchor"
+        )));
     }
-    fetch_l1_block_at(provider, portal, parent, expected).await
+    // Walk backwards from the Zone-authenticated tip so every requested hash is bound to it.
+    let mut cursor = expected;
+    let mut blocks = Vec::new();
+    while cursor.number > parent.number {
+        let (previous, evidence) =
+            if let Some(evidence) = tracker.authenticated_portal_logs(cursor).map_err(finding)? {
+                let previous = BlockNumHash::new(cursor.number - 1, evidence.parent_hash);
+                (
+                    previous,
+                    collect_tracked_l1_block_evidence(portal, previous, evidence)?,
+                )
+            } else {
+                fetch_l1_block_at(provider, portal, cursor).await?
+            };
+        blocks.push(evidence);
+        cursor = previous;
+    }
+    if cursor != parent {
+        return Err(finding(eyre::eyre!(
+            "Tempo history does not extend the previous accounting anchor"
+        )));
+    }
+    Ok(L1BlockEvidence {
+        events: blocks
+            .into_iter()
+            .rev()
+            .flat_map(|block| block.events)
+            .collect(),
+    })
 }
 
 fn collect_tracked_l1_block_evidence(
@@ -140,7 +162,6 @@ fn collect_tracked_l1_block_evidence(
             .map_err(finding)?;
     }
     Ok(L1BlockEvidence {
-        block: evidence.block,
         events: collector.finish(),
     })
 }
@@ -148,17 +169,11 @@ fn collect_tracked_l1_block_evidence(
 async fn fetch_l1_block_at(
     provider: &DynProvider<TempoNetwork>,
     portal: Address,
-    parent: BlockNumHash,
     expected: BlockNumHash,
-) -> Result<L1BlockEvidence, L1ReadError> {
-    let number = parent.number.checked_add(1).ok_or_else(|| {
-        disable(eyre::eyre!(
-            "Tempo block number overflow after {}",
-            parent.number
-        ))
-    })?;
+) -> Result<(BlockNumHash, L1BlockEvidence), L1ReadError> {
+    let number = expected.number;
     let block = provider
-        .get_block_by_number(number.into())
+        .get_block_by_hash(expected.hash)
         .hashes()
         .await
         .map_err(classify_rpc_error)?
@@ -168,11 +183,6 @@ async fn fetch_l1_block_at(
         return Err(disable(eyre::eyre!(
             "Tempo RPC returned block {} for requested block {number}",
             header.block.number
-        )));
-    }
-    if header.parent_hash != parent.hash {
-        return Err(finding(eyre::eyre!(
-            "Tempo history is not contiguous at block {number}"
         )));
     }
     let coordinate = header.block;
@@ -198,7 +208,10 @@ async fn fetch_l1_block_at(
         &receipts,
     )
     .map_err(disable)?;
-    collect_l1_block_evidence(portal, coordinate, &receipts)
+    Ok((
+        BlockNumHash::new(number - 1, header.parent_hash),
+        collect_l1_block_evidence(portal, coordinate, &receipts)?,
+    ))
 }
 
 /// Read Portal custody for one token at an exact canonical Tempo block.
@@ -247,7 +260,7 @@ fn collect_l1_block_evidence(
             .map_err(finding)?;
     }
     let events = event_collector.finish();
-    Ok(L1BlockEvidence { block, events })
+    Ok(L1BlockEvidence { events })
 }
 
 fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
@@ -263,10 +276,16 @@ fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
     }
 }
 
-/// Classify one provider RPC failure without relying on its display text.
+/// Classify one provider RPC failure using its structured code and message.
 pub(crate) fn classify_rpc_error(error: TransportError) -> AttemptError {
     let retryable = match &error {
-        RpcError::ErrorResp(error) => error.is_retry_err(),
+        RpcError::ErrorResp(error) => {
+            // Missing/unavailable resources and internal errors can result from
+            // backend import lag or upstream resets during a rollout. Retry these
+            // L1 reads without depending on provider-specific message text. The
+            // runtime bounds retries; exact hash/canonicality checks are unchanged.
+            error.is_retry_err() || matches!(error.code, -32001 | -32002 | -32603)
+        }
         RpcError::UnsupportedFeature(_)
         | RpcError::LocalUsageError(_)
         | RpcError::SerError(_)
@@ -307,6 +326,167 @@ mod tests {
 
     const BLOCK: u64 = 100;
     const HASH: B256 = B256::repeat_byte(0x10);
+
+    #[tokio::test]
+    async fn checkpoint_deferred_range_preserves_order_and_authenticates_its_parent() {
+        use crate::accounting::{State, effects};
+
+        let provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(alloy_transport::mock::Asserter::new())
+            .erased();
+        let tracker = L1BlockTracker::default();
+        let portal = Address::repeat_byte(0x20);
+        let token = Address::repeat_byte(0x21);
+        let parent = BlockNumHash::new(100, B256::with_last_byte(100));
+        let logs = [
+            ZonePortal::TokenEnabled {
+                token,
+                name: "Test".into(),
+                symbol: "TST".into(),
+                currency: "USD".into(),
+            }
+            .encode_log_data(),
+            ZonePortal::DepositMade {
+                newCurrentDepositQueueHash: B256::ZERO,
+                sender: Address::ZERO,
+                token,
+                netAmount: 500,
+                fee: 0,
+                keyIndex: U256::ZERO,
+                ephemeralPubkeyX: B256::ZERO,
+                ephemeralPubkeyYParity: 0,
+                ciphertext: Default::default(),
+                nonce: [0; 12].into(),
+                tag: [0; 16].into(),
+                tempoRefundRecipient: Address::repeat_byte(4),
+                depositNumber: 1,
+            }
+            .encode_log_data(),
+        ];
+        for (index, data) in logs.into_iter().enumerate() {
+            let number = 101 + index as u64;
+            tracker
+                .record_with_portal_evidence(
+                    BlockNumHash::new(number, B256::with_last_byte(number as u8)),
+                    B256::with_last_byte((number - 1) as u8),
+                    Default::default(),
+                    vec![Log {
+                        address: portal,
+                        data,
+                    }],
+                )
+                .unwrap();
+        }
+        let tip = BlockNumHash::new(103, B256::with_last_byte(103));
+        tracker
+            .record_with_portal_evidence(tip, B256::with_last_byte(102), Default::default(), vec![])
+            .unwrap();
+        let evidence = collect_l1_range_at(&provider, &tracker, portal, parent, tip)
+            .await
+            .unwrap();
+        let mut state = State::default();
+        // Applying a deposit before its deferred enablement would fail with UnknownToken.
+        state.apply(&effects::from_tempo(&evidence)).unwrap();
+        assert_eq!(
+            state.token(token).unwrap().pending_deposits,
+            U256::from(500)
+        );
+
+        let wrong_parent = BlockNumHash::new(parent.number, B256::ZERO);
+        assert!(matches!(
+            collect_l1_range_at(&provider, &tracker, portal, wrong_parent, tip).await,
+            Err(L1ReadError::Finding(_))
+        ));
+        assert!(matches!(
+            collect_l1_range_at(&provider, &tracker, portal, tip, tip).await,
+            Err(L1ReadError::Finding(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_range_authenticates_archival_rpc_headers_and_receipts() {
+        let asserter = alloy_transport::mock::Asserter::new();
+        let provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let parent = BlockNumHash::new(100, B256::with_last_byte(100));
+        let mut tip = parent;
+        let mut responses = Vec::new();
+        for number in 101..=103 {
+            let header = TempoHeader {
+                inner: Header {
+                    number,
+                    parent_hash: tip.hash,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            tip = BlockNumHash::new(number, header.hash_slow());
+            let response = TempoHeaderResponse {
+                inner: RpcHeader {
+                    hash: tip.hash,
+                    inner: header,
+                    total_difficulty: None,
+                    size: None,
+                },
+                timestamp_millis: 0,
+            };
+            let mut block = serde_json::to_value(response).unwrap();
+            block["transactions"] = serde_json::json!([]);
+            block["uncles"] = serde_json::json!([]);
+            responses.push(block);
+        }
+        for block in responses.into_iter().rev() {
+            asserter.push_success(&block);
+            asserter.push_success(&Vec::<TempoTransactionReceipt>::new());
+        }
+        let evidence = collect_l1_range_at(
+            &provider,
+            &L1BlockTracker::default(),
+            Address::ZERO,
+            parent,
+            tip,
+        )
+        .await
+        .unwrap();
+        assert_eq!(evidence.portal_events().count(), 0);
+    }
+
+    #[test]
+    fn acquisition_rpc_codes_are_retryable_without_message_matching() {
+        for (code, message, retryable) in [
+            (-32001, "block not found", true),
+            (-32001, "block not found: canonical hash 0x1234", true),
+            (-32001, "transaction not found", true),
+            (-32001, "historical state pruned", true),
+            (-32001, "", true),
+            (-32002, "no healthy upstreams available", true),
+            (-32002, "", true),
+            (-32603, "internal eth error", true),
+            (-32603, "", true),
+            (-32000, "invalid input", false),
+            (-32600, "invalid request", false),
+            (-32601, "method not found", false),
+            (-32602, "block not found", false),
+            (-32004, "method not supported", false),
+            (3, "execution reverted", false),
+            (-32005, "rate limit", true),
+            (429, "too many requests", true),
+        ] {
+            let payload = serde_json::from_value(serde_json::json!({
+                "code": code, "message": message,
+            }))
+            .unwrap();
+            assert_eq!(
+                matches!(
+                    classify_rpc_error(RpcError::ErrorResp(payload)),
+                    AttemptError::Retry(_)
+                ),
+                retryable,
+                "{code}: {message}"
+            );
+        }
+    }
 
     #[test]
     fn validates_rpc_hash_against_decoded_header() {
@@ -361,7 +541,6 @@ mod tests {
         };
 
         let evidence = collect_tracked_l1_block_evidence(portal, parent, tracked).unwrap();
-        assert_eq!(evidence.block(), BlockNumHash::new(BLOCK, HASH));
         assert!(matches!(
             evidence.portal_events().next(),
             Some(L1PortalEvent::TokenEnabled { token: observed }) if *observed == token

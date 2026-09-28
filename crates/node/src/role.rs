@@ -15,7 +15,7 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
-use eyre::WrapErr as _;
+use eyre::{OptionExt as _, WrapErr as _};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_node_api::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
@@ -38,8 +38,8 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
-    resolve_portal_zone_anchor, spawn_zone_sequencer,
+    SettlementManager, SettlementProverConfig, ZoneSequencerConfig, ZoneSequencerHandle,
+    ZoneSequencerProvider, resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -49,11 +49,11 @@ mod zone_transaction_pool_alias {
 
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
+    follower::{BlockSyncP2p, FollowerBlockSync, FollowerBlockSyncContext, PeerTipRegistry},
     replication::{
-        AttestationContext, BroadcasterShutdown, PeerTipRegistry, broadcast_persisted_blocks,
-        collect_follower_settlement_signatures, run_follower_block_sync,
+        BroadcasterShutdown, broadcast_persisted_blocks, collect_follower_settlement_signatures,
     },
-    settlement_attestation::collect_leader_settlements,
+    settlement_attestation::AttestationContext,
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions},
 };
 
@@ -84,6 +84,7 @@ pub(crate) struct RoleControllerContext<P, Pool> {
     pub commands: mpsc::Sender<P2pCommand>,
     pub backfill_commands: mpsc::Sender<BackfillCommand>,
     pub attestation: AttestationContext,
+    pub settlements: Option<SettlementManager>,
     pub portal_address: Address,
     /// Sequencer resources constructed unconditionally at startup; activation is gated by
     /// the leader generation. `None` means this node can never lead.
@@ -112,11 +113,13 @@ pub struct RoleStatus {
 /// Shared handle to the live [`RoleStatus`].
 pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 
-/// Leader-only background task dependencies (batch submission, withdrawal processing).
+/// Dependencies used by leader tasks; the proof collector itself is node-owned.
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
-    pub prover_config: Option<ShadowProverConfig>,
+    /// Node-owned collector shared across all role generations.
+    pub proof_collector: Option<zone_sequencer::ProofCollectorHandle>,
+    pub prover_config: Option<SettlementProverConfig>,
 }
 
 /// Sinks for the long-lived P2P event demultiplexer.
@@ -126,13 +129,6 @@ pub(crate) struct LeaderSequencerDeps {
 #[derive(Clone, Default)]
 pub(crate) struct EventSinks {
     inner: Arc<std::sync::Mutex<GenerationSinks>>,
-}
-
-#[derive(Default)]
-struct GenerationSinks {
-    sync: Option<mpsc::Sender<P2pEvent>>,
-    transactions: Option<mpsc::Sender<P2pEvent>>,
-    backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
 }
 
 impl EventSinks {
@@ -171,6 +167,13 @@ impl EventSinks {
             .backfill_responses
             .clone()
     }
+}
+
+#[derive(Default)]
+struct GenerationSinks {
+    sync: Option<mpsc::Sender<P2pEvent>>,
+    transactions: Option<mpsc::Sender<P2pEvent>>,
+    backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
 }
 
 /// Long-lived P2P event demultiplexer for non-backfill protocols.
@@ -324,7 +327,7 @@ enum GenerationStopOutcome {
     Failed,
 }
 
-/// Supervise the two long-running sequencer children as one role-generation task.
+/// Supervise the long-running sequencer children as one role-generation task.
 ///
 /// An unexpected child exit must restart the whole generation immediately. During an intentional
 /// generation stop, however, both children retain the graceful shutdown window needed to finish
@@ -550,8 +553,8 @@ enum Readiness {
 /// Forced-recovery promotion requires the operator-selected block to remain in the local canonical
 /// chain. The node may have advanced beyond that checkpoint before restarting, so requiring it to
 /// remain the head would make every in-progress recovery restart fatal. Normal transitions need no
-/// additional evidence: the next-anchor rule and one-to-one zone/L1 block mapping ensure all
-/// earlier leaders' blocks are already local.
+/// additional evidence: the next-anchor rule and production permits that stop checkpoint batches
+/// at leadership boundaries ensure all earlier leaders' blocks are already local.
 fn promotion_readiness<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
@@ -887,31 +890,29 @@ where
             sinks.install(sync_tx, Some(transactions_tx), Some(backfill_tx));
 
             let follower_token = token.clone();
-            let provider = context.provider.clone();
-            let engine = context.engine_handle.clone();
-            let commands = context.commands.clone();
-            let backfill_commands = context.backfill_commands.clone();
-            let tracker = context.l1_block_tracker.clone();
-            let queue = context.deposit_queue.clone();
-            let attestation = context.attestation.clone();
-            let schedule = context.schedule.clone();
-            let peer_tips = context.peer_tips.clone();
+            let sync_context = FollowerBlockSyncContext {
+                provider: context.provider.clone(),
+                engine: context.engine_handle.clone(),
+                l1_block_tracker: context.l1_block_tracker.clone(),
+                deposit_queue: context.deposit_queue.clone(),
+                attestation: context.attestation.clone(),
+                schedule: context.schedule.clone(),
+                peer_tips: context.peer_tips.clone(),
+                proof_collector: context
+                    .sequencer
+                    .as_ref()
+                    .and_then(|sequencer| sequencer.proof_collector.clone()),
+            };
+            let sync_p2p = BlockSyncP2p {
+                events: sync_rx,
+                commands: context.commands.clone(),
+                backfill_responses: backfill_rx,
+                backfill_commands: context.backfill_commands.clone(),
+            };
             tasks.spawn(async move {
-                run_follower_block_sync(
-                    provider,
-                    engine,
-                    sync_rx,
-                    commands,
-                    backfill_commands,
-                    backfill_rx,
-                    tracker,
-                    queue,
-                    attestation,
-                    schedule,
-                    peer_tips,
-                    follower_token.clone(),
-                )
-                .await;
+                FollowerBlockSync::new(sync_context, sync_p2p, follower_token.clone())
+                    .run()
+                    .await;
                 if follower_token.is_cancelled() {
                     TaskEnd::Ended("follower-block-sync (cancelled)")
                 } else {
@@ -972,8 +973,6 @@ where
             // leader before promotion, so recovery remains bounded by one configured batch
             // interval (120 Zone blocks in production) rather than replaying history from genesis.
 
-            // Remove any submitted attestations for the portal-confirmed anchor, so the new leader
-            // can start from here.
             let portal_confirmed_height = portal_anchor.block_number;
             info!(
                 target: "zone::role",
@@ -981,16 +980,17 @@ where
                 portal_block_hash = %portal_anchor.block_hash,
                 "Seeded leader settlement recovery from the portal anchor"
             );
-            context
-                .attestation
-                .store
-                .remove_submitted(portal_confirmed_height);
+            let settlements = context
+                .settlements
+                .clone()
+                .ok_or_eyre("leader has no settlement manager")?;
 
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
+            let collector = sequencer.proof_collector.clone();
             let engine = build_engine(context, sequencer, last_header);
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
@@ -1011,19 +1011,19 @@ where
             });
             let provider = context.provider.clone();
             let commands = context.commands.clone();
+            let broadcast_proofs = collector.clone();
             tasks.spawn(async move {
-                broadcast_persisted_blocks(provider, commands, broadcaster_rx).await;
+                broadcast_persisted_blocks(provider, commands, broadcaster_rx, broadcast_proofs)
+                    .await;
                 TaskEnd::Ended("block-broadcast")
             });
 
             let server_token = token.clone();
-            let provider = context.provider.clone();
-            let attestation = context.attestation.clone();
+            let signature_settlements = settlements.clone();
             tasks.spawn(async move {
                 collect_follower_settlement_signatures(
-                    provider,
                     sync_rx,
-                    attestation,
+                    signature_settlements,
                     server_token,
                 )
                 .await;
@@ -1037,24 +1037,6 @@ where
                     () = import_token.cancelled() => TaskEnd::Ended("transaction-import (cancelled)"),
                     () = insert_forwarded_transactions(pool, transactions_rx) => {
                         TaskEnd::Ended("transaction-import")
-                    }
-                }
-            });
-
-            let provider = context.provider.clone();
-            let commands = context.commands.clone();
-            let attestation = context.attestation.clone();
-            let settlement_token = token.clone();
-            tasks.spawn(async move {
-                tokio::select! {
-                    () = settlement_token.cancelled() => TaskEnd::Ended("settlement-collection (cancelled)"),
-                    () = collect_leader_settlements(
-                        provider,
-                        commands,
-                        attestation,
-                        portal_confirmed_height,
-                    ) => {
-                        TaskEnd::Ended("settlement-collection")
                     }
                 }
             });
@@ -1076,7 +1058,9 @@ where
                     sequencer_config,
                     signer,
                     zone_provider,
+                    collector,
                     prover_config,
+                    Some(settlements),
                     sequencer_token.clone(),
                 )
                 .await;
@@ -1125,6 +1109,7 @@ where
         sequencer.config.sequencer_signer.address(),
         context.encryption_keys.clone(),
         context.portal_address,
+        sequencer.proof_collector.clone(),
     )
     .with_production_permit(ProductionPermit::new(
         context.schedule.clone(),

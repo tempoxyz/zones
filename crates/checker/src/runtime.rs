@@ -19,7 +19,7 @@ use crate::{
     AttemptError, CheckerConfig,
     accounting::effects,
     bootstrap,
-    l1::{L1ReadError, classify_rpc_error, collect_l1_block_at, portal_balances},
+    l1::{L1ReadError, classify_rpc_error, collect_l1_range_at, portal_balances},
     l2::{AccountingStateError, collect_l2_block_evidence, read_accounting_state},
     persistence::{AppliedStatus, BlockRef, CandidateTransition, Finding, Snapshot, Status, Store},
     telemetry::{self, CheckerMetrics},
@@ -411,14 +411,20 @@ where
     let fail = |error| BlockError::Finding { zone, error };
     let l2 = collect_l2_block_evidence(block.body().transactions(), receipts, zone.into())
         .map_err(fail)?;
-    let anchor = l2.l1_anchor();
-    let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
-    validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
     let mut l1_backoff = Backoff::new();
-    let tempo_block =
-        collect_l1_block_with_retry(l1, tempo_parent, tempo, zone, context, &mut l1_backoff)
-            .await?;
+    let (tempo, tempo_block) = if let Some(anchor) = l2.l1_anchor() {
+        let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
+        validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
+        let evidence =
+            collect_l1_range_with_retry(l1, tempo_parent, tempo, zone, context, &mut l1_backoff)
+                .await?;
+        (tempo, evidence)
+    } else {
+        // Checkpoint-only blocks perform no bridge work. Keep the accounting anchor and
+        // liabilities unchanged; the next full block consumes the entire deferred L1 range.
+        (tempo_parent, crate::l1::L1BlockEvidence::default())
+    };
     let mut block_effects = effects::from_tempo(&tempo_block);
     block_effects.extend(effects::from_zone(&l2));
     let candidate = CandidateTransition::derive(
@@ -518,7 +524,7 @@ fn classify_block_l1_error(error: L1ReadError, zone: BlockRef) -> BlockError {
     }
 }
 
-async fn collect_l1_block_with_retry(
+async fn collect_l1_range_with_retry(
     l1: &DynProvider<TempoNetwork>,
     parent: BlockNumHash,
     expected: BlockNumHash,
@@ -528,7 +534,7 @@ async fn collect_l1_block_with_retry(
 ) -> Result<crate::l1::L1BlockEvidence, BlockError> {
     let VerificationContext { config, metrics } = context;
     loop {
-        match collect_l1_block_at(
+        match collect_l1_range_at(
             l1,
             &config.l1_block_tracker,
             config.portal_address,
@@ -569,12 +575,9 @@ fn record_l1_retry(
 }
 
 fn validate_tempo_advance(parent: u64, tip: u64) -> eyre::Result<()> {
-    let expected = parent
-        .checked_add(1)
-        .ok_or_else(|| eyre::eyre!("Tempo block number overflow after {parent}"))?;
     eyre::ensure!(
-        tip == expected,
-        "Zone advanced Tempo from block {parent} to {tip}; expected {expected}"
+        tip > parent,
+        "Zone full import did not advance Tempo from block {parent} to {tip}"
     );
     Ok(())
 }
@@ -602,9 +605,11 @@ mod tests {
     }
 
     #[test]
-    fn tempo_advance_requires_the_exact_successor() {
-        assert!(validate_tempo_advance(10, 11).is_ok());
-        for tip in [9, 10, 12, u64::MAX] {
+    fn tempo_advance_accepts_deferred_ranges() {
+        for tip in [11, 12, u64::MAX] {
+            assert!(validate_tempo_advance(10, tip).is_ok());
+        }
+        for tip in [9, 10] {
             assert!(validate_tempo_advance(10, tip).is_err());
         }
         assert!(validate_tempo_advance(u64::MAX, u64::MAX).is_err());

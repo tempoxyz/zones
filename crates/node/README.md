@@ -3,6 +3,12 @@
 A lightweight L2 node built on [reth](https://github.com/paradigmxyz/reth) that
 derives its state from Tempo L1.
 
+## Re-execution
+
+For `tempo-zone re-execute`, set `L1_HTTP_RPC_URL` to enable anchored L1 reads.
+The portal address is derived from the zone ID encoded in the `--chain` genesis;
+`L1_PORTAL_ADDRESS` is not required or used by re-execution.
+
 ## Overview
 
 A **zone** is a Tempo L2 that processes one L1 block per zone block. The

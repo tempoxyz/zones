@@ -57,13 +57,13 @@ mod tests {
         bytecode::Bytecode,
         context::{
             TxEnv,
-            result::{EVMError, ExecutionResult},
+            result::{EVMError, ExecutionResult, HaltReason},
         },
         database::{EmptyDB, in_memory_db::CacheDB},
         inspector::NoOpInspector,
         state::AccountInfo,
     };
-    use tempo_evm::{TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm};
+    use tempo_evm::{TempoBlockEnv, TempoPoolValidationEvm};
     use tempo_primitives::transaction::Call;
     use tempo_revm::{TempoBatchCallEnv, TempoInvalidTransaction, TempoTxEnv};
     use zone_precompiles::test_utils::MockL1Reader as TestL1;
@@ -127,11 +127,11 @@ mod tests {
         }
     }
 
-    fn assert_not_activated(result: ExecutionResult<TempoHaltReason>) {
+    fn assert_not_activated(result: ExecutionResult<HaltReason>) {
         assert!(matches!(
             result,
             ExecutionResult::Halt {
-                reason: TempoHaltReason::Ethereum(revm::context::result::HaltReason::NotActivated),
+                reason: HaltReason::NotActivated,
                 ..
             }
         ));

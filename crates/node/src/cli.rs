@@ -3,26 +3,29 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
+use tempo_alloy::TempoNetwork;
 use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
+use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
-    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
+    ZoneShadowProverAddOnsConfig, dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
     BatchAnchorConfig, DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
-    MAX_WITHDRAWAL_BATCH_GAS, WithdrawalBatchLimits,
+    HardforkProverAddress, MAX_WITHDRAWAL_BATCH_GAS, ProverAddresses, WithdrawalBatchLimits,
 };
 
 const MAX_LOGS_PER_RESPONSE: u64 = 1_000_000;
@@ -96,10 +99,24 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let components = |spec: Arc<ZoneChainSpec>| {
+    let l1_rpc_url = match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            Some(url)
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    };
+
+    let components = move |spec: Arc<ZoneChainSpec>| {
+        let evm_config = cli_evm_config(spec.clone(), l1_rpc_url.clone());
         (
-            ZoneEvmConfig::new_without_l1(spec.clone()),
-            TempoConsensus::new(spec),
+            evm_config,
+            TempoConsensus::new(spec)
+                .with_allow_equal_timestamps(true)
+                .with_allowed_future_block_time_millis(100),
         )
     };
 
@@ -110,8 +127,6 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
 
-        validate_l1_rpc_url(&args.l1_rpc_url)?;
-        validate_portal_address(args.portal_address)?;
         let zone_id = builder.config().chain.zone_id();
         validate_deprecated_zone_id(args.zone_id, zone_id)?;
 
@@ -120,9 +135,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             manifest_mode,
             builder.config().txpool.max_tx_input_bytes,
         )?;
-        if manifest_mode {
-            // Replicate only durable blocks. Persist every block immediately so followers can
-            // acknowledge each block without waiting for Reth's in-memory buffer to fill.
+        if manifest_mode || args.enable_sequencer {
+            // Settlement and replication only consume durable blocks. Persist every block
+            // immediately so they do not wait for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
@@ -186,6 +201,23 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     })
 }
 
+/// Creates the EVM config used by CLI subcommands, deriving the portal from the chain's zone ID.
+fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_rpc_url: Option<url::Url>) -> ZoneEvmConfig {
+    let Some(l1_rpc_url) = l1_rpc_url else {
+        return ZoneEvmConfig::new_without_l1(chain_spec);
+    };
+
+    let portal_address = tempo_precompiles::zone_factory::portal_address(chain_spec.zone_id());
+    let cache = L1StateCache::default();
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_http(l1_rpc_url)
+        .erased();
+    let runtime_handle = tokio::runtime::Handle::current();
+    let config = L1StateProviderConfig::default();
+    let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+    ZoneEvmConfig::new(chain_spec, l1_provider, portal_address)
+}
+
 /// Load and attach all sequencer resources to the node.
 async fn configure_sequencing(
     args: &ZoneArgs,
@@ -231,13 +263,24 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks,
-        "--sequencer.enable-prover requires a promotable sequencer node"
+        !args.enable_prover || should_sequence_blocks || rpc_only,
+        "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
+    );
+    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone())?;
+    eyre::ensure!(
+        !args.enable_prover || !should_sequence_blocks || prover_addresses.is_some(),
+        "settlement proving requires --sequencer.prover-address for Nitro attestation"
+    );
+    eyre::ensure!(
+        args.shadow_prover_pcrs.is_none() || (rpc_only && !should_sequence_blocks),
+        "--shadow-prover.pcrs requires an rpc_only follower; it is not a settlement policy"
     );
 
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
+            #[cfg(feature = "test-utils")]
+            enable_proof_persistence: false,
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
             // scheduled leader, so it never submits an L1 settlement transaction.
@@ -253,7 +296,15 @@ async fn configure_sequencing(
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
             enable_prover: args.enable_prover,
-            prover_address: args.prover_address.clone(),
+            prover_addresses: prover_addresses.clone(),
+        });
+    } else if args.enable_prover {
+        node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
+            zone_id,
+            batch_anchor_config: BatchAnchorConfig::default(),
+            prover_runtime: prover_addresses
+                .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
+            proof_verifier: args.shadow_prover_pcrs.clone(),
         });
     }
     if let Some(config) = p2p_config {
@@ -320,11 +371,19 @@ async fn load_decryption_keys(
 #[derive(Debug, Clone, Args)]
 pub struct ZoneArgs {
     /// Certified Tempo follower WebSocket RPC URL for finalized L1 state, deposit events, and chain notifications.
-    #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
+    #[arg(
+        long = "l1.rpc-url",
+        env = "L1_RPC_URL",
+        value_parser = parse_l1_rpc_url
+    )]
     pub l1_rpc_url: String,
 
     /// ZonePortal contract address on L1.
-    #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
+    #[arg(
+        long = "l1.portal-address",
+        env = "L1_PORTAL_ADDRESS",
+        value_parser = parse_portal_address
+    )]
     pub portal_address: Address,
 
     /// Deprecated compatibility flag. Ignored.
@@ -516,18 +575,32 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Validate finalized batch candidates with the SPF without changing settlement.
+    /// Require Nitro-attested SPF validation for settlement, or run observational SPF validation
+    /// on an rpc_only follower.
+    ///
+    /// Enables durable witness persistence.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 
-    /// Send witnesses to this remote prover instead of executing the SPF locally.
+    /// Route to an immutable prover release for each exact live L1 hardfork. Repeat per hardfork.
     #[arg(
         long = "sequencer.prover-address",
         env = "SEQUENCER_PROVER_ADDRESS",
-        value_name = "HOST:PORT",
+        value_name = "HARDFORK=HOST:PORT",
+        value_delimiter = ',',
         requires = "enable_prover"
     )]
-    pub prover_address: Option<String>,
+    pub prover_addresses: Vec<HardforkProverAddress>,
+
+    /// Verify shadow Nitro proofs locally against independently approved PCR0, PCR1 and PCR2.
+    /// Works before T13; applies only to RPC followers and never enables settlement enforcement.
+    #[arg(
+        long = "shadow-prover.pcrs",
+        env = "SHADOW_PROVER_PCRS",
+        value_name = "PCR0,PCR1,PCR2",
+        requires = "prover_addresses"
+    )]
+    pub shadow_prover_pcrs: Option<zone_prover::ShadowProofVerifier>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -551,24 +624,27 @@ fn validate_p2p_transaction_size_limit(
     Ok(())
 }
 
-fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
+fn parse_l1_rpc_url(l1_rpc_url: &str) -> Result<String, String> {
     let url: url::Url = l1_rpc_url
         .parse()
-        .map_err(|err| eyre::eyre!("failed parsing --l1.rpc-url as URL: {err}"))?;
-    eyre::ensure!(
-        matches!(url.scheme(), "ws" | "wss"),
-        "--l1.rpc-url must use ws:// or wss://, got `{}`",
-        url.scheme()
-    );
-    Ok(())
+        .map_err(|err| format!("failed parsing --l1.rpc-url as URL: {err}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(format!(
+            "--l1.rpc-url must use ws:// or wss://, got `{}`",
+            url.scheme()
+        ));
+    }
+    Ok(l1_rpc_url.to_owned())
 }
 
-fn validate_portal_address(portal_address: Address) -> eyre::Result<()> {
-    eyre::ensure!(
-        !portal_address.is_zero(),
-        "--l1.portal-address must be nonzero"
-    );
-    Ok(())
+fn parse_portal_address(value: &str) -> Result<Address, String> {
+    let address = value
+        .parse::<Address>()
+        .map_err(|err| format!("invalid --l1.portal-address: {err}"))?;
+    if address.is_zero() {
+        return Err("--l1.portal-address must be nonzero".to_owned());
+    }
+    Ok(address)
 }
 
 fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::Result<()> {
@@ -588,16 +664,146 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer,
-        validate_deprecated_zone_id, validate_l1_rpc_url, validate_p2p_transaction_size_limit,
-        validate_portal_address,
+        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
+        parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
     };
-    use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
+    use zone_sequencer::{MAX_WITHDRAWAL_BATCH_GAS, ProverAddresses};
 
     #[derive(Debug, clap::Parser)]
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[test]
+    fn re_execute_parses_without_portal_address() {
+        use reth_chainspec::EthChainSpec as _;
+
+        let parent = tempo_chainspec::spec::MODERATO.clone();
+        let mut genesis = parent.genesis().clone();
+        genesis.config.chain_id =
+            zone_primitives::constants::zone_chain_id(parent.chain().id(), 11).unwrap();
+        let genesis = serde_json::to_string(&genesis).unwrap();
+        let parsed =
+            ZoneCli::try_parse_from(["tempo-zone", "re-execute", "--chain", &genesis]).unwrap();
+        assert!(matches!(parsed, ZoneCli::Node(_)));
+    }
+
+    #[tokio::test]
+    async fn cli_evm_derives_portal_from_chain_spec() {
+        use alloy_evm::EvmFactory as _;
+        use reth_chainspec::EthChainSpec as _;
+        use reth_evm::ConfigureEvm as _;
+
+        let parent = tempo_chainspec::spec::MODERATO.clone();
+        for (zone_id, expected) in [
+            (
+                11,
+                alloy_primitives::address!("5ad000000000000000000000000000000000000b"),
+            ),
+            (
+                0x0102_0304,
+                alloy_primitives::address!("5ad0000000000000000000000000000001020304"),
+            ),
+        ] {
+            let mut genesis = parent.genesis().clone();
+            genesis.config.chain_id =
+                zone_primitives::constants::zone_chain_id(parent.chain().id(), zone_id).unwrap();
+            let spec =
+                std::sync::Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
+            let config =
+                super::cli_evm_config(spec, Some("http://localhost:8545".parse().unwrap()));
+            let evm = config
+                .evm_factory()
+                .create_evm(revm::database::EmptyDB::default(), Default::default());
+            assert_eq!(
+                evm.ctx().journaled_state.database.l1_state().portal(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_verification_requires_remote_proving_and_complete_measurements() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x5ad0000000000000000000000000000000000002",
+        ];
+        let pcr = "11".repeat(48);
+        let pcrs = format!("{pcr},{pcr},{pcr}");
+        assert!(
+            ZoneArgsParser::try_parse_from(
+                common
+                    .into_iter()
+                    .chain(["--shadow-prover.pcrs", pcrs.as_str(),])
+            )
+            .is_err()
+        );
+        let args = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.enable-prover",
+            "--sequencer.prover-address",
+            "T13=localhost:5000",
+            "--shadow-prover.pcrs",
+            pcrs.as_str(),
+        ]))
+        .unwrap();
+        assert!(args.zone.shadow_prover_pcrs.is_some());
+        assert!(
+            ZoneArgsParser::try_parse_from(common.into_iter().chain([
+                "--sequencer.enable-prover",
+                "--sequencer.prover-address",
+                "T13=localhost:5000",
+                "--shadow-prover.pcrs",
+                "00,00,00",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn prover_addresses_accept_repeated_and_comma_separated_assignments() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer.enable-prover",
+        ];
+        for flags in [
+            vec![
+                "--sequencer.prover-address",
+                "T12=old:5000",
+                "--sequencer.prover-address",
+                "T13=new:5000",
+                "--sequencer.prover-address",
+                "T14=t14:5000",
+            ],
+            vec![
+                "--sequencer.prover-address",
+                "T12=old:5000,T13=new:5000,T14=t14:5000",
+            ],
+        ] {
+            let args = ZoneArgsParser::try_parse_from(common.into_iter().chain(flags))
+                .unwrap()
+                .zone;
+            assert_eq!(args.prover_addresses.len(), 3);
+            assert!(
+                ProverAddresses::new(args.prover_addresses)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let error = ZoneArgsParser::try_parse_from(
+            common
+                .into_iter()
+                .chain(["--sequencer.prover-address", "old:5000"]),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
@@ -660,12 +866,12 @@ mod tests {
 
     #[test]
     fn portal_address_must_be_nonzero() {
-        assert!(validate_portal_address(alloy_primitives::Address::ZERO).is_err());
-        assert!(validate_portal_address(alloy_primitives::Address::repeat_byte(0x11)).is_ok());
+        assert!(parse_portal_address("0x0000000000000000000000000000000000000000").is_err());
+        assert!(parse_portal_address("0x1111111111111111111111111111111111111111").is_ok());
     }
 
     #[test]
-    fn deprecated_args_are_accepted_and_validated() {
+    fn deprecated_zone_id_is_accepted_and_validated() {
         assert!(validate_deprecated_zone_id(None, 7).is_ok());
         assert!(validate_deprecated_zone_id(Some(7), 7).is_ok());
         assert!(validate_deprecated_zone_id(Some(8), 7).is_err());
@@ -678,12 +884,9 @@ mod tests {
             "0x0000000000000000000000000000000000000001",
             "--zone.id",
             "7",
-            "--block.interval-ms",
-            "500",
         ])
         .unwrap();
         assert_eq!(parsed.zone.zone_id, Some(7));
-        assert_eq!(parsed.zone.block_interval_ms, Some(500));
     }
 
     #[test]
@@ -1003,13 +1206,13 @@ mod tests {
 
     #[test]
     fn l1_rpc_url_accepts_websocket_schemes() {
-        validate_l1_rpc_url("ws://localhost:8546").unwrap();
-        validate_l1_rpc_url("wss://rpc.moderato.tempo.xyz").unwrap();
+        parse_l1_rpc_url("ws://localhost:8546").unwrap();
+        parse_l1_rpc_url("wss://rpc.moderato.tempo.xyz").unwrap();
     }
 
     #[test]
     fn l1_rpc_url_rejects_non_websocket_schemes() {
-        assert!(validate_l1_rpc_url("http://localhost:8545").is_err());
-        assert!(validate_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
+        assert!(parse_l1_rpc_url("http://localhost:8545").is_err());
+        assert!(parse_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
     }
 }

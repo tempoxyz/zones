@@ -10,12 +10,16 @@
 
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError, SolInterface};
-use tempo_precompiles::tip20::{IRolesAuth, ITIP20};
+use tempo_precompiles::{
+    dispatch::abi_decoder_config_for_spec,
+    tip20::{IRolesAuth, ITIP20},
+};
 use tempo_zone_contracts::Unauthorized;
 
 use crate::{
     execution::{CallCheck, CallRules},
     privacy::check_caller,
+    storage::StorageCtx,
 };
 
 alloy_sol_types::sol! {
@@ -51,7 +55,8 @@ impl CallRules for TIP20Rules {
 
     /// Apply zone privacy and selector restrictions before upstream execution.
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
+        let config = abi_decoder_config_for_spec(StorageCtx::default().spec());
+        if let Ok(call) = ITIP20::ITIP20Calls::abi_decode_with_config(data, config) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
                     check_caller(caller, &[call.account])
@@ -117,7 +122,7 @@ impl CallRules for TIP20Rules {
             };
         }
 
-        let Ok(call) = IRolesAuth::IRolesAuthCalls::abi_decode(data) else {
+        let Ok(call) = IRolesAuth::IRolesAuthCalls::abi_decode_with_config(data, config) else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
         };
@@ -144,6 +149,7 @@ mod tests {
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::PrecompileResult;
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
         PATH_USD_ADDRESS, Precompile,
@@ -173,16 +179,28 @@ mod tests {
         TIP20Rules
     }
 
+    fn admit_at(
+        rules: &TIP20Rules,
+        data: &[u8],
+        caller: Address,
+        spec: TempoHardfork,
+    ) -> CallCheck {
+        let mut ctx = test_context();
+        ctx.cfg.spec = spec;
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        StorageCtx::enter(&mut storage, || rules.admit(data, caller))
+    }
+
     fn assert_allowed(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller),
+            admit_at(rules, &call.abi_encode(), caller, TempoHardfork::T8),
             CallCheck::Continue
         ));
     }
 
     fn assert_unauthorized(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller),
+            admit_at(rules, &call.abi_encode(), caller, TempoHardfork::T8),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
     }
@@ -200,6 +218,10 @@ mod tests {
 
     impl PrecompileHarness {
         fn new() -> eyre::Result<Self> {
+            Self::new_at(TempoHardfork::T8)
+        }
+
+        fn new_at(spec: TempoHardfork) -> eyre::Result<Self> {
             let token = PATH_USD_ADDRESS;
             let admin = address!("0x00000000000000000000000000000000000000a1");
             let alice = address!("0x00000000000000000000000000000000000000a2");
@@ -210,6 +232,7 @@ mod tests {
             let l1_reader = MockL1Reader::default();
             l1_reader.seed_active_sequencer(PORTAL_ADDRESS, TEMPO_BLOCK_NUMBER, sequencer);
             let mut ctx = test_context();
+            ctx.cfg.spec = spec;
 
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
@@ -288,27 +311,22 @@ mod tests {
         let sequencer = Address::repeat_byte(0x33);
         let outsider = Address::repeat_byte(0x44);
         let rules = TIP20Rules;
-        let mut ctx = test_context();
-        let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+        let balance = ITIP20::balanceOfCall { account: owner };
+        assert_allowed(&rules, balance.clone(), owner);
+        assert_unauthorized(&rules, balance.clone(), sequencer);
+        assert_unauthorized(&rules, balance, outsider);
 
-        StorageCtx::enter(&mut storage, || {
-            let balance = ITIP20::balanceOfCall { account: owner };
-            assert_allowed(&rules, balance.clone(), owner);
-            assert_unauthorized(&rules, balance.clone(), sequencer);
-            assert_unauthorized(&rules, balance, outsider);
+        let allowance = ITIP20::allowanceCall { owner, spender };
+        for caller in [owner, spender] {
+            assert_allowed(&rules, allowance.clone(), caller);
+        }
+        assert_unauthorized(&rules, allowance.clone(), sequencer);
+        assert_unauthorized(&rules, allowance, outsider);
 
-            let allowance = ITIP20::allowanceCall { owner, spender };
-            for caller in [owner, spender] {
-                assert_allowed(&rules, allowance.clone(), caller);
-            }
-            assert_unauthorized(&rules, allowance.clone(), sequencer);
-            assert_unauthorized(&rules, allowance, outsider);
-
-            let nonce = ITIP20::noncesCall { owner };
-            assert_allowed(&rules, nonce.clone(), owner);
-            assert_unauthorized(&rules, nonce.clone(), sequencer);
-            assert_unauthorized(&rules, nonce, outsider);
-        });
+        let nonce = ITIP20::noncesCall { owner };
+        assert_allowed(&rules, nonce.clone(), owner);
+        assert_unauthorized(&rules, nonce.clone(), sequencer);
+        assert_unauthorized(&rules, nonce, outsider);
     }
 
     #[test]
@@ -317,17 +335,19 @@ mod tests {
         let account = Address::repeat_byte(0x22);
         let rules = rules();
 
+        assert_allowed(&rules, ITIP20::BURN_AT_ROLECall {}, caller);
+
         assert_allowed(
             &rules,
             IRolesAuth::hasRoleCall {
                 account,
-                role: *ISSUER_ROLE,
+                role: ISSUER_ROLE,
             },
             caller,
         );
         assert_allowed(
             &rules,
-            IRolesAuth::getRoleAdminCall { role: *ISSUER_ROLE },
+            IRolesAuth::getRoleAdminCall { role: ISSUER_ROLE },
             caller,
         );
     }
@@ -368,7 +388,7 @@ mod tests {
 
         for call in calls {
             assert!(matches!(
-                rules.admit(&call, caller),
+                admit_at(&rules, &call, caller, TempoHardfork::T8),
                 CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
             ));
         }
@@ -442,7 +462,7 @@ mod tests {
     fn role_mutations_are_disallowed() {
         let caller = Address::repeat_byte(0x11);
         let account = Address::repeat_byte(0x22);
-        let role = *ISSUER_ROLE;
+        let role = ISSUER_ROLE;
         let rules = rules();
 
         assert_unauthorized(&rules, IRolesAuth::grantRoleCall { role, account }, caller);
@@ -522,6 +542,24 @@ mod tests {
         let blocked = harness.call(harness.bob, calldata.into(), 100_000, true)?;
         assert!(blocked.is_revert());
         assert_eq!(blocked.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn t11_strict_decoding_precedes_read_privacy() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new_at(TempoHardfork::T11)?;
+        let mut calldata = ITIP20::balanceOfCall {
+            account: harness.alice,
+        }
+        .abi_encode();
+        calldata[4] = 1;
+
+        for caller in [harness.alice, harness.bob] {
+            let output = harness.call(caller, calldata.clone().into(), 100_000, true)?;
+            assert!(output.is_revert());
+            assert!(output.bytes.is_empty());
+        }
 
         Ok(())
     }
@@ -848,7 +886,7 @@ mod tests {
 
     #[test]
     fn burn_at_reverts_without_changing_balances_or_supply() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new()?;
+        let mut harness = PrecompileHarness::new_at(TempoHardfork::T12)?;
         for caller in [
             harness.alice,
             harness.sequencer,
@@ -884,7 +922,7 @@ mod tests {
 
     #[test]
     fn malformed_burn_at_calldata_uses_upstream_dispatch() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new()?;
+        let mut harness = PrecompileHarness::new_at(TempoHardfork::T12)?;
         let calldata = ITIP20::burnAtCall {
             from: harness.alice,
             amount: U256::ONE,
@@ -893,7 +931,7 @@ mod tests {
         for len in [0, 3, 4, calldata.len() - 1] {
             let data = &calldata[..len];
             assert!(matches!(
-                rules().admit(data, harness.alice),
+                admit_at(&rules(), data, harness.alice, harness.ctx.cfg.spec),
                 CallCheck::Continue
             ));
             let expected = {

@@ -270,7 +270,6 @@ mod tests {
             .unwrap();
         let enqueued = L1PortalEvent::WithdrawalBounceBack { token, amount: 10 };
         let failed = L1PortalEvent::WithdrawalProcessed {
-            to: recipient,
             token,
             amount: 10,
             callback_success: false,
@@ -326,7 +325,6 @@ mod tests {
             .unwrap();
         let enqueued = L1PortalEvent::WithdrawalBounceBack { token, amount: 10 };
         let failed = L1PortalEvent::WithdrawalProcessed {
-            to: recipient,
             token,
             amount: 10,
             callback_success: false,
@@ -399,11 +397,7 @@ mod tests {
         assert_eq!(token_state.pending_tempo_refunds, amount);
         assert_eq!(token_state.liability().unwrap(), amount);
 
-        let claimed = L1PortalEvent::RefundClaimed {
-            recipient: Address::repeat_byte(2),
-            token,
-            amount: 10,
-        };
+        let claimed = L1PortalEvent::RefundClaimed { token, amount: 10 };
         state.apply(&from_tempo_events([&claimed])).unwrap();
         let token_state = state.token(token).unwrap();
         assert_eq!(token_state.pending_tempo_refunds, U256::ZERO);
@@ -413,11 +407,7 @@ mod tests {
     #[test]
     fn handles_tempo_refunds_for_unknown_tokens_by_amount() {
         let token = Address::repeat_byte(1);
-        let refund = |amount| L1PortalEvent::RefundClaimed {
-            recipient: Address::repeat_byte(2),
-            token,
-            amount,
-        };
+        let refund = |amount| L1PortalEvent::RefundClaimed { token, amount };
         let mut state = crate::accounting::State::default();
 
         let zero_refund = from_tempo_events([&refund(0)]);

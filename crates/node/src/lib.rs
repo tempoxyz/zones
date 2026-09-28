@@ -10,15 +10,20 @@ use eyre as _;
 pub mod cli;
 pub mod dev;
 pub mod engine;
+mod follower;
 pub mod genesis;
 pub mod node;
 mod replication;
 pub mod role;
 pub mod rpc;
 mod settlement_attestation;
+mod shadow_prover;
 mod tx_forwarding;
 pub mod version;
 
 pub use engine::{EngineExit, ProductionPermit, ZoneEngine};
-pub use node::{ZoneExecutorBuilder, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
+pub use node::{
+    ProverRuntime, ZoneExecutorBuilder, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
+    ZoneShadowProverAddOnsConfig,
+};
 pub use version::init_version_metadata;

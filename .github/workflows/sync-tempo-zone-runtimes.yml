@@ -19,19 +19,23 @@ jobs:
     name: Request AI Zone runtime hardfork sync
     if: github.repository == 'tempoxyz/zones' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@ac946e06f5f59daeebc8d33d8e7b9c9501e2ee98 # 2026-09-28T13-48-02Z-ac946e06
+
       - name: Checkout Zones
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: zones
           submodules: recursive
           persist-credentials: false
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        uses: tempoxyz/gh-actions/actions/setup-foundry@ac946e06f5f59daeebc8d33d8e7b9c9501e2ee98 # 2026-09-28T13-48-02Z-ac946e06
         with:
-          version: nightly
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Compile Zone runtimes
         working-directory: zones/crates/contracts

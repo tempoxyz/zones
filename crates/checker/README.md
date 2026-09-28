@@ -59,6 +59,15 @@ and authenticating the same evidence from the configured archival Tempo RPC. It
 does not re-execute Tempo. Zone post-state is read through Reth's exact-block
 storage provider.
 
+Checkpoint-only blocks must contain only `advanceTempoHeaders` and its successful
+`TempoBlockFinalized` event. They advance the verified Zone height and verify
+unchanged token supply, while retaining the last full import's accounting state
+and Tempo custody anchor. The next full import authenticates every Tempo block
+since that anchor and applies their Portal events in order before its Zone
+events. This includes deposits and token enablements deferred across any number
+of checkpoint-only blocks. The retained accounting anchor survives restarts;
+`imported_tempo_height` reports that anchor rather than header-only progress.
+
 ## Startup and recovery
 
 With `--checker.mode observe`, startup is self-contained:
@@ -99,6 +108,9 @@ or acknowledging the block. Each retry budget is bounded. Tempo retries use
 exponential backoff, while unavailable local Zone state retries once per second.
 Pruned state disables immediately because it cannot recover.
 
+Tempo RPC codes `-32001` (resource not found), `-32002` (resource unavailable),
+and `-32603` (internal error) are retried regardless of message text.
+
 A deterministic mismatch records one durable finding, freezes the verified tip,
 and continues acknowledging subsequent notifications while recording how far the
 unchecked range extends. A finding remains active until the checker is rebuilt
@@ -131,27 +143,27 @@ head advances.
 ### Verified activity logs
 
 After a Zone block is durably verified, the checker emits structured
-`zone::checker` logs for authenticated bridge activity. Zero-value Portal
+`zone::checker` INFO logs for authenticated bridge activity. Zero-value Portal
 refund claims are accounting no-ops and are omitted. Within that block,
 `authenticated` denotes canonical protocol evidence, `accounted` denotes a
 ghost-liability change, and `verified` denotes additional reconciliation
 against TIP-20 movements and exact post-block state.
 
-These fields form the stable schema for log-backed dashboards:
+Activity logs contain only the fields needed by log-backed activity dashboards:
 
-- `activity_schema_version`: currently `1`.
 - `activity_event`: the stable event name from the table below.
-- `activity_source`: `tempo` for Portal activity or `zone` for Zone activity.
 - `activity_id`: `v<schema_version>:<zone_hash>:<activity_source>:<activity_index>`,
   which remains stable if recovery replays the same canonical block under the
-  same schema.
-- `activity_index`: the event's canonical order within its source for the Zone
-  block.
-- `zone_block`, `zone_hash`, `tempo_block`, and `tempo_hash`: exact verified
-  coordinates.
-- Event-specific fields such as `token`, `recipient`, `sender`,
-  `deposit_number`, `withdrawal_index`, and `callback_success`. Monetary
-  `amount` and `fee` fields are decimal strings for both Tempo and Zone values.
+  same schema. The ID retains version `1`, the verified Zone block hash, source
+  (`tempo` or `zone`), and zero-based canonical index within that source.
+- `callback_success`: emitted only for `portal_withdrawal_processed`, allowing
+  dashboards to distinguish successful and failed withdrawal callbacks.
+
+The ID components are not repeated as separate fields. Activity logs omit
+descriptive messages, block heights, Tempo hashes, token and account addresses,
+amounts, fees, and deposit/withdrawal numbers. Kubernetes pod and namespace
+metadata supplied by the log collector still identify the verifier and Zone.
+Operational warnings and errors retain their diagnostic fields.
 
 | `activity_event` | Meaning |
 | --- | --- |

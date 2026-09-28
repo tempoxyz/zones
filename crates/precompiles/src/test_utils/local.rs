@@ -33,9 +33,14 @@ pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_
 pub(crate) type TestContext =
     Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
 
-/// Create an empty test EVM context at the 1st Tempo hardfork with zone deployments.
+/// Create an empty test EVM context at the latest Tempo hardfork affecting Zones.
 pub(crate) fn test_context() -> TestContext {
-    Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::T8)
+    test_context_with_hardfork(TempoHardfork::T13)
+}
+
+/// Create a test EVM context with the specified hardfork.
+pub(crate) fn test_context_with_hardfork(hardfork: TempoHardfork) -> TestContext {
+    Context::new(CacheDB::new(EmptyDB::new()), hardfork)
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.
@@ -96,8 +101,8 @@ pub(crate) fn assert_cp_proof_valid(
     ephemeral_pub: &AffinePoint,
     sequencer_pub: &AffinePoint,
 ) {
-    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof_s.0.into());
-    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof_c.0.into());
+    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof.s.0.into());
+    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof.c.0.into());
     let shared_pt =
         recover_point(&dec.proof.shared_secret.0, dec.proof.shared_secret_y_parity).unwrap();
 

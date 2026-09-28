@@ -73,6 +73,19 @@ Starts an in-process Tempo L1 dev node via `L1TestNode::start()`, then connects
 a zone node via `ZoneTestNode::start_from_l1()`. The `L1Subscriber` receives
 real blocks over WebSocket.
 
+The default L1 starts at T13. Its genesis copies the bundled Solidity verifier
+stub to `0xBEEF` and patches the shared portal bytecode's proof-call target to use
+that address. The patch preserves code length and requires a unique matching
+instruction sequence. Portal state, certificate domains, native precompiles, and
+prewarming retain their normal behavior.
+
+The T12-to-T13 migration-and-settlement test instead creates its portal in genesis
+using the native factory under T12, then points its verifier storage and factory
+metadata at `0xBEEF`, with a handwritten runtime returning ABI-encoded `true` for
+any calldata so both verifier ABIs work. It uses the canonical shared runtimes: the
+T13 upgrade replaces the runtime but preserves the mock verifier in storage.
+Other tests continue creating their zones through real factory transactions.
+
 **Genesis patching in `start_from_l1()`:**
 
 The zone's `TempoState` genesis must be anchored to the L1's current state.

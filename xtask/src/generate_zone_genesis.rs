@@ -1,8 +1,13 @@
 use alloy::{
+    consensus::BlockHeader as _,
     genesis::{ChainConfig, Genesis, GenesisAccount},
-    primitives::{Address, Bytes, U256, address},
+    primitives::{Address, B256, Bytes, U256, address, keccak256},
+    providers::{Provider, ProviderBuilder},
 };
-use eyre::{WrapErr as _, eyre};
+use alloy_eips::BlockNumberOrTag;
+use alloy_rlp::Encodable;
+use alloy_rpc_types_eth::BlockId;
+use eyre::{WrapErr as _, ensure, eyre};
 use reth_evm::{
     Evm as _, EvmEnv, EvmFactory,
     revm::{
@@ -12,7 +17,8 @@ use reth_evm::{
         state::{AccountInfo, Bytecode},
     },
 };
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_T0_BASE_FEE};
 use tempo_contracts::{
     ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
@@ -34,10 +40,13 @@ use tempo_precompiles::{
 };
 use tempo_primitives::TempoHeader;
 use tempo_revm::TempoBlockEnv;
+use tempo_zone_contracts::ZonePortal;
 use zone_precompiles::{
     TempoState as NativeTempoState, ZoneFeeManager, ZoneInbox as NativeZoneInbox,
     ZoneOutbox as NativeZoneOutbox,
 };
+
+use crate::zone_utils::find_zone_deployment_block;
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -59,11 +68,28 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long, default_value_t = 30_000_000)]
     pub(crate) gas_limit: u64,
 
+    /// Existing ZonePortal used to derive the pre-creation genesis anchor.
+    #[arg(
+        long,
+        requires = "l1_rpc_url",
+        conflicts_with = "tempo_genesis_header_rlp"
+    )]
+    pub(crate) tempo_portal: Option<Address>,
+
+    /// Tempo L1 HTTP RPC URL used to derive the pre-creation genesis anchor.
+    #[arg(
+        long,
+        requires = "tempo_portal",
+        conflicts_with = "tempo_genesis_header_rlp"
+    )]
+    pub(crate) l1_rpc_url: Option<String>,
+
     /// Canonical fee token used when a zone transaction omits `fee_token`.
     #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     pub(crate) default_fee_token: Address,
 
-    /// RLP-encoded Tempo genesis header. Defaults to `TempoHeader::default()`.
+    /// RLP-encoded Tempo genesis header. When omitted, `--tempo-portal` derives its pre-creation
+    /// anchor from L1; otherwise the development genesis uses `TempoHeader::default()`.
     #[arg(long)]
     pub(crate) tempo_genesis_header_rlp: Option<String>,
 
@@ -86,6 +112,14 @@ pub(crate) struct GenerateZoneGenesis {
     /// controls whether it remains in the final genesis state.
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
+
+    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
+    #[arg(long)]
+    pub(crate) t12_time: Option<u64>,
+
+    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
+    #[arg(long)]
+    pub(crate) t13_time: Option<u64>,
 }
 
 impl GenerateZoneGenesis {
@@ -94,11 +128,19 @@ impl GenerateZoneGenesis {
             return Err(eyre!("--admin must not be the zero address"));
         }
 
-        let header_rlp = match &self.tempo_genesis_header_rlp {
-            Some(header_rlp) => {
+        let header_rlp = match (
+            &self.tempo_genesis_header_rlp,
+            self.tempo_portal,
+            self.l1_rpc_url.as_deref(),
+        ) {
+            (Some(header_rlp), None, None) => {
                 const_hex::decode(header_rlp).wrap_err("failed to decode hex string")?
             }
-            None => alloy_rlp::encode(TempoHeader::default()),
+            (None, Some(portal), Some(l1_rpc_url)) => {
+                derive_pre_creation_anchor(l1_rpc_url, portal).await?.rlp
+            }
+            (None, None, None) => alloy_rlp::encode(TempoHeader::default()),
+            _ => unreachable!("clap validates genesis anchor arguments"),
         };
 
         let mut evm = setup_zone_evm(self.chain_id, self.gas_limit);
@@ -217,7 +259,7 @@ impl GenerateZoneGenesis {
             );
         }
 
-        let chain_config = ChainConfig {
+        let mut chain_config = ChainConfig {
             chain_id: self.chain_id,
             homestead_block: Some(0),
             eip150_block: Some(0),
@@ -239,6 +281,14 @@ impl GenerateZoneGenesis {
             deposit_contract_address: Some(Address::ZERO),
             ..Default::default()
         };
+
+        for (name, timestamp) in [("t12Time", self.t12_time), ("t13Time", self.t13_time)] {
+            if let Some(timestamp) = timestamp {
+                chain_config
+                    .extra_fields
+                    .insert_value(name.into(), timestamp)?;
+            }
+        }
 
         let mut genesis = Genesis::default()
             .with_gas_limit(self.gas_limit)
@@ -270,6 +320,154 @@ impl GenerateZoneGenesis {
 
         Ok(())
     }
+}
+
+pub(crate) struct PreCreationAnchor {
+    pub(crate) block_number: u64,
+    pub(crate) hash: B256,
+    pub(crate) rlp: Vec<u8>,
+}
+
+async fn derive_pre_creation_anchor(
+    l1_rpc_url: &str,
+    portal: Address,
+) -> eyre::Result<PreCreationAnchor> {
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect(l1_rpc_url)
+        .await
+        .wrap_err_with(|| format!("failed to connect to Tempo L1 RPC {l1_rpc_url}"))?;
+    finalized_pre_creation_anchor(&provider, portal, None).await
+}
+
+pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
+    provider: &P,
+    portal: Address,
+    expected_creation_block: Option<u64>,
+) -> eyre::Result<PreCreationAnchor> {
+    let finalized_header = provider
+        .get_header_by_number(BlockNumberOrTag::Finalized)
+        .await
+        .wrap_err("failed to fetch finalized Tempo L1 block")?
+        .ok_or_else(|| eyre!("Tempo L1 returned no finalized block"))?;
+    let finalized_block = finalized_header.number();
+    if let Some(expected) = expected_creation_block {
+        ensure!(
+            expected <= finalized_block,
+            "ZonePortal creation block {expected} is not finalized yet (finalized Tempo block: {finalized_block})"
+        );
+    }
+    let finalized_block_id = BlockId::number(finalized_block);
+
+    ensure!(
+        !provider
+            .get_code_at(portal)
+            .block_id(finalized_block_id)
+            .await
+            .wrap_err_with(|| {
+                format!(
+                    "failed to fetch code for portal {portal} at finalized block {finalized_block}"
+                )
+            })?
+            .is_empty(),
+        "portal {portal} has no code at finalized Tempo block {finalized_block}; check --tempo-portal and --l1-rpc-url"
+    );
+
+    let zone_id = ZonePortal::new(portal, provider)
+        .zoneId()
+        .block(finalized_block_id)
+        .call()
+        .await
+        .wrap_err_with(|| {
+            format!("failed to read Zone ID from portal {portal} at block {finalized_block}")
+        })?;
+    let creation_block =
+        find_zone_deployment_block(provider, zone_id, portal, finalized_block).await?;
+    if let Some(expected) = expected_creation_block {
+        ensure!(
+            creation_block == expected,
+            "ZoneCreated event is in block {creation_block}, but the creation receipt reported block {expected}"
+        );
+    }
+    let anchor_block = creation_block.checked_sub(1).ok_or_else(|| {
+        eyre!("portal {portal} exists at genesis, so no pre-creation anchor is available")
+    })?;
+    let anchor_block_id = BlockId::number(anchor_block);
+    ensure!(
+        provider
+            .get_code_at(portal)
+            .block_id(anchor_block_id)
+            .await
+            .wrap_err_with(|| {
+                format!("failed to fetch portal code at Tempo anchor block {anchor_block}")
+            })?
+            .is_empty(),
+        "portal {portal} already has code at proposed pre-creation anchor block {anchor_block}"
+    );
+    ensure!(
+        !provider
+            .get_code_at(portal)
+            .block_id(BlockId::number(creation_block))
+            .await
+            .wrap_err_with(|| {
+                format!("failed to fetch portal code at creation block {creation_block}")
+            })?
+            .is_empty(),
+        "portal {portal} has no code at ZoneCreated block {creation_block}"
+    );
+
+    let anchor_header_response = provider
+        .get_header_by_number(anchor_block.into())
+        .await
+        .wrap_err_with(|| format!("failed to fetch Tempo anchor header {anchor_block}"))?
+        .ok_or_else(|| eyre!("Tempo anchor header {anchor_block} was not found"))?;
+    ensure!(
+        anchor_header_response.number() == anchor_block,
+        "Tempo RPC returned header {} for requested anchor block {anchor_block}",
+        anchor_header_response.number()
+    );
+    let response_hash = anchor_header_response.hash;
+    let anchor_header = anchor_header_response.inner.inner;
+    let mut header_rlp = Vec::new();
+    anchor_header.encode(&mut header_rlp);
+    let anchor_hash = keccak256(&header_rlp);
+    ensure!(
+        anchor_hash == response_hash,
+        "Tempo anchor header RLP hash {anchor_hash} does not match RPC block hash {response_hash}"
+    );
+    println!(
+        "Derived pre-creation Tempo anchor block {anchor_block} (hash: {anchor_hash}) for portal {portal}"
+    );
+    Ok(PreCreationAnchor {
+        block_number: anchor_block,
+        hash: anchor_hash,
+        rlp: header_rlp,
+    })
+}
+
+pub(crate) async fn wait_for_finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
+    provider: &P,
+    portal: Address,
+    creation_block: u64,
+) -> eyre::Result<PreCreationAnchor> {
+    const ATTEMPTS: usize = 600;
+    const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    for _ in 0..ATTEMPTS {
+        let finalized = provider
+            .get_header_by_number(BlockNumberOrTag::Finalized)
+            .await
+            .wrap_err("failed to fetch finalized Tempo L1 block")?
+            .ok_or_else(|| eyre!("Tempo L1 returned no finalized block"))?;
+        if finalized.number() >= creation_block {
+            return finalized_pre_creation_anchor(provider, portal, Some(creation_block)).await;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    Err(eyre!(
+        "ZonePortal creation block {creation_block} was not finalized within {} seconds",
+        ATTEMPTS as u128 * POLL_INTERVAL.as_millis() / 1_000
+    ))
 }
 
 fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> TempoEvm<CacheDB<EmptyDB>> {
@@ -407,11 +605,11 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<(
 
             let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
             // Allow address(0) to mint (system transactions use sender=0)
-            token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
+            token.grant_role_internal(Address::ZERO, ISSUER_ROLE)?;
             // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
-            token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+            token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
             // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
-            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
 
             // Set a large supply cap
             token.set_supply_cap(
@@ -529,4 +727,57 @@ fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
     )?;
     println!("Initialized StorageCredits");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn genesis_preserves_explicit_fork_timestamps() {
+        for (t12, t13) in [
+            (None, None),
+            (Some(0), Some(0)),
+            (Some(1789463700), None),
+            (None, Some(1789467300)),
+            (Some(9223372036854775807u64), Some(9223372036854775807u64)),
+        ] {
+            let output = tempfile::tempdir().unwrap();
+            let mut args = vec![
+                "generate-zone-genesis".to_owned(),
+                "--output".to_owned(),
+                output.path().display().to_string(),
+                "--chain-id".to_owned(),
+                "134509785776129".to_owned(),
+                "--admin".to_owned(),
+                "0x1000000000000000000000000000000000000001".to_owned(),
+            ];
+            for (flag, timestamp) in [("--t12-time", t12), ("--t13-time", t13)] {
+                if let Some(timestamp) = timestamp {
+                    args.extend([flag.to_owned(), timestamp.to_string()]);
+                }
+            }
+            GenerateZoneGenesis::try_parse_from(args)
+                .unwrap()
+                .run()
+                .await
+                .unwrap();
+            let genesis = serde_json::from_slice::<Genesis>(
+                &std::fs::read(output.path().join("genesis.json")).unwrap(),
+            )
+            .unwrap();
+            let config = serde_json::to_value(&genesis.config).unwrap();
+            assert_eq!(
+                config.get("t12Time"),
+                t12.map(serde_json::Value::from).as_ref()
+            );
+            assert_eq!(
+                config.get("t13Time"),
+                t13.map(serde_json::Value::from).as_ref()
+            );
+            assert_eq!(genesis.config.chain_id, 134509785776129);
+            assert!(!genesis.alloc.is_empty());
+        }
+    }
 }

@@ -4,12 +4,11 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, address, keccak256},
+    primitives::{Address, address},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
-use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
@@ -22,7 +21,10 @@ use tempo_zone_contracts::{
 };
 use zone_primitives::constants::zone_chain_id;
 
-use crate::zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only};
+use crate::{
+    generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
+    zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only},
+};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct CreateZone {
@@ -95,6 +97,14 @@ pub(crate) struct CreateZone {
     /// Genesis block gas limit for the zone L2.
     #[arg(long, default_value_t = 30_000_000)]
     gas_limit: u64,
+
+    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
+    #[arg(long)]
+    t12_time: Option<u64>,
+
+    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
+    #[arg(long)]
+    t13_time: Option<u64>,
 }
 
 /// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
@@ -202,19 +212,6 @@ impl CreateZone {
             ));
         }
 
-        // Anchor before createZone so the zone replays the creation block and its
-        // initial TokenEnabled event during L1 backfill.
-        let anchor_block_number = provider.get_block_number().await?;
-        let anchor_header = provider
-            .get_header_by_number(anchor_block_number.into())
-            .await?
-            .ok_or_else(|| eyre!("anchor header {anchor_block_number} not found"))?
-            .inner
-            .inner;
-        let mut genesis_header_rlp = Vec::new();
-        anchor_header.encode(&mut genesis_header_rlp);
-        let anchor_hash = keccak256(&genesis_header_rlp);
-
         println!("Admin: {}", self.admin);
         println!("Sequencers: {:?}", self.sequencers);
         println!("Threshold: {}", self.threshold);
@@ -294,18 +291,23 @@ impl CreateZone {
         );
         println!("Sequencer set version: {sequencer_set_version}");
 
+        println!("Waiting for creation block {creation_block} to finalize...");
+        let anchor =
+            wait_for_finalized_pre_creation_anchor(&provider, portal, creation_block).await?;
         println!(
-            "Using pre-creation block {} (hash: {anchor_hash}) as genesis anchor",
-            anchor_header.inner.number
+            "Using pre-creation block {} (hash: {}) as genesis anchor",
+            anchor.block_number, anchor.hash
         );
 
-        let header_rlp_hex = const_hex::encode(&genesis_header_rlp);
+        let header_rlp_hex = const_hex::encode(&anchor.rlp);
 
         let genesis_cmd = crate::generate_zone_genesis::GenerateZoneGenesis {
             output: self.output.clone(),
             chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
+            tempo_portal: None,
+            l1_rpc_url: None,
             default_fee_token: self.initial_token,
             tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
@@ -313,6 +315,8 @@ impl CreateZone {
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
+            t12_time: self.t12_time,
+            t13_time: self.t13_time,
         };
         genesis_cmd.run().await?;
 
@@ -332,7 +336,7 @@ impl CreateZone {
             "sequencers": self.sequencers.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "sequencerThreshold": self.threshold,
             "sequencerSetVersion": sequencer_set_version,
-            "tempoAnchorBlock": anchor_header.inner.number,
+            "tempoAnchorBlock": anchor.block_number,
             "zoneFactory": format!("{}", self.zone_factory),
             "rpcUrl": self.rpc_url,
         });
@@ -359,7 +363,7 @@ impl CreateZone {
         if !self.rpc_url.is_empty() {
             println!("  RPC URL: {}", self.rpc_url);
         }
-        println!("  Tempo anchor block: {}", anchor_header.inner.number);
+        println!("  Tempo anchor block: {}", anchor.block_number);
         println!(
             "  Genesis written to: {}",
             self.output.join("genesis.json").display()
@@ -373,6 +377,7 @@ impl CreateZone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn factory_params_install_the_requested_quorum_atomically() {
@@ -397,10 +402,34 @@ mod tests {
             private_key: String::new(),
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
+            t12_time: None,
+            t13_time: None,
         };
 
         let params = command.factory_params();
         assert_eq!(params.sequencers, sequencers);
         assert_eq!(params.threshold, 2);
+    }
+
+    #[test]
+    fn parses_genesis_fork_overrides() {
+        let command = CreateZone::try_parse_from([
+            "create-zone",
+            "--output",
+            "/tmp/zone",
+            "--admin",
+            "0x1000000000000000000000000000000000000001",
+            "--sequencer",
+            "0x1000000000000000000000000000000000000001",
+            "--private-key",
+            "unused",
+            "--t12-time",
+            "0",
+            "--t13-time",
+            "9223372036854775807",
+        ])
+        .unwrap();
+        assert_eq!(command.t12_time, Some(0));
+        assert_eq!(command.t13_time, Some(9223372036854775807));
     }
 }

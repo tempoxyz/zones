@@ -1,15 +1,13 @@
 use super::*;
-use crate::{abi::DepositType, subscriber::is_fenced_ingestion_error};
+use crate::{abi::DepositType, subscriber::L1SubscriberError};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
+use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
 use serde::Deserialize;
-use std::{
-    collections::{HashSet, VecDeque},
-    time::Duration,
-};
+use std::{collections::HashSet, time::Duration};
 use tempo_alloy::rpc::{TempoHeaderResponse, TempoTransactionReceipt};
 use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 use tempo_primitives::{TempoReceipt, TempoTxType};
@@ -123,60 +121,52 @@ fn make_withdrawal_bounce_back(amount: u128) -> L1Deposit {
     })
 }
 
-struct SequenceLocalTempoCheckpointReader {
-    values: Mutex<VecDeque<NumHash>>,
-    last_value: NumHash,
+fn set_tempo_checkpoint(provider: &MockEthProvider, checkpoint: NumHash) {
+    provider.add_account(
+        crate::abi::TEMPO_STATE_ADDRESS,
+        ExtendedAccount::new(0, U256::ZERO).extend_storage([
+            (
+                B256::from(
+                    crate::precompiles::tempo_state::slots::TEMPO_BLOCK_NUMBER.to_be_bytes(),
+                ),
+                U256::from(checkpoint.number),
+            ),
+            (
+                B256::from(crate::precompiles::tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes()),
+                U256::from_be_slice(checkpoint.hash.as_slice()),
+            ),
+        ]),
+    );
 }
 
-impl SequenceLocalTempoCheckpointReader {
-    fn new(values: impl Into<VecDeque<u64>>) -> Self {
-        let values = values
-            .into()
-            .into_iter()
-            .map(|number| NumHash::new(number, B256::with_last_byte(1)))
-            .collect::<VecDeque<_>>();
-        let last_value = values.back().copied().unwrap_or_default();
-        Self {
-            values: Mutex::new(values),
-            last_value,
-        }
-    }
-
-    fn unanchored() -> Self {
-        Self {
-            values: Mutex::new(VecDeque::from([NumHash::default()])),
-            last_value: NumHash::default(),
-        }
-    }
-}
-
-impl LocalTempoCheckpointReader for SequenceLocalTempoCheckpointReader {
-    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash> {
-        let mut values = self.values.lock();
-        Ok(values.pop_front().unwrap_or(self.last_value))
-    }
-}
-
-fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscriber {
+fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthProvider> {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+    let zone_provider = MockEthProvider::new();
+    set_tempo_checkpoint(&zone_provider, checkpoint);
 
     L1Subscriber {
         config: L1SubscriberConfig {
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
-            enabled_tokens: crate::state::EnabledTokenRegistry::default(),
-            l1_state_cache: crate::L1StateCache::new(),
-            block_tracker: L1BlockTracker::default(),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
-            leadership_sink: None,
-            encryption_keys: None,
             retain_portal_evidence: false,
+            deferred_work_start: None,
         },
-        local_state,
+        zone_provider,
         deposit_queue: DepositQueue::default(),
+        enabled_tokens: crate::state::EnabledTokenRegistry::default(),
+        l1_state_cache: crate::L1StateCache::new(),
+        block_tracker: L1BlockTracker::default(),
+        leadership_sink: None,
+        finalized_batch_submissions: None,
+        encryption_keys: None,
         subscriber_metrics: Default::default(),
     }
+}
+
+fn test_subscriber(block_number: u64) -> L1Subscriber<MockEthProvider> {
+    test_subscriber_with_checkpoint(NumHash::new(block_number, B256::with_last_byte(1)))
 }
 
 #[tokio::test]
@@ -260,6 +250,7 @@ fn observed_portal_events_require_complete_advance_tempo_inputs() {
         }],
         encryption_key_rotations: vec![],
         leader_transitions: vec![],
+        portal_pause: None,
     };
     let deposits: Vec<_> = events
         .deposits
@@ -369,6 +360,41 @@ async fn l1_block_tracker_backpressures_at_one_hour_lookahead() {
 }
 
 #[test]
+fn l1_block_tracker_finalized_target_is_monotonic() {
+    let tracker = L1BlockTracker::default();
+    assert_eq!(tracker.finalized_target(), None);
+
+    tracker.record_finalized_target(200);
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 200,
+            ready: false,
+        })
+    );
+    tracker.mark_finalized_target_ready(200).unwrap();
+    tracker.record_finalized_target(199);
+    tracker.record_finalized_target(200);
+
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 200,
+            ready: true,
+        })
+    );
+
+    tracker.record_finalized_target(201);
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 201,
+            ready: false,
+        })
+    );
+}
+
+#[test]
 fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
     let tracker = L1BlockTracker::default();
     tracker.initialize_consumed_through(10);
@@ -392,7 +418,7 @@ fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
 
 #[test]
 fn subscriber_applies_state_and_records_observation() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let subscriber = test_subscriber(9);
     let header = make_test_header(10);
     let sealed = seal(header);
     let anchor = sealed.num_hash();
@@ -401,23 +427,22 @@ fn subscriber_applies_state_and_records_observation() {
     let cached_value = B256::with_last_byte(2);
 
     {
-        let mut cache = subscriber.config.l1_state_cache.lock();
+        let mut cache = subscriber.l1_state_cache.lock();
         cache.invalidate_and_set_anchor(9, []);
         cache.set(cached_address, cached_slot, 9, cached_value);
     }
     subscriber.update_l1_state_anchor(10, &HashSet::new());
-    subscriber.config.block_tracker.record(anchor).unwrap();
+    subscriber.block_tracker.record(anchor).unwrap();
 
     assert_eq!(
         subscriber
-            .config
             .l1_state_cache
             .lock()
             .get(cached_address, cached_slot, 10),
         Some(cached_value)
     );
     assert_eq!(
-        subscriber.config.block_tracker.observed_hash(10),
+        subscriber.block_tracker.observed_hash(10),
         Some(anchor.hash)
     );
 }
@@ -680,24 +705,21 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 
 #[test]
 fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
+    let subscriber = test_subscriber(0);
     let slot = B256::with_last_byte(1);
     let value = B256::with_last_byte(2);
     let stable_account = address!("0x0000000000000000000000000000000000000ABC");
     let stable_slot = B256::with_last_byte(3);
     let stable_value = B256::with_last_byte(4);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .invalidate_and_set_anchor(9, []);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .set(stable_account, stable_slot, 10, stable_value);
@@ -705,7 +727,6 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     subscriber.update_l1_state_anchor(10, &HashSet::new());
     assert_eq!(
         subscriber
-            .config
             .l1_state_cache
             .lock()
             .get(TIP403_REGISTRY_ADDRESS, slot, 10),
@@ -713,7 +734,7 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     );
 
     subscriber.update_l1_state_anchor(11, &HashSet::from([TIP403_REGISTRY_ADDRESS]));
-    let mut cache = subscriber.config.l1_state_cache.lock();
+    let mut cache = subscriber.l1_state_cache.lock();
     assert_eq!(
         cache.get(stable_account, stable_slot, 11),
         Some(stable_value)
@@ -735,22 +756,24 @@ fn deposit_hash_chain(previous_hash: B256, deposits: &[L1Deposit]) -> B256 {
 
 #[test]
 fn test_resolve_start_block_reads_live_local_state_each_time() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new(
-        VecDeque::from([10, 11]),
-    )));
+    let subscriber = test_subscriber(10);
     assert_eq!(subscriber.resolve_start_block().unwrap(), 11);
+    set_tempo_checkpoint(
+        &subscriber.zone_provider,
+        NumHash::new(11, B256::with_last_byte(1)),
+    );
     assert_eq!(subscriber.resolve_start_block().unwrap(), 12);
 }
 
 #[test]
 fn test_resolve_start_block_accepts_block_zero_with_nonzero_hash() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
+    let subscriber = test_subscriber(0);
     assert_eq!(subscriber.resolve_start_block().unwrap(), 1);
 }
 
 #[test]
 fn test_resolve_start_block_rejects_unanchored_genesis() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::unanchored()));
+    let subscriber = test_subscriber_with_checkpoint(NumHash::default());
     assert!(
         subscriber
             .resolve_start_block()
@@ -762,7 +785,7 @@ fn test_resolve_start_block_rejects_unanchored_genesis() {
 
 #[tokio::test]
 async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let subscriber = test_subscriber(9);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
@@ -775,20 +798,19 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     // Initial sync through finalized block 10.
     asserter.push_success(&Some(header_response(header_10.clone())));
     push_header_and_empty_receipts(&asserter, header_10);
+    asserter.push_success(&Some(header_response(make_test_header(10))));
 
     // One newHeads notification wakes the subscriber. The finalized tag has
     // advanced by two blocks, so both missing blocks must be ingested.
     asserter.push_success(&Some(header_response(header_12.clone())));
     push_header_and_empty_receipts(&asserter, header_11);
-    push_header_and_empty_receipts(&asserter, header_12);
+    push_header_and_empty_receipts(&asserter, header_12.clone());
+    asserter.push_success(&Some(header_response(header_12)));
 
     let err = subscriber
-        .follow_finalized(
-            &l1_provider,
-            futures::stream::iter([Ok::<_, eyre::Report>(())]),
-        )
+        .follow_finalized(&l1_provider, Box::pin(futures::stream::iter([()])))
         .await
-        .expect_err("finite trigger stream should end the subscriber");
+        .expect_err("finite header stream should end the subscriber");
     assert!(err.to_string().contains("head notification stream ended"));
 
     let blocks = subscriber.deposit_queue.drain();
@@ -800,7 +822,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         vec![10, 11, 12]
     );
     assert_eq!(
-        subscriber.config.block_tracker.observed_hash(12),
+        subscriber.block_tracker.observed_hash(12),
         Some(anchor_12.hash),
         "a queue-backed subscriber must retain observations until its consumer prunes them"
     );
@@ -808,8 +830,8 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
 }
 
 #[tokio::test]
-async fn test_head_triggers_falls_back_to_http_block_filter() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([10])));
+async fn test_subscribe_block_headers_falls_back_to_http_block_filter() {
+    let subscriber = test_subscriber(10);
     let asserter = Asserter::new();
     let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .connect_mocked_client(asserter.clone())
@@ -818,31 +840,84 @@ async fn test_head_triggers_falls_back_to_http_block_filter() {
     asserter.push_success(&U256::from(1));
     asserter.push_success(&vec![B256::with_last_byte(1)]);
 
-    let mut triggers = subscriber.head_triggers(&l1_provider).await.unwrap();
-    let trigger = tokio::time::timeout(Duration::from_secs(2), triggers.next())
+    let mut header_stream = subscriber
+        .subscribe_block_headers(&l1_provider)
         .await
-        .expect("HTTP block filter should emit a trigger")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), header_stream.next())
+        .await
+        .expect("HTTP block filter should emit a header notification")
         .expect("HTTP block filter stream should remain open");
 
-    trigger.expect("HTTP block filter request should succeed");
     assert!(asserter.read_q().is_empty());
 }
 
 #[tokio::test]
 async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([10])));
+    let subscriber = test_subscriber(10);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
     asserter.push_success(&Some(header_response(make_test_header(10))));
+    asserter.push_success(&Some(header_response(make_test_header(10))));
 
     let next = subscriber
-        .sync_finalized_once(&l1_provider, 11)
+        .sync_to_finalized(&l1_provider, 11)
         .await
         .unwrap();
 
     assert_eq!(next, 11);
+    assert_eq!(
+        subscriber.block_tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 10,
+            ready: true,
+        })
+    );
     assert!(subscriber.deposit_queue.drain().is_empty());
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn test_sync_finalized_once_extends_a_moving_finalized_target_until_stable() {
+    let subscriber = test_subscriber(9);
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let header_10 = make_test_header(10);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+    let header_12 = make_chained_header(12, header_hash(&header_11));
+
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    push_header_and_empty_receipts(&asserter, header_10);
+    asserter.push_success(&Some(header_response(header_12.clone())));
+    push_header_and_empty_receipts(&asserter, header_11);
+    push_header_and_empty_receipts(&asserter, header_12.clone());
+    asserter.push_success(&Some(header_response(header_12)));
+
+    let next = subscriber
+        .sync_to_finalized(&l1_provider, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(next, 13);
+    assert_eq!(
+        subscriber
+            .deposit_queue
+            .drain()
+            .iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![10, 11, 12]
+    );
+    assert_eq!(
+        subscriber.block_tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 12,
+            ready: true,
+        })
+    );
     assert!(asserter.read_q().is_empty());
 }
 
@@ -890,7 +965,7 @@ fn test_push_log_decodes_withdrawal_bounce_back() {
 
 #[test]
 fn confirmed_token_enabled_event_updates_registry() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
+    let subscriber = test_subscriber(0);
     let token = address!("0x20c0000000000000000000000000000000000001");
     let events = L1PortalEvents {
         enabled_tokens: vec![EnabledToken {
@@ -904,7 +979,7 @@ fn confirmed_token_enabled_event_updates_registry() {
 
     subscriber.apply_enabled_token_events(&events);
 
-    assert!(subscriber.config.enabled_tokens.read().contains(&token));
+    assert!(subscriber.enabled_tokens.read().contains(&token));
 }
 
 #[test]
@@ -1296,7 +1371,7 @@ fn external_enqueue_accepts_duplicate_producers() {
 }
 
 #[test]
-fn confirm_through_is_idempotent_and_drains_stale_entries() {
+fn confirm_operational_through_is_idempotent_and_drains_stale_entries() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
     let h11 = make_chained_header(11, header_hash(&h10));
@@ -1308,20 +1383,139 @@ fn confirm_through_is_idempotent_and_drains_stale_entries() {
             .unwrap();
     }
 
-    queue.confirm_through(anchor).unwrap();
+    queue.confirm_operational_through(anchor).unwrap();
     assert!(queue.peek().is_none());
-    queue.confirm_through(anchor).unwrap();
+    queue.confirm_operational_through(anchor).unwrap();
 }
 
 #[test]
-fn confirm_through_rejects_a_conflicting_anchor() {
+fn canonical_import_reconciliation_is_idempotent_across_checkpoint_and_full_blocks() {
+    let queue = DepositQueue::new();
+    let first = SealedHeader::seal_slow(make_test_header(1));
+    let second = SealedHeader::seal_slow(make_chained_header(2, first.hash()));
+    let third = SealedHeader::seal_slow(make_chained_header(3, second.hash()));
+    for header in [&first, &second, &third] {
+        queue
+            .try_enqueue_sealed(header.clone(), L1PortalEvents::default())
+            .unwrap();
+    }
+
+    queue.defer_through(second.num_hash()).unwrap();
+    queue.defer_through(second.num_hash()).unwrap();
+    assert_eq!(queue.peek().unwrap().header.num_hash(), third.num_hash());
+    assert_eq!(queue.operational_work(third.num_hash()).unwrap().len(), 2);
+
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    assert!(queue.peek().is_none());
+
+    let fourth = SealedHeader::seal_slow(make_chained_header(4, third.hash()));
+    let fifth = SealedHeader::seal_slow(make_chained_header(5, fourth.hash()));
+    queue
+        .try_enqueue_sealed(fourth.clone(), L1PortalEvents::default())
+        .unwrap();
+    queue.defer_through(fourth.num_hash()).unwrap();
+    queue
+        .try_enqueue_sealed(fifth, L1PortalEvents::default())
+        .unwrap();
+
+    // A late replay of block 3 must preserve block 4's newer deferred work.
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    let fifth = queue.peek().unwrap().header.num_hash();
+    assert_eq!(queue.operational_work(fifth).unwrap().len(), 2);
+}
+
+#[test]
+fn deferred_checkpoint_work_survives_until_operational_confirmation() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    let h12 = make_chained_header(12, header_hash(&h11));
+    for header in [h10, h11, h12] {
+        queue
+            .try_enqueue_sealed(seal(header), L1PortalEvents::default())
+            .unwrap();
+    }
+
+    let first = queue.peek().unwrap();
+    queue.defer_through(first.header.num_hash()).unwrap();
+    let second = queue.peek().unwrap();
+    queue.defer_through(second.header.num_hash()).unwrap();
+    let current = queue.peek().unwrap();
+    let work = queue.operational_work(current.header.num_hash()).unwrap();
+    assert_eq!(
+        work.iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![11, 12]
+    );
+
+    queue
+        .confirm_operational(current.header.num_hash())
+        .unwrap();
+    assert!(queue.peek().is_none());
+}
+
+#[test]
+fn restart_can_seed_deferred_checkpoint_work() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    let mut deferred = crate::queue::DeferredPortalWork::new(L1BlockDeposits {
+        header: seal(h10),
+        events: L1PortalEvents::default(),
+    });
+    deferred.push(L1BlockDeposits {
+        header: seal(h11),
+        events: L1PortalEvents::default(),
+    });
+    queue.restore_deferred(deferred).unwrap();
+
+    let h12 = make_chained_header(12, queue.last_enqueued().unwrap().hash);
+    queue
+        .try_enqueue_sealed(seal(h12), L1PortalEvents::default())
+        .unwrap();
+    let current = queue.peek().unwrap();
+    assert_eq!(
+        queue
+            .operational_work(current.header.num_hash())
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn deferred_empty_blocks_use_constant_space() {
+    let mut queue = PendingDeposits::default();
+    let mut parent_hash = B256::ZERO;
+    for number in 1..=10_000 {
+        let header = if number == 1 {
+            make_test_header(number)
+        } else {
+            make_chained_header(number, parent_hash)
+        };
+        let header = seal(header);
+        let anchor = header.num_hash();
+        parent_hash = anchor.hash;
+        queue
+            .try_enqueue(header, L1PortalEvents::default())
+            .unwrap();
+        queue.defer_through(anchor).unwrap();
+    }
+
+    assert_eq!(queue.deferred_event_block_len(), 0);
+}
+
+#[test]
+fn confirm_operational_through_rejects_a_conflicting_anchor() {
     let queue = DepositQueue::new();
     queue
         .try_enqueue_sealed(seal(make_test_header(10)), L1PortalEvents::default())
         .unwrap();
 
     let err = queue
-        .confirm_through(NumHash::new(10, B256::repeat_byte(0xab)))
+        .confirm_operational_through(NumHash::new(10, B256::repeat_byte(0xab)))
         .expect_err("a different hash at the same height must fail");
     assert!(err.to_string().contains("deposit queue holds L1 block 10"));
     assert_eq!(queue.peek().unwrap().header.number(), 10);
@@ -1653,22 +1847,142 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
 }
 
 #[test]
+fn extracts_finalized_batch_submission_for_observer() {
+    let mut subscriber = test_subscriber(9);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    subscriber.finalized_batch_submissions = Some(sender);
+    let portal = subscriber.config.portal_address;
+    let event = crate::abi::LegacyBatchSubmitted {
+        withdrawalBatchIndex: 7,
+        withdrawalQueueIndex: U256::from(3),
+        nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
+        nextBlockHash: B256::repeat_byte(0x22),
+        withdrawalQueueHash: B256::repeat_byte(0x33),
+        lastProcessedDepositNumber: 9,
+    };
+    let log = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: event.encode_log_data(),
+        },
+        log_index: Some(4),
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![log]);
+
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(submissions[0].block, block);
+    assert_eq!(submissions[0].transaction_index, 0);
+    assert_eq!(submissions[0].log_index, 0);
+    assert_eq!(submissions[0].event.nextBlockHash, B256::repeat_byte(0x22));
+}
+
+#[test]
+fn extracts_t13_finalized_batch_submission_for_observer() {
+    let mut subscriber = test_subscriber(9);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    subscriber.finalized_batch_submissions = Some(sender);
+    let portal = subscriber.config.portal_address;
+    let event = crate::abi::BatchSubmitted {
+        withdrawalBatchIndex: 7,
+        withdrawalQueueIndex: U256::from(3),
+        nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
+        nextBlockHash: B256::repeat_byte(0x22),
+        withdrawalQueueHash: B256::repeat_byte(0x33),
+        lastProcessedDepositNumber: 9,
+        lastProcessedEnabledTokenCount: 4,
+    };
+    let log = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: event.encode_log_data(),
+        },
+        log_index: Some(4),
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![log]);
+
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+
+    assert_eq!(submissions.len(), 1);
+    assert!(!submissions[0].is_legacy);
+    assert_eq!(submissions[0].event.lastProcessedEnabledTokenCount, 4);
+    assert_eq!(submissions[0].block, block);
+    assert_eq!(submissions[0].transaction_index, 0);
+    assert_eq!(submissions[0].log_index, 0);
+    assert_eq!(submissions[0].event.nextBlockHash, B256::repeat_byte(0x22));
+}
+
+#[test]
+fn finalized_batch_observer_ignores_rpc_log_metadata() {
+    let mut subscriber = test_subscriber(9);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    subscriber.finalized_batch_submissions = Some(sender);
+    let portal = subscriber.config.portal_address;
+    let malformed = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: alloy_primitives::LogData::new_unchecked(
+                vec![crate::abi::LegacyBatchSubmitted::SIGNATURE_HASH],
+                Bytes::from_static(b"garbage"),
+            ),
+        },
+        log_index: Some(4),
+        ..Default::default()
+    };
+    let missing_index = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: crate::abi::LegacyBatchSubmitted {
+                withdrawalBatchIndex: 7,
+                withdrawalQueueIndex: U256::from(3),
+                nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
+                nextBlockHash: B256::repeat_byte(0x22),
+                withdrawalQueueHash: B256::repeat_byte(0x33),
+                lastProcessedDepositNumber: 9,
+            }
+            .encode_log_data(),
+        },
+        log_index: None,
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(
+        10,
+        B256::with_last_byte(0x10),
+        vec![malformed, missing_index],
+    );
+
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(submissions[0].block, block);
+    assert_eq!(submissions[0].transaction_index, 0);
+    assert_eq!(submissions[0].log_index, 1);
+}
+
+#[test]
 fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let mut subscriber = test_subscriber(9);
     subscriber.config.retain_portal_evidence = true;
     let portal = subscriber.config.portal_address;
 
-    // A recognized topic0 with garbage payload must fence the whole block, never be skipped.
+    // A recognized topic0 with garbage payload must reject the whole block, never be skipped.
     let corrupt = corrupt_recognized_portal_log(portal);
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![corrupt]);
 
-    let err = subscriber.extract_events(10, &[receipt]).unwrap_err();
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+    let err = subscriber.extract_events(block, &[receipt]).unwrap_err();
     assert!(
         err.to_string()
             .contains("failed to decode a portal event in L1 block 10")
     );
 
-    // Unknown signatures are still skipped: a pre-upgrade contract event cannot fence us.
+    // Unknown signatures are still skipped: a pre-upgrade contract event cannot reject the block.
     let unknown = Log {
         inner: alloy_primitives::Log {
             address: portal,
@@ -1680,7 +1994,7 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let (events, _, portal_logs, _) = subscriber.extract_events(block, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
     assert_eq!(portal_logs.unwrap().len(), 1);
@@ -1688,12 +2002,12 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
 
 #[test]
 fn pause_events_invalidate_cached_portal_storage() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let account = address!("0x0000000000000000000000000000000000000123");
     let pause_slot = B256::with_last_byte(25);
     {
-        let mut cache = subscriber.config.l1_state_cache.lock();
+        let mut cache = subscriber.l1_state_cache.lock();
         cache.set(portal, pause_slot, 0, B256::with_last_byte(0x42));
     }
     let logs = vec![
@@ -1718,22 +2032,20 @@ fn pause_events_invalidate_cached_portal_storage() {
     ];
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
-    let (_, invalidated, _) = subscriber.extract_events(1, &[receipt]).unwrap();
+    let block = NumHash::new(1, B256::with_last_byte(0x10));
+    let (events, invalidated, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert_eq!(events.portal_pause, Some(true));
     assert!(invalidated.contains(&portal));
     subscriber.update_l1_state_anchor(1, &invalidated);
     assert_eq!(
-        subscriber
-            .config
-            .l1_state_cache
-            .lock()
-            .get(portal, pause_slot, 1),
+        subscriber.l1_state_cache.lock().get(portal, pause_slot, 1),
         None
     );
 }
 
 #[tokio::test]
-async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
+    let subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
 
@@ -1751,19 +2063,73 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
     asserter.push_success(&Some(vec![receipt]));
 
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .sync_to_finalized(&l1_provider, 10)
         .await
         .unwrap_err();
-    assert!(is_fenced_ingestion_error(&err));
+    assert!(matches!(
+        err,
+        L1SubscriberError::Fatal {
+            block_number: 10,
+            stage: "portal event decoding",
+            ..
+        }
+    ));
     assert_eq!(queue.last_enqueued(), None);
-    assert_eq!(subscriber.config.block_tracker.latest(), None);
+    assert_eq!(subscriber.block_tracker.latest(), None);
+}
+
+#[tokio::test]
+async fn sync_fails_fatally_when_finalized_batch_observer_is_closed() {
+    let mut subscriber = test_subscriber(9);
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    drop(receiver);
+    subscriber.finalized_batch_submissions = Some(sender);
+    let portal = subscriber.config.portal_address;
+    let event = crate::abi::LegacyBatchSubmitted {
+        withdrawalBatchIndex: 7,
+        withdrawalQueueIndex: U256::from(3),
+        nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
+        nextBlockHash: B256::repeat_byte(0x22),
+        withdrawalQueueHash: B256::repeat_byte(0x33),
+        lastProcessedDepositNumber: 9,
+    };
+    let log = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: event.encode_log_data(),
+        },
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(10, B256::ZERO, vec![log]);
+    let mut header_10 = make_test_header(10);
+    header_10.inner.receipts_root = calculate_test_receipts_root(std::slice::from_ref(&receipt));
+    header_10.inner.logs_bloom = *receipt.inner.inner.bloom_ref();
+
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(header_response(header_10)));
+    asserter.push_success(&Some(vec![receipt]));
+
+    let err = subscriber
+        .sync_to_finalized(&l1_provider, 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        L1SubscriberError::Fatal {
+            block_number: 10,
+            stage: "finalized batch observer delivery",
+            ..
+        }
+    ));
 }
 
 #[test]
 fn ordinary_subscriber_errors_remain_retryable() {
-    assert!(!is_fenced_ingestion_error(&eyre::eyre!(
-        "transient L1 RPC failure"
-    )));
+    let error = L1SubscriberError::Other(eyre::eyre!("transient L1 RPC failure"));
+    assert!(error.should_retry());
 }
 
 #[derive(Debug)]
@@ -1787,7 +2153,7 @@ impl LeadershipSink for RecordingLeadershipSink {
 
 #[tokio::test]
 async fn sync_applies_leadership_transition_before_enqueueing_the_activation_block() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let mut subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
     let sink = Arc::new(RecordingLeadershipSink {
@@ -1795,7 +2161,7 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
         seen: parking_lot::Mutex::new(Vec::new()),
         fail: false,
     });
-    subscriber.config.leadership_sink = Some(sink.clone());
+    subscriber.leadership_sink = Some(sink.clone());
 
     let new_leader = address!("0x0000000000000000000000000000000000002222");
     let log = leader_updated_log(portal, Address::ZERO, new_leader, 2, 10);
@@ -1810,10 +2176,11 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(vec![receipt]));
+    asserter.push_success(&Some(header_response(header_10)));
 
     assert_eq!(
         subscriber
-            .sync_finalized_once(&l1_provider, 10)
+            .sync_to_finalized(&l1_provider, 10)
             .await
             .unwrap(),
         11
@@ -1833,11 +2200,11 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
 }
 
 #[tokio::test]
-async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
+    let mut subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
-    subscriber.config.leadership_sink = Some(Arc::new(RecordingLeadershipSink {
+    subscriber.leadership_sink = Some(Arc::new(RecordingLeadershipSink {
         queue: queue.clone(),
         seen: parking_lot::Mutex::new(Vec::new()),
         fail: true,
@@ -1858,13 +2225,217 @@ async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition()
     asserter.push_success(&Some(vec![receipt]));
 
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .sync_to_finalized(&l1_provider, 10)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("leadership transition"));
-    assert!(is_fenced_ingestion_error(&err));
+    assert!(matches!(
+        err,
+        L1SubscriberError::Fatal {
+            block_number: 10,
+            stage: "leadership transition application",
+            ..
+        }
+    ));
 
-    // Nothing was enqueued and no observation advanced: the block is fenced, not half-applied.
+    // Nothing was enqueued and no observation advanced: the block was not half-applied.
     assert_eq!(queue.last_enqueued(), None);
-    assert_eq!(subscriber.config.block_tracker.latest(), None);
+    assert_eq!(subscriber.block_tracker.latest(), None);
+}
+
+#[test]
+fn portal_pause_events_record_the_final_state_in_log_order() {
+    let subscriber = test_subscriber(9);
+    let portal = subscriber.config.portal_address;
+    let account = address!("0x0000000000000000000000000000000000000123");
+    let log = |data| Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data,
+        },
+        ..Default::default()
+    };
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+
+    let receipt = make_receipt_with_logs(10, block.hash, vec![]);
+    let (events, _, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert_eq!(events.portal_pause, None);
+
+    let receipt = make_receipt_with_logs(
+        10,
+        block.hash,
+        vec![
+            log(crate::abi::ZonePortal::PortalPaused { account }.encode_log_data()),
+            log(crate::abi::ZonePortal::PortalResumed { account }.encode_log_data()),
+        ],
+    );
+    let (events, _, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert_eq!(events.portal_pause, Some(false));
+
+    // The pause is applied during ingestion and must not be carried into operational work.
+    let mut operational = L1PortalEvents::default();
+    operational.extend_operational(events);
+    assert_eq!(operational.portal_pause, None);
+}
+
+#[test]
+fn l1_block_tracker_applies_only_newer_portal_pause_observations() {
+    let tracker = L1BlockTracker::default();
+    let block = |number: u64| NumHash::new(number, B256::with_last_byte(number as u8));
+    assert!(!tracker.portal_paused());
+    assert_eq!(tracker.portal_pause_block(), None);
+
+    assert!(tracker.observe_portal_pause(block(11), true).unwrap());
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.portal_pause_block(), Some(block(11)));
+
+    // Replayed older events cannot regress the finalized state.
+    assert!(!tracker.observe_portal_pause(block(10), false).unwrap());
+    assert!(tracker.portal_paused());
+    // A repeated observation is idempotent and reports no change.
+    assert!(!tracker.observe_portal_pause(block(11), true).unwrap());
+    assert!(!tracker.observe_portal_pause(block(12), true).unwrap());
+    assert_eq!(tracker.portal_pause_block(), Some(block(12)));
+
+    assert!(tracker.observe_portal_pause(block(13), false).unwrap());
+    assert!(!tracker.portal_paused());
+}
+
+#[test]
+fn l1_block_tracker_rejects_conflicting_portal_pause_observations() {
+    let tracker = L1BlockTracker::default();
+    let block = NumHash::new(11, B256::repeat_byte(1));
+    tracker.observe_portal_pause(block, true).unwrap();
+
+    assert!(tracker.observe_portal_pause(block, false).is_err());
+    assert!(
+        tracker
+            .observe_portal_pause(NumHash::new(11, B256::repeat_byte(2)), true)
+            .is_err()
+    );
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.portal_pause_block(), Some(block));
+}
+
+#[tokio::test]
+async fn sync_applies_portal_pause_before_enqueueing_the_pause_block() {
+    let subscriber = test_subscriber(9);
+    let portal = subscriber.config.portal_address;
+    let tracker = subscriber.block_tracker.clone();
+    let queue = subscriber.deposit_queue.clone();
+    let log = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: crate::abi::ZonePortal::PortalPaused {
+                account: Address::repeat_byte(1),
+            }
+            .encode_log_data(),
+        },
+        ..Default::default()
+    };
+    let mut header_10 = make_test_header(10);
+    let receipt = make_receipt_with_logs(10, B256::ZERO, vec![log]);
+    header_10.inner.receipts_root = calculate_test_receipts_root(std::slice::from_ref(&receipt));
+    header_10.inner.logs_bloom = *receipt.inner.inner.bloom_ref();
+    let anchor = seal(header_10.clone()).num_hash();
+
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(vec![receipt]));
+    asserter.push_success(&Some(header_response(header_10)));
+
+    assert_eq!(
+        subscriber
+            .sync_to_finalized(&l1_provider, 10)
+            .await
+            .unwrap(),
+        11
+    );
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.portal_pause_block(), Some(anchor));
+    assert_eq!(queue.last_enqueued(), Some(anchor));
+}
+
+#[tokio::test]
+async fn paused_subscriber_wedges_at_lookahead_then_resumes_contiguously() {
+    let checkpoint = seal(make_test_header(0)).num_hash();
+    let subscriber = test_subscriber_with_checkpoint(checkpoint);
+    let tracker = subscriber.block_tracker.clone();
+    let queue = subscriber.deposit_queue.clone();
+    tracker.observe_portal_pause(checkpoint, true).unwrap();
+    assert_eq!(subscriber.next_block_to_sync().unwrap(), 1);
+
+    let tip = MAX_L1_LOOKAHEAD_BLOCKS + 1;
+    let mut parent = checkpoint.hash;
+    let mut headers = Vec::new();
+    for number in 1..=tip {
+        let header = make_chained_header(number, parent);
+        parent = header_hash(&header);
+        headers.push(header);
+    }
+    let asserter = Asserter::new();
+    asserter.push_success(&Some(header_response(headers.last().unwrap().clone())));
+    for header in &headers[..headers.len() - 1] {
+        push_header_and_empty_receipts(&asserter, header.clone());
+    }
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let sync = subscriber.sync_to_finalized(&provider, 1);
+    tokio::pin!(sync);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            result = &mut sync => panic!("ingestion must wedge at the lookahead bound: {result:?}"),
+            () = async {
+                while tracker.latest().is_none_or(|latest| latest.number < tip - 1) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            } => {}
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut sync)
+            .await
+            .is_err(),
+        "ingestion must wedge at the lookahead bound while nothing is consumed"
+    );
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.latest().map(|block| block.number), Some(tip - 1));
+    assert_eq!(
+        queue.last_enqueued().map(|block| block.number),
+        Some(tip - 1)
+    );
+    assert!(!tracker.has_capacity_for(tip));
+    assert!(
+        asserter.read_q().is_empty(),
+        "the block beyond the lookahead must not be fetched while wedged"
+    );
+
+    // The poller observes resume (or expiry) independently of ingestion, the engine consumes the
+    // first queued anchor, and pruning releases exactly one block of capacity.
+    tracker
+        .observe_portal_pause(NumHash::new(tip, parent), false)
+        .unwrap();
+    let first = queue.peek().unwrap().header.num_hash();
+    queue.confirm(first).unwrap();
+    tracker.prune_through(first.number);
+    push_header_and_empty_receipts(&asserter, headers.last().unwrap().clone());
+    // The unchanged finalized target lets the sync return.
+    asserter.push_success(&Some(header_response(headers.last().unwrap().clone())));
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), &mut sync)
+            .await
+            .unwrap()
+            .unwrap(),
+        tip + 1
+    );
+    assert!(!tracker.portal_paused());
+    assert_eq!(tracker.latest(), Some(NumHash::new(tip, parent)));
+    assert_eq!(queue.last_enqueued(), Some(NumHash::new(tip, parent)));
+    assert!(asserter.read_q().is_empty());
 }

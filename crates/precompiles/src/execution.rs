@@ -88,7 +88,7 @@ pub(crate) trait CallRules: 'static {
         None
     }
 
-    /// Applies pure Zone-specific admission rules before storage setup.
+    /// Applies Zone-specific admission rules.
     fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
         CallCheck::Continue
     }
@@ -115,7 +115,13 @@ pub(crate) fn create_precompile(
         }
 
         let (data, caller) = (input.data, input.caller);
-        if input.gas < input_cost(data.len()) {
+        let Ok(input_gas) = input_cost(env.cfg.spec, data.len()) else {
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::OutOfGas,
+                input.reservoir,
+            ));
+        };
+        if input.gas < input_gas {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
                 input.reservoir,
@@ -416,6 +422,40 @@ mod tests {
         assert!(!executed.get());
         assert_eq!(rejected.gas_used, FIXED_GAS);
         assert_eq!(rejected.bytes, Bytes::from_static(b"denied"));
+    }
+
+    #[test]
+    fn input_gas_threshold_tracks_t11() {
+        let calldata = [0u8; 32];
+
+        for (spec, required_gas) in [(TempoHardfork::T10, 6), (TempoHardfork::T11, 30)] {
+            let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+            cfg.spec = spec;
+            let env = ZonePrecompileEnv::new(
+                &cfg,
+                zone_hardfork::ZoneHardfork::Z0,
+                StorageActions::disabled(),
+                Rc::new(RefCell::new(NonCreditableSlots::empty())),
+            );
+            let precompile = create_precompile("InputGasTest", &env, NoCallRules, |_, _| {
+                Ok(StorageCtx::default().success_output(Bytes::new()))
+            });
+            let mut ctx = test_context();
+
+            let insufficient = precompile
+                .call(input(&mut ctx, &calldata, Address::ZERO, required_gas - 1))
+                .unwrap();
+            assert_eq!(
+                insufficient.halt_reason(),
+                Some(&PrecompileHalt::OutOfGas),
+                "{spec:?} must require {required_gas} input gas"
+            );
+
+            let sufficient = precompile
+                .call(input(&mut ctx, &calldata, Address::ZERO, required_gas))
+                .unwrap();
+            assert!(!sufficient.is_halt(), "{spec:?} must accept its exact cost");
+        }
     }
 
     struct FatalRules;
