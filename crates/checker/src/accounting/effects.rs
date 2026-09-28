@@ -99,6 +99,8 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
                     change: BalanceChange::Credit(U256::from(amount)),
                 });
             }
+            // Admission escrows no principal; the Zone debit arrives as ForcedWithdrawalRequested.
+            L1PortalEvent::ForcedExitsActivated | L1PortalEvent::ForcedExitRequested => {}
             L1PortalEvent::RefundClaimed { amount: 0, .. } => {}
             L1PortalEvent::RefundClaimed { token, amount, .. } => {
                 effects.push(Effect::Liability {

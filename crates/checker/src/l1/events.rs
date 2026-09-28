@@ -43,6 +43,10 @@ pub(crate) enum L1PortalEvent {
         amount: u128,
         bounceback_fee: u128,
     },
+    /// The admin irreversibly enabled forced exits on the Portal.
+    ForcedExitsActivated,
+    /// A forced exit admitted to the deposit queue. It escrows no principal.
+    ForcedExitRequested,
     /// Forced-exit compensation the admin could not receive, parked as a claimable refund.
     ForcedExitCompensationPending {
         token: Address,
@@ -139,10 +143,12 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             ignored!(ZonePortal::BatchSubmitted_1, "BatchSubmitted_1")
         }
         ZonePortal::ForcedExitsActivated::SIGNATURE_HASH => {
-            ignored!(ZonePortal::ForcedExitsActivated, "ForcedExitsActivated")
+            decode_event::<ZonePortal::ForcedExitsActivated>(log, "ForcedExitsActivated", block)?;
+            L1PortalEvent::ForcedExitsActivated
         }
         ZonePortal::ForcedExitRequested::SIGNATURE_HASH => {
-            ignored!(ZonePortal::ForcedExitRequested, "ForcedExitRequested")
+            decode_event::<ZonePortal::ForcedExitRequested>(log, "ForcedExitRequested", block)?;
+            L1PortalEvent::ForcedExitRequested
         }
         ZonePortal::ForcedExitCompensationPending::SIGNATURE_HASH => {
             let e = decode_event::<ZonePortal::ForcedExitCompensationPending>(
@@ -395,6 +401,27 @@ mod tests {
         }
         .encode_log_data())
     }
+    fn forced_exit() -> alloy_rpc_types_eth::Log {
+        log(ZonePortal::ForcedExitRequested {
+            depositNumber: 2,
+            entry: tempo_zone_contracts::ForcedExit {
+                requestId: 1,
+                token: Address::repeat_byte(21),
+                keyIndex: U256::ZERO,
+                encrypted: tempo_zone_contracts::DepositPayload {
+                    ephemeralPubkeyX: B256::ZERO,
+                    ephemeralPubkeyYParity: 0,
+                    ciphertext: Default::default(),
+                    nonce: [0; 12].into(),
+                    tag: [0; 16].into(),
+                },
+                feePayer: Address::repeat_byte(22),
+                requestedAtBlock: BLOCK,
+                requestedAtTime: 100,
+            },
+        }
+        .encode_log_data())
+    }
     fn refund() -> alloy_rpc_types_eth::Log {
         log(ZonePortal::RefundClaimed {
             recipient: Address::repeat_byte(17),
@@ -422,6 +449,7 @@ mod tests {
                 token(),
                 batch(U256::ONE),
                 log(ZonePortal::ForcedExitsActivated { version: 1 }.encode_log_data()),
+                forced_exit(),
                 withdrawal(),
                 withdrawal_bounce(),
                 deposit_bounce(),
@@ -431,7 +459,7 @@ mod tests {
             ],
         )])
         .unwrap();
-        assert_eq!(events.len(), 8);
+        assert_eq!(events.len(), 10);
         assert!(matches!(
             events[0],
             L1PortalEvent::DepositMade {
@@ -440,28 +468,30 @@ mod tests {
             }
         ));
         assert!(matches!(events[1], L1PortalEvent::TokenEnabled { .. }));
+        assert!(matches!(events[2], L1PortalEvent::ForcedExitsActivated));
+        assert!(matches!(events[3], L1PortalEvent::ForcedExitRequested));
         assert!(matches!(
-            events[2],
+            events[4],
             L1PortalEvent::WithdrawalProcessed { .. }
         ));
         assert!(matches!(
-            events[3],
+            events[5],
             L1PortalEvent::WithdrawalBounceBack { .. }
         ));
-        assert!(matches!(events[4], L1PortalEvent::DepositBounceBack { .. }));
+        assert!(matches!(events[6], L1PortalEvent::DepositBounceBack { .. }));
         assert!(matches!(
-            events[5],
+            events[7],
             L1PortalEvent::DepositBounceBackPending { .. }
         ));
         assert!(matches!(
-            events[6],
+            events[8],
             L1PortalEvent::ForcedExitCompensationPending {
                 amount: 100_000,
                 ..
             }
         ));
         assert!(matches!(
-            events[7],
+            events[9],
             L1PortalEvent::RefundClaimed { amount: 42, .. }
         ));
     }
@@ -490,6 +520,10 @@ mod tests {
             (
                 ZonePortal::ForcedExitsActivated::SIGNATURE_HASH,
                 "ForcedExitsActivated",
+            ),
+            (
+                ZonePortal::ForcedExitRequested::SIGNATURE_HASH,
+                "ForcedExitRequested",
             ),
         ] {
             let bad = log(alloy_primitives::LogData::new_unchecked(
