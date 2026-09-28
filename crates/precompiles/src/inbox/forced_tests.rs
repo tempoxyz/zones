@@ -708,7 +708,11 @@ fn forced_balance_boundaries_and_classification_order() -> eyre::Result<()> {
                 .write(token_enabled)
         })?;
         let executed = execute(&mut h, vec![entry])?;
-        assert_eq!(executed.results, std::slice::from_ref(&expected), "{amount}");
+        assert_eq!(
+            executed.results,
+            std::slice::from_ref(&expected),
+            "{amount}"
+        );
         assert!(consumed(&mut h, 1)?);
         let pending = h.pending_withdrawals()?;
         if expected == ForcedExitResult::Exited {
