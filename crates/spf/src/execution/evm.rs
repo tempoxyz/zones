@@ -94,6 +94,12 @@ pub(crate) fn execute_zone_block(
         .block_hashes
         .insert(parent_number, block.parent_hash);
 
+    if parent.inner.base_fee_per_gas.is_none() {
+        return Err(Error::MissingParentBaseFee {
+            block_index: zone_block_index,
+        });
+    }
+
     let attributes = next_block_env_attributes(evm_config.chain_spec(), parent, block)?;
     let env = evm_config
         .next_evm_env(parent, &attributes)
@@ -343,7 +349,8 @@ fn decode_user_transactions(
     block_index: usize,
     transactions: &[Bytes],
 ) -> Result<Vec<Recovered<TempoTxEnvelope>>, Error> {
-    let mut decoded = Vec::with_capacity(transactions.len());
+    // Not using with_capacity because input is untrusted.
+    let mut decoded = Vec::new();
     for (transaction_index, encoded_transaction) in transactions.iter().enumerate() {
         let transaction =
             TempoTxEnvelope::decode_2718_exact(encoded_transaction).map_err(|_| {

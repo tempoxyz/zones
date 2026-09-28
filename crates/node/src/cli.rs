@@ -271,6 +271,10 @@ async fn configure_sequencing(
         !args.enable_prover || !should_sequence_blocks || prover_addresses.is_some(),
         "settlement proving requires --sequencer.prover-address for Nitro attestation"
     );
+    eyre::ensure!(
+        args.shadow_prover_pcrs.is_none() || (rpc_only && !should_sequence_blocks),
+        "--shadow-prover.pcrs requires an rpc_only follower; it is not a settlement policy"
+    );
 
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
@@ -300,6 +304,7 @@ async fn configure_sequencing(
             batch_anchor_config: BatchAnchorConfig::default(),
             prover_runtime: prover_addresses
                 .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
+            proof_verifier: args.shadow_prover_pcrs.clone(),
         });
     }
     if let Some(config) = p2p_config {
@@ -586,6 +591,16 @@ pub struct ZoneArgs {
         requires = "enable_prover"
     )]
     pub prover_addresses: Vec<HardforkProverAddress>,
+
+    /// Verify shadow Nitro proofs locally against independently approved PCR0, PCR1 and PCR2.
+    /// Works before T13; applies only to RPC followers and never enables settlement enforcement.
+    #[arg(
+        long = "shadow-prover.pcrs",
+        env = "SHADOW_PROVER_PCRS",
+        value_name = "PCR0,PCR1,PCR2",
+        requires = "prover_addresses"
+    )]
+    pub shadow_prover_pcrs: Option<zone_prover::ShadowProofVerifier>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -706,6 +721,46 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn shadow_verification_requires_remote_proving_and_complete_measurements() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x5ad0000000000000000000000000000000000002",
+        ];
+        let pcr = "11".repeat(48);
+        let pcrs = format!("{pcr},{pcr},{pcr}");
+        assert!(
+            ZoneArgsParser::try_parse_from(
+                common
+                    .into_iter()
+                    .chain(["--shadow-prover.pcrs", pcrs.as_str(),])
+            )
+            .is_err()
+        );
+        let args = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.enable-prover",
+            "--sequencer.prover-address",
+            "T13=localhost:5000",
+            "--shadow-prover.pcrs",
+            pcrs.as_str(),
+        ]))
+        .unwrap();
+        assert!(args.zone.shadow_prover_pcrs.is_some());
+        assert!(
+            ZoneArgsParser::try_parse_from(common.into_iter().chain([
+                "--sequencer.enable-prover",
+                "--sequencer.prover-address",
+                "T13=localhost:5000",
+                "--shadow-prover.pcrs",
+                "00,00,00",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]

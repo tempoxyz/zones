@@ -1,4 +1,8 @@
-//! Backpressured SPF validation and Nitro proof generation for settlement batches.
+//! Backpressured SPF validation, Nitro proof generation and verification for Zone batches.
+
+mod verification;
+
+use verification::{ProofVerification, verifier_call, verify_proof};
 
 use std::{
     collections::BTreeMap,
@@ -35,7 +39,7 @@ use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
-    ProverConnection, VerifierMode, VerifyRequest, VerifyResponse,
+    ProverConnection, ShadowProofVerifier, VerifierMode, VerifyRequest, VerifyResponse,
 };
 use zone_rpc::ZoneDebugApi;
 use zone_spf::{
@@ -68,6 +72,9 @@ pub struct SettlementProverConfig {
     /// Remote Nitro prover endpoints. When absent, execute the SPF in-process.
     /// Settlement requires a remote NSM attestation; shadow validation does not.
     pub prover_addresses: Option<ProverAddresses>,
+    /// Optional pinned PCR policy for local verification. Without it, remote proofs are
+    /// checked against the portal's L1 verifier after T13.
+    pub proof_verifier: Option<ShadowProofVerifier>,
 }
 
 impl fmt::Debug for SettlementProverConfig {
@@ -79,6 +86,7 @@ impl fmt::Debug for SettlementProverConfig {
             .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
             .field("prover_addresses", &self.prover_addresses)
+            .field("proof_verifier", &self.proof_verifier)
             .finish()
     }
 }
@@ -239,6 +247,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
         target: "zone::sequencer::prover",
         zone_id = config.zone_id,
         prover_addresses = ?config.prover_addresses,
+        shadow_proof_verification = config.proof_verifier.is_some(),
         queue_capacity,
         "Prover enabled"
     );
@@ -413,6 +422,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     metrics: &ProverMetrics,
 ) -> Result<(ValidationStats, Option<SettlementProof>)> {
     let (witness, stats) = build_witness(context, job, proofs, metrics).await?;
+    let public_inputs = witness.public_inputs.clone();
     let batch = &job.batch;
 
     let started = Instant::now();
@@ -448,10 +458,46 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
+    if let Some(proof) = &proof_bundle {
+        let started = Instant::now();
+        let call = verifier_call(&public_inputs, &output, &proof.bundle);
+        let result = verify_proof(
+            &context.l1_provider,
+            context.config.chain_spec.as_ref(),
+            context.config.proof_verifier.as_ref(),
+            context.config.parent_chain_id,
+            call,
+        )
+        .await;
+        metrics
+            .proof_verification_duration_seconds
+            .record(started.elapsed().as_secs_f64());
+        match result {
+            Ok(ProofVerification::Verified) => {
+                metrics.proof_verification_success_total.increment(1);
+                info!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
+                    local = context.config.proof_verifier.is_some(), "Nitro proof verified");
+            }
+            Ok(ProofVerification::SkippedBeforeT13) => {
+                metrics.proof_verification_skipped_total.increment(1);
+                debug!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
+                    "On-chain proof verification skipped before T13");
+            }
+            Ok(ProofVerification::Rejected) => {
+                metrics.proof_verification_failure_total.increment(1);
+                bail!("verifier rejected the proof");
+            }
+            Err(error) => {
+                metrics.proof_verification_error_total.increment(1);
+                return Err(error);
+            }
+        }
+    } else if context.config.proof_verifier.is_some() {
+        bail!("local proof verification requires a remote Nitro proof");
+    }
+
     if job.response.is_some() && proof_bundle.is_none() {
-        return Err(eyre::eyre!(
-            "attested settlement requires a remote prover with Nitro NSM support"
-        ));
+        bail!("attested settlement requires a remote prover with Nitro NSM support");
     }
     Ok((stats, proof_bundle))
 }

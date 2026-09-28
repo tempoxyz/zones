@@ -32,8 +32,6 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
-#[cfg(test)]
-use zone_prover::ProofBundle;
 use zone_prover::VerifierMode;
 
 use crate::{
@@ -570,11 +568,11 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
-    /// Prove and preflight, while collecting a Nitro certificate, then submit.
+    /// Collect a certificate and submit, proving and preflighting when a prover is configured.
     ///
-    /// A prover error, verifier rejection, or verifier simulation failure selects
-    /// [`VerifierMode::NoProof`] for this batch and requires a fresh certificate.
-    /// Preflight setup and certificate collection errors do not trigger fallback.
+    /// Without a prover, or after proving or proof verification fails, selects
+    /// [`VerifierMode::NoProof`] and collects its certificate. Certificate collection errors do
+    /// not trigger fallback.
     /// Submission has its own retry and reconciliation logic.
     async fn prove_and_submit_batch(
         &mut self,
@@ -585,29 +583,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
         let nitro_attempt = async {
-            let proof = async {
-                match &self.settlement_prover {
-                    Some(prover) => {
-                        match prover.prove(from, last_zone_block, batch.clone()).await {
-                            Ok(proof) => {
-                                match self.batch_submitter.simulate(batch, &proof.bundle).await {
-                                    Ok(Some(Err(error))) => {
-                                        Ok(ControlFlow::Break(("verifier", error)))
-                                    }
-                                    Ok(Some(Ok(false))) => Ok(ControlFlow::Break((
-                                        "verifier",
-                                        eyre::eyre!("verifier rejected the proof"),
-                                    ))),
-                                    Ok(_) => Ok(ControlFlow::Continue(Some(proof))),
-                                    Err(error) => Err(BatchSubmitError::from(error)),
-                                }
-                            }
-                            Err(error) => Ok(ControlFlow::Break(("prover", error))),
-                        }
-                    }
-                    None => Ok(ControlFlow::Continue(None)),
-                }
+            let Some(prover) = &self.settlement_prover else {
+                return Ok::<_, BatchSubmitError>(ControlFlow::Break(None));
             };
+            let proof = prover.prove(from, last_zone_block, batch.clone());
             tokio::pin!(proof);
 
             let certificate = self.prepare_certificate(batch, VerifierMode::NitroV1);
@@ -615,15 +594,15 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
             // Poll both concurrently. `NoProof` fallback decision doesn't wait for `Nitro` quorum.
             let (proof, certificate) = tokio::select! {
-                result = &mut proof => match result? {
-                    ControlFlow::Break(cause) => return Ok(ControlFlow::Break(cause)),
-                    ControlFlow::Continue(proof) => (proof, certificate.await?),
+                result = &mut proof => match result {
+                    Err(cause) => return Ok(ControlFlow::Break(Some(cause))),
+                    Ok(proof) => (proof, certificate.await?),
                 },
                 result = &mut certificate => {
                     let certificate = result?;
-                    match proof.await? {
-                        ControlFlow::Break(cause) => return Ok(ControlFlow::Break(cause)),
-                        ControlFlow::Continue(proof) => (proof, certificate),
+                    match proof.await {
+                        Err(cause) => return Ok(ControlFlow::Break(Some(cause))),
+                        Ok(proof) => (proof, certificate),
                     }
                 }
             };
@@ -637,12 +616,14 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             result = nitro_attempt => result?,
         } {
             ControlFlow::Continue((proof, certificate)) => {
-                (VerifierMode::NitroV1, proof, certificate)
+                (VerifierMode::NitroV1, Some(proof), certificate)
             }
-            ControlFlow::Break((reason, cause)) => {
-                warn!(reason, %cause, "Settling batch with the `NoProof` verifier fallback");
-                self.metrics.batch_no_proof_fallback_total.increment(1);
-                // Dropping preparation releases the Nitro signature route before the fallback.
+            ControlFlow::Break(cause) => {
+                if let Some(cause) = cause {
+                    warn!(error = ?cause, "Settling batch with the `NoProof` verifier fallback");
+                    self.metrics.batch_no_proof_fallback_total.increment(1);
+                }
+                // Dropping the Nitro attempt releases its signature route before the fallback.
                 let certificate = tokio::select! {
                     biased;
                     () = shutdown.cancelled() => return Err(BatchSubmitError::Cancelled),
@@ -1279,27 +1260,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verifier_simulation_failure_enters_no_proof_submission_path() {
+    async fn proof_verification_failure_enters_no_proof_submission_path() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        monitor.settlement_prover = Some(SettlementProver::fixed(Ok(SettlementProof {
-            bundle: ProofBundle {
-                verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
-                proof: Bytes::from_static(&[1]),
-            },
-            hardfork: tempo_chainspec::hardfork::TempoHardfork::T13,
-        })));
-        l1.push_success(&mock_l1_header(1_000));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(0),
-            abi_encode_u64(1),
-            abi_encode_u64(1),
-            abi_encode_u64(1),
-            abi_encode_u64(0),
-            abi_encode_u64(42),
-            abi_encode_u64(42431),
-        ]));
-        l1.push_failure_msg("execution reverted: out of gas");
+        monitor.settlement_prover = Some(SettlementProver::fixed(Err(eyre::eyre!(
+            "execution reverted: out of gas"
+        ))));
         // The fallback must reach the submission loop. Fail its portal reads so the
         // test does not need a signer or a successful L1 transaction.
         for _ in 0..MAX_RETRIES {
@@ -1327,13 +1293,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simulation_failure_collects_no_proof_quorum_until_leader_demotion() {
+    async fn unconfigured_prover_collects_no_proof_quorum() {
+        assert_no_proof_quorum(None).await;
+    }
+
+    #[tokio::test]
+    async fn proof_verification_setup_failure_collects_no_proof_quorum_until_leader_demotion() {
+        let proof = Some(Err(eyre::eyre!("failed to read portal verifier")));
+        assert_no_proof_quorum(proof).await;
+    }
+
+    async fn assert_no_proof_quorum(proof: Option<eyre::Result<SettlementProof>>) {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        let (proof_tx, proof_rx) = tokio::sync::oneshot::channel();
-        monitor.settlement_prover = Some(SettlementProver::fixed_after(async move {
-            proof_rx.await.expect("send proof after the Nitro proposal")
-        }));
+        let proof_tx = proof.map(|proof| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            monitor.settlement_prover = Some(SettlementProver::fixed_after(async move {
+                rx.await.expect("release proof after the Nitro proposal");
+                proof
+            }));
+            tx
+        });
         let (commands, mut proposals) = tokio::sync::mpsc::channel(1);
         let settlements = SettlementManager::new(
             crate::attestation::AttestationDomain {
@@ -1359,36 +1339,18 @@ mod tests {
             },
             timestamp_millis: 0,
         };
-        // Collect Nitro signatures concurrently with proving, then fail preflight.
-        l1.push_success(&mock_l1_header(1_000));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(1),
-            abi_encode_u64(2),
-            Address::ZERO.abi_encode().into(),
-            abi_encode_u64(0),
-        ]));
-        l1.push_success(&serde_json::json!("0x7b"));
-        l1.push_success(&header);
-        l1.push_success(&mock_l1_header(1_000));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(0),
-            abi_encode_u64(1),
-            abi_encode_u64(2),
-            abi_encode_u64(1),
-            abi_encode_u64(0),
-            abi_encode_u64(42),
-            abi_encode_u64(42431),
-        ]));
-        l1.push_failure_msg("execution reverted: out of gas");
-        l1.push_success(&mock_l1_header(1_000));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(1),
-            abi_encode_u64(2),
-            Address::ZERO.abi_encode().into(),
-            abi_encode_u64(0),
-        ]));
-        l1.push_success(&serde_json::json!("0x7b"));
-        l1.push_success(&header);
+        // `NoProof` prepares once. A configured prover also prepares a Nitro certificate first.
+        for _ in 0..(1 + usize::from(proof_tx.is_some())) {
+            l1.push_success(&mock_l1_header(1_000));
+            l1.push_success(&abi_encode_multicall(vec![
+                abi_encode_u64(1),
+                abi_encode_u64(2),
+                Address::ZERO.abi_encode().into(),
+                abi_encode_u64(0),
+            ]));
+            l1.push_success(&serde_json::json!("0x7b"));
+            l1.push_success(&header);
+        }
         let shutdown = sync::CancellationToken::new();
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
@@ -1402,27 +1364,22 @@ mod tests {
                 )
                 .await
         });
-        let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
-            panic!("expected a Nitro settlement proposal");
-        };
-        let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
-        assert_eq!(
-            attestation.verifierConfigHash,
-            VerifierMode::NitroV1.config_hash()
-        );
-        proof_tx
-            .send(Ok(SettlementProof {
-                bundle: ProofBundle {
-                    verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
-                    proof: Bytes::from_static(&[1]),
-                },
-                hardfork: tempo_chainspec::hardfork::TempoHardfork::T13,
-            }))
-            .unwrap();
+        if let Some(proof_tx) = proof_tx {
+            // Fail proving after the Nitro proposal, forcing a fresh `NoProof` quorum.
+            let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
+                panic!("expected a Nitro settlement proposal");
+            };
+            let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
+            assert_eq!(
+                attestation.verifierConfigHash,
+                VerifierMode::NitroV1.config_hash()
+            );
+            proof_tx.send(()).unwrap();
+        }
         let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
             .await
             .unwrap()
