@@ -1,6 +1,6 @@
 [package]
 name = "exithatch"
-description = "Forced-exit protocol design for Tempo Zones"
+description = "Forced-exit protocol codecs and authorization for Tempo Zones"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,24 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+tempo-zone-contracts.workspace = true
+tempo-primitives.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "alloy-primitives/std",
+    "alloy-sol-types/std",
+    "tempo-zone-contracts/std",
+    "tempo-primitives/std",
+]
+
+[dev-dependencies]
+k256.workspace = true
+sha2.workspace = true
+p256.workspace = true
+serde_json.workspace = true

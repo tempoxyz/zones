@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, DepositType, WithdrawalBounceBackDeposit } from "../interfaces/IZone.sol";
+import {
+    Deposit,
+    DepositType,
+    ForcedExit,
+    WithdrawalBounceBackDeposit
+} from "../interfaces/IZone.sol";
 
 /// @title DepositQueueLib
 /// @notice Library for managing the deposit queue hash chain
@@ -45,6 +50,18 @@ library DepositQueueLib {
         returns (bytes32 newHash)
     {
         newHash = keccak256(abi.encode(DepositType.Deposit, depositData, currentHash));
+    }
+
+    /// @notice Append a forced-exit request to the shared deposit queue hash chain.
+    function enqueueForcedExit(
+        bytes32 currentHash,
+        ForcedExit memory entry
+    )
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(DepositType.ForcedExit, entry, currentHash));
     }
 
 }
