@@ -164,10 +164,12 @@ Use the actual forks supported by the node binary; a future fork assignment requ
 whose Tempo dependency recognizes it. Pre-T13 forks without native verifier measurements, such
 as T12, need the explicit file override while their prover endpoint remains configured.
 Assign the same endpoint explicitly to adjacent forks when the accepted prover image is unchanged.
-The readiness gauge checks assignments for the current L1 hardfork and every later Tempo fork in the node's chainspec activating within the
-next 72 hours (inclusive). Forks more than 72 hours away are not included. This checks configured
-addresses, not endpoint connectivity or PCRs. Missing assignments for the live L1 fork and
-unknown L1 forks stop proving; there is no fallback to an older endpoint.
+At startup, sequencers with proving enabled and remote shadow provers require an assignment for
+the current L1 hardfork and every later Tempo fork in the node's chainspec activating within
+72 hours of startup (inclusive). Overdue forks not yet active on a lagging L1 also require an
+assignment. Forks more than 72 hours away do not. This checks the live fork and configured
+addresses, not endpoint connectivity or PCRs. Missing assignments and unknown L1 forks stop
+proving; there is no fallback to an older endpoint.
 
 Before activation, bring up the next deployment and exercise it on historical and mixed-fork
 witnesses. The new prover must preserve historical execution rules so it can attest unsettled

@@ -22,6 +22,9 @@ use tempo_primitives::TempoHeader;
 pub use zone_hardfork::ZoneHardfork;
 use zone_primitives::constants::{ZoneChainIdError, decode_l1_chain_id, decode_zone_chain_id};
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+
 /// Chain specification for a Tempo Zone.
 ///
 /// Zone, Tempo, and Ethereum activations all live in the underlying canonical hardfork schedule;

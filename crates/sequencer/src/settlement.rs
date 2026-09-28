@@ -8,10 +8,10 @@
 //!
 //! # POC limitations
 //!
-//! Proof validation is **skipped** by the pre-T11 stub verifier. When a settlement prover is
+//! Proof validation is **skipped** by the pre-T13 stub verifier. When a settlement prover is
 //! configured, submissions normally carry its Nitro NSM attestation, but may use `NoProof` when
-//! proving fails, the verifier rejects a proof, or its simulation fails. The unconfigured
-//! compatibility path still submits an empty proof with `Nitro` mode for stub verifiers.
+//! proving fails, the verifier rejects a proof, or its simulation fails. Without a prover,
+//! submissions use `NoProof` with an empty proof.
 //!
 //! # Anchor modes
 //!
@@ -1457,8 +1457,6 @@ fn settlement_proof(
 ) -> Result<(Bytes, Bytes)> {
     let config = Bytes::from_static(verifier_mode.config());
     let Some(bundle) = proof_bundle else {
-        // Without a prover, let the on-chain verifier decide whether an empty proof is valid.
-        // This preserves settlement against the stub verifier used by integration fixtures.
         return Ok((config, Bytes::new()));
     };
     eyre::ensure!(
@@ -1955,6 +1953,7 @@ mod tests {
     use reth_provider::test_utils::MockEthProvider;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{Block, TempoHeader, TempoPrimitives};
+    use zone_chainspec::test_utils::set_tempo_fork;
 
     fn mock_l1(asserter: Asserter) -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -1970,16 +1969,7 @@ mod tests {
 
     fn chain_spec_with_t13(activation: u64) -> Arc<ZoneChainSpec> {
         let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), activation)
-            .unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t14Time".into(), u64::MAX)
-            .unwrap();
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         Arc::new(ZoneChainSpec {
             inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
         })
@@ -2713,6 +2703,10 @@ mod tests {
 
     #[test]
     fn settlement_proof_enforces_verifier_mode_shape() {
+        let (verifier_config, proof) = settlement_proof(VerifierMode::NoProof, None).unwrap();
+        assert_eq!(verifier_config.as_ref(), &[2]);
+        assert!(proof.is_empty());
+
         let empty_nitro = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
             proof: Bytes::new(),

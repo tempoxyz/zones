@@ -178,6 +178,12 @@ mod tests {
     use alloy_transport::mock::Asserter;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::TempoHeader;
+    use zone_chainspec::test_utils::set_tempo_fork;
+
+    const TRANSITIONS: [(TempoHardfork, TempoHardfork); 2] = [
+        (TempoHardfork::T12, TempoHardfork::T13),
+        (TempoHardfork::T13, TempoHardfork::T14),
+    ];
 
     fn policy() -> Vec<u8> {
         let pcr = "11".repeat(48);
@@ -205,24 +211,26 @@ mod tests {
 
     #[tokio::test]
     async fn active_fork_uses_latest_l1_block_timestamp() {
-        let asserter = Asserter::new();
-        asserter.push_success(&mock_l1_header(999));
-        asserter.push_success(&mock_l1_header(1_000));
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter)
-            .erased();
-        assert_eq!(
-            active_l1_hardfork(&provider, &scheduled_t13(1_000))
-                .await
-                .unwrap(),
-            TempoHardfork::T12
-        );
-        assert_eq!(
-            active_l1_hardfork(&provider, &scheduled_t13(1_000))
-                .await
-                .unwrap(),
-            TempoHardfork::T13
-        );
+        for (before, after) in TRANSITIONS {
+            let asserter = Asserter::new();
+            asserter.push_success(&mock_l1_header(999));
+            asserter.push_success(&mock_l1_header(1_000));
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_mocked_client(asserter)
+                .erased();
+            assert_eq!(
+                active_l1_hardfork(&provider, &scheduled(after, 1_000))
+                    .await
+                    .unwrap(),
+                before
+            );
+            assert_eq!(
+                active_l1_hardfork(&provider, &scheduled(after, 1_000))
+                    .await
+                    .unwrap(),
+                after
+            );
+        }
     }
 
     #[derive(Default)]
@@ -244,71 +252,68 @@ mod tests {
 
     #[test]
     fn metric_detects_entry_into_the_window_and_remains_set_after_activation() {
-        let activation = 400_000;
-        let spec = scheduled_t13(activation);
-        let addresses =
-            ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], Some(&policy()))
-                .unwrap()
-                .unwrap();
-        let recorded = Arc::new(RecordedGauge::default());
-        let gauge = Gauge::from_arc(recorded.clone());
-        for now in [
-            activation - PROVER_UPGRADE_LOOKAHEAD_SECS - 1,
-            activation - PROVER_UPGRADE_LOOKAHEAD_SECS,
-            activation - 1,
-            activation,
-        ] {
-            addresses.record_upgrade_readiness(&spec, now, &gauge);
+        for (before, after) in TRANSITIONS {
+            let activation = 400_000;
+            let spec = scheduled(after, activation);
+            let addresses = ProverAddresses::new(
+                vec![format!("{before}=old:5000").parse().unwrap()],
+                Some(&policy()),
+            )
+            .unwrap()
+            .unwrap();
+            let recorded = Arc::new(RecordedGauge::default());
+            let gauge = Gauge::from_arc(recorded.clone());
+            for now in [
+                activation - PROVER_UPGRADE_LOOKAHEAD_SECS - 1,
+                activation - PROVER_UPGRADE_LOOKAHEAD_SECS,
+                activation - 1,
+                activation,
+            ] {
+                addresses.record_upgrade_readiness(&spec, now, &gauge);
+            }
+            routed(before, after).record_upgrade_readiness(&spec, activation, &gauge);
+            assert_eq!(*recorded.0.lock().unwrap(), vec![0.0, 1.0, 1.0, 1.0, 0.0]);
         }
-        routed().record_upgrade_readiness(&spec, activation, &gauge);
-        assert_eq!(*recorded.0.lock().unwrap(), vec![0.0, 1.0, 1.0, 1.0, 0.0]);
     }
 
     #[tokio::test(start_paused = true)]
     async fn readiness_is_refreshed_every_minute_without_prover_jobs() {
-        let addresses = routed();
-        let chain_spec = Arc::new(ZoneChainSpec {
-            inner: Arc::new(scheduled_t13(u64::MAX)),
-        });
-        let recorded = Arc::new(RecordedGauge::default());
-        let gauge = Gauge::from_arc(recorded.clone());
-        let task = tokio::spawn(async move {
-            addresses
-                .monitor_upgrade_readiness_with_gauge(chain_spec, gauge)
-                .await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(*recorded.0.lock().unwrap(), vec![0.0]);
-        tokio::time::advance(Duration::from_secs(59)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(recorded.0.lock().unwrap().len(), 1);
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(*recorded.0.lock().unwrap(), vec![0.0, 0.0]);
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        for (before, after) in TRANSITIONS {
+            let addresses = routed(before, after);
+            let chain_spec = Arc::new(ZoneChainSpec {
+                inner: Arc::new(scheduled(after, u64::MAX)),
+            });
+            let recorded = Arc::new(RecordedGauge::default());
+            let gauge = Gauge::from_arc(recorded.clone());
+            let task = tokio::spawn(async move {
+                addresses
+                    .monitor_upgrade_readiness_with_gauge(chain_spec, gauge)
+                    .await;
+            });
+            tokio::task::yield_now().await;
+            assert_eq!(*recorded.0.lock().unwrap(), vec![0.0]);
+            tokio::time::advance(Duration::from_secs(59)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(recorded.0.lock().unwrap().len(), 1);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(*recorded.0.lock().unwrap(), vec![0.0, 0.0]);
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
     }
 
-    fn scheduled_t13(timestamp: u64) -> tempo_chainspec::TempoChainSpec {
+    fn scheduled(fork: TempoHardfork, timestamp: u64) -> tempo_chainspec::TempoChainSpec {
         let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), timestamp)
-            .unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t14Time".into(), u64::MAX)
-            .unwrap();
+        set_tempo_fork(&mut genesis, fork, timestamp);
         tempo_chainspec::TempoChainSpec::from_genesis(genesis)
     }
 
-    fn routed() -> ProverAddresses {
+    fn routed(before: TempoHardfork, after: TempoHardfork) -> ProverAddresses {
         ProverAddresses::new(
             vec![
-                "T12=old:5000".parse().unwrap(),
-                "T13=new:5000".parse().unwrap(),
+                format!("{before}=old:5000").parse().unwrap(),
+                format!("{after}=new:5000").parse().unwrap(),
             ],
             Some(&policy()),
         )
@@ -318,77 +323,94 @@ mod tests {
 
     #[test]
     fn assignments_are_exact_and_unambiguous() {
-        let config = routed();
-        assert_eq!(
-            config.config_for(TempoHardfork::T12).unwrap().address(),
-            "old:5000"
-        );
-        assert_eq!(
-            config.config_for(TempoHardfork::T13).unwrap().address(),
-            "new:5000"
-        );
-        assert!(config.config_for(TempoHardfork::T11).is_err());
-        assert!(ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], Some(b"{}")).is_err());
-        assert!(
-            ProverAddresses::new(
-                vec!["T13=a:1".parse().unwrap(), "T13=b:2".parse().unwrap()],
-                Some(&policy()),
-            )
-            .is_err()
-        );
-        for invalid in ["T13", "T13=", "T13= ", "unknown=a:1"] {
-            assert!(invalid.parse::<HardforkProverAddress>().is_err());
+        for (before, after) in TRANSITIONS {
+            let config = routed(before, after);
+            assert_eq!(config.config_for(before).unwrap().address(), "old:5000");
+            assert_eq!(config.config_for(after).unwrap().address(), "new:5000");
+            assert!(config.config_for(TempoHardfork::T11).is_err());
+            assert!(
+                ProverAddresses::new(
+                    vec![format!("{before}=old:5000").parse().unwrap()],
+                    Some(b"{}"),
+                )
+                .is_err()
+            );
+            assert!(
+                ProverAddresses::new(
+                    vec![
+                        format!("{after}=a:1").parse().unwrap(),
+                        format!("{after}=b:2").parse().unwrap()
+                    ],
+                    Some(&policy()),
+                )
+                .is_err()
+            );
+            for invalid in [
+                after.to_string(),
+                format!("{after}="),
+                format!("{after}= "),
+                "unknown=a:1".to_owned(),
+            ] {
+                assert!(invalid.parse::<HardforkProverAddress>().is_err());
+            }
         }
     }
 
     #[tokio::test]
     async fn missing_fork_and_rpc_failure_never_fall_back() {
-        let asserter = Asserter::new();
-        asserter.push_success(&mock_l1_header(100_001));
-        asserter.push_failure_msg("L1 unavailable");
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let config = ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], Some(&policy()))
+        for (before, after) in TRANSITIONS {
+            let asserter = Asserter::new();
+            asserter.push_success(&mock_l1_header(100_001));
+            asserter.push_failure_msg("L1 unavailable");
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_mocked_client(asserter.clone())
+                .erased();
+            let config = ProverAddresses::new(
+                vec![format!("{before}=old:5000").parse().unwrap()],
+                Some(&policy()),
+            )
             .unwrap()
             .unwrap();
-        assert!(
-            config
-                .resolve(&provider, &scheduled_t13(100_001))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("no prover configured for active L1 hardfork T13")
-        );
-        assert!(
-            config
-                .resolve(&provider, &scheduled_t13(100_001))
-                .await
-                .is_err()
-        );
-        assert!(asserter.read_q().is_empty());
+            assert_eq!(
+                config
+                    .resolve(&provider, &scheduled(after, 100_001))
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                format!("no prover configured for active L1 hardfork {after}")
+            );
+            assert!(
+                config
+                    .resolve(&provider, &scheduled(after, 100_001))
+                    .await
+                    .is_err()
+            );
+            assert!(asserter.read_q().is_empty());
+        }
     }
 
     #[tokio::test]
     async fn routing_follows_activation_and_reorg_without_caching() {
-        let asserter = Asserter::new();
-        for timestamp in [999, 1_000, 999] {
-            asserter.push_success(&mock_l1_header(timestamp));
+        for (before, after) in TRANSITIONS {
+            let asserter = Asserter::new();
+            for timestamp in [999, 1_000, 999] {
+                asserter.push_success(&mock_l1_header(timestamp));
+            }
+            asserter.push_failure_msg("L1 unavailable");
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_mocked_client(asserter)
+                .erased();
+            let config = routed(before, after);
+            let spec = scheduled(after, 1_000);
+            for (address, fork) in [
+                ("old:5000", before),
+                ("new:5000", after),
+                ("old:5000", before),
+            ] {
+                let (config, selected_fork) = config.resolve(&provider, &spec).await.unwrap();
+                assert_eq!((config.address(), selected_fork), (address, fork));
+            }
+            assert!(config.resolve(&provider, &spec).await.is_err());
         }
-        asserter.push_failure_msg("L1 unavailable");
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter)
-            .erased();
-        let config = routed();
-        let spec = scheduled_t13(1_000);
-        for (address, fork) in [
-            ("old:5000", TempoHardfork::T12),
-            ("new:5000", TempoHardfork::T13),
-            ("old:5000", TempoHardfork::T12),
-        ] {
-            let (config, selected_fork) = config.resolve(&provider, &spec).await.unwrap();
-            assert_eq!((config.address(), selected_fork), (address, fork));
-        }
-        assert!(config.resolve(&provider, &spec).await.is_err());
     }
 }

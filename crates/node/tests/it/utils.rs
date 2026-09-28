@@ -67,7 +67,7 @@ use tempo_zone_contracts::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
-use zone_chainspec::ZoneChainSpec;
+use zone_chainspec::{ZoneChainSpec, test_utils::set_tempo_fork};
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptionKeyRotation, L1BlockTracker, L1Deposit,
     L1PortalEvents, L1StateCache, encryption_key_address, state::EnabledTokenRegistry,
@@ -1083,14 +1083,7 @@ impl ZoneTestNode {
             .await?;
         let chain_id = derive_zone_chain_id(1_337, zone_id)?;
         genesis.config.chain_id = chain_id;
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), activation)?;
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t14Time".into(), u64::MAX)?;
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         let spec = Arc::new(ZoneChainSpec::from_genesis(genesis.clone())?);
         let node = Self::launch_with_genesis(
             l1_rpc_url.to_string(),

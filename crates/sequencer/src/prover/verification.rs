@@ -104,6 +104,8 @@ mod tests {
     use alloy_provider::{Provider as _, ProviderBuilder};
     use alloy_sol_types::SolValue as _;
     use alloy_transport::mock::Asserter;
+    use tempo_chainspec::hardfork::TempoHardfork;
+    use zone_chainspec::test_utils::set_tempo_fork;
     use zone_prover::VerifierMode;
     use zone_spf::{
         BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
@@ -111,16 +113,7 @@ mod tests {
 
     fn chain_spec() -> ZoneChainSpec {
         let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), 1_000u64)
-            .unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t14Time".into(), u64::MAX)
-            .unwrap();
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, 1_000);
         ZoneChainSpec {
             inner: std::sync::Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
         }

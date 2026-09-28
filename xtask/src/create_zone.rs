@@ -97,6 +97,14 @@ pub(crate) struct CreateZone {
     /// Genesis block gas limit for the zone L2.
     #[arg(long, default_value_t = 30_000_000)]
     gas_limit: u64,
+
+    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
+    #[arg(long)]
+    t12_time: Option<u64>,
+
+    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
+    #[arg(long)]
+    t13_time: Option<u64>,
 }
 
 /// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
@@ -307,6 +315,8 @@ impl CreateZone {
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
+            t12_time: self.t12_time,
+            t13_time: self.t13_time,
         };
         genesis_cmd.run().await?;
 
@@ -367,6 +377,7 @@ impl CreateZone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn factory_params_install_the_requested_quorum_atomically() {
@@ -391,10 +402,34 @@ mod tests {
             private_key: String::new(),
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
+            t12_time: None,
+            t13_time: None,
         };
 
         let params = command.factory_params();
         assert_eq!(params.sequencers, sequencers);
         assert_eq!(params.threshold, 2);
+    }
+
+    #[test]
+    fn parses_genesis_fork_overrides() {
+        let command = CreateZone::try_parse_from([
+            "create-zone",
+            "--output",
+            "/tmp/zone",
+            "--admin",
+            "0x1000000000000000000000000000000000000001",
+            "--sequencer",
+            "0x1000000000000000000000000000000000000001",
+            "--private-key",
+            "unused",
+            "--t12-time",
+            "0",
+            "--t13-time",
+            "9223372036854775807",
+        ])
+        .unwrap();
+        assert_eq!(command.t12_time, Some(0));
+        assert_eq!(command.t13_time, Some(9223372036854775807));
     }
 }
