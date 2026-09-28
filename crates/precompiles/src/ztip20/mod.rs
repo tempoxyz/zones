@@ -96,9 +96,16 @@ impl CallRules for TIP20Rules {
                 | ITIP20::ITIP20Calls::setNextQuoteToken(_)
                 | ITIP20::ITIP20Calls::completeQuoteTokenUpdate(_)
                 | ITIP20::ITIP20Calls::changeTransferPolicyId(_)
-                | ITIP20::ITIP20Calls::burnBlocked(_)
-                | ITIP20::ITIP20Calls::burnAt(_) => {
+                | ITIP20::ITIP20Calls::burnBlocked(_) => {
                     CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                }
+                ITIP20::ITIP20Calls::burnAt(_) => {
+                    if StorageCtx::default().spec().is_t12() {
+                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    } else {
+                        // Preserve upstream UnknownFunctionSelector before TIP-1006 activation.
+                        CallCheck::Continue
+                    }
                 }
                 ITIP20::ITIP20Calls::name(_)
                 | ITIP20::ITIP20Calls::symbol(_)
@@ -150,7 +157,7 @@ mod tests {
     use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::PrecompileResult;
     use tempo_chainspec::hardfork::TempoHardfork;
-    use tempo_contracts::precompiles::TIP20Error;
+    use tempo_contracts::precompiles::{TIP20Error, UnknownFunctionSelector};
     use tempo_precompiles::{
         PATH_USD_ADDRESS, Precompile,
         storage::{Handler, StorageCtx},
@@ -443,14 +450,6 @@ mod tests {
         assert_unauthorized(
             &rules,
             ITIP20::burnBlockedCall {
-                from: account,
-                amount: U256::ONE,
-            },
-            caller,
-        );
-        assert_unauthorized(
-            &rules,
-            ITIP20::burnAtCall {
                 from: account,
                 amount: U256::ONE,
             },
@@ -946,6 +945,39 @@ mod tests {
                 harness.call(harness.alice, Bytes::copy_from_slice(data), 100_000, false)?;
             assert!(result.is_revert());
             assert_eq!(result.bytes, expected.bytes);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn burn_at_respects_t12_boundary() -> eyre::Result<()> {
+        for (spec, active) in [
+            (TempoHardfork::T8, false),
+            (TempoHardfork::T11, false),
+            (TempoHardfork::T12, true),
+            (TempoHardfork::T13, true),
+        ] {
+            let mut harness = PrecompileHarness::new_at(spec)?;
+            let calldata = ITIP20::burnAtCall {
+                from: harness.alice,
+                amount: U256::ONE,
+            }
+            .abi_encode();
+            let admission = admit_at(&rules(), &calldata, harness.alice, spec);
+            let expected = if active {
+                assert!(matches!(admission, CallCheck::Revert(_)), "{spec:?}");
+                Unauthorized {}.abi_encode()
+            } else {
+                assert!(matches!(admission, CallCheck::Continue), "{spec:?}");
+                UnknownFunctionSelector {
+                    selector: ITIP20::burnAtCall::SELECTOR.into(),
+                }
+                .abi_encode()
+            };
+            let result = harness.call(harness.alice, calldata.into(), 100_000, false)?;
+            assert!(result.is_revert(), "{spec:?}");
+            assert_eq!(result.bytes, Bytes::from(expected), "{spec:?}");
+            assert_eq!(harness.balance_of(harness.alice)?, U256::from(1_000_000u64));
         }
         Ok(())
     }
