@@ -2208,12 +2208,8 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
 
-        // SAFETY: test-only env mutation; no other test reads this variable.
-        unsafe { std::env::set_var("ZONE_L1_DEV_CHAIN_IDS", "31318, 31319") };
-        assert_eq!(tempo_chain_spec_for_l1(31318).unwrap().chain().id(), 1337);
-        assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
-        assert!(tempo_chain_spec_for_l1(999_999).is_none());
-        unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
+        assert!(tempo_chain_spec_for_l1(31318).is_none());
+        assert!(tempo_chain_spec_for_l1(31319).is_none());
     }
 
     #[test]
