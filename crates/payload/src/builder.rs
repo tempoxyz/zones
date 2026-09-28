@@ -27,9 +27,9 @@ use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
-use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
+use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
-use reth_tasks::TaskExecutor;
+use reth_tasks::{TaskExecutor, cancel::CancelOnDrop};
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, PoolTransaction as _, TransactionPool,
     ValidPoolTransaction, error::InvalidPoolTransactionError,
@@ -209,7 +209,7 @@ where
             );
         }
 
-        let state = StateProviderDatabase::new(state_provider.as_ref());
+        let state = StateProviderDatabase::new(state_provider.as_ref().into_evm_state_provider());
         let mut db = State::builder()
             .with_database(
                 Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>
@@ -875,7 +875,7 @@ mod tests {
     use alloy_rlp::Decodable;
     use alloy_sol_types::SolCall;
     use reth_primitives_traits::{Recovered, SealedHeader};
-    use reth_revm::cancelled::CancelOnDrop;
+    use reth_tasks::cancel::CancelOnDrop;
     use reth_transaction_pool::{
         BestTransactions, TransactionOrigin, ValidPoolTransaction,
         error::InvalidPoolTransactionError,
