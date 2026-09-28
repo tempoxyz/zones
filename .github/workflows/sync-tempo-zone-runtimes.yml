@@ -23,7 +23,7 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac # 2026-09-26T06-46-03Z-ee2960a6
+        uses: tempoxyz/gh-actions/actions/secure-runner@ac946e06f5f59daeebc8d33d8e7b9c9501e2ee98 # 2026-09-28T13-48-02Z-ac946e06
 
       - name: Checkout Zones
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@ee2960a6cc25d99bda45614135bfe1197d879bac # 2026-09-26T06-46-03Z-ee2960a6
+        uses: tempoxyz/gh-actions/actions/setup-foundry@ac946e06f5f59daeebc8d33d8e7b9c9501e2ee98 # 2026-09-28T13-48-02Z-ac946e06
         with:
           version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
