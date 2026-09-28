@@ -14363,6 +14363,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempo-chainspec",
  "tempo-nitro-attestation",
+ "tempo-precompiles",
  "tempo-primitives",
  "tempo-zone-contracts",
  "thiserror 2.0.18",

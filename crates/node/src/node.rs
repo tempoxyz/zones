@@ -249,6 +249,8 @@ pub struct ZoneShadowProverAddOnsConfig {
     pub batch_anchor_config: BatchAnchorConfig,
     /// Where to execute the SPF.
     pub prover_runtime: ProverRuntime,
+    /// Independently approved enclave measurements for local, observational verification.
+    pub proof_verifier: Option<zone_prover::ShadowProofVerifier>,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -688,6 +690,7 @@ where
                         .prover_addresses
                         .clone()
                         .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
+                    proof_verifier: None,
                 })
         });
         let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
@@ -914,6 +917,7 @@ where
                     l1_provider.clone(),
                 )),
                 prover_addresses: config.prover_addresses.clone(),
+                proof_verifier: None,
             });
 
         let shadow_prover_config =
@@ -928,6 +932,7 @@ where
                         l1_provider.clone(),
                     )),
                     prover_addresses: config.prover_runtime.remote_addresses().cloned(),
+                    proof_verifier: config.proof_verifier.clone(),
                 });
 
         let readiness_config = if rpc_only {

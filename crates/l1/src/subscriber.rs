@@ -25,6 +25,8 @@ struct L1BlockTrackerState {
     finalized_target: Option<FinalizedTarget>,
     /// Newest applied Portal pause observation: the finalized block and the pause state there.
     portal_pause: Option<(NumHash, bool)>,
+    /// Newest finalized L1 header timestamp observed outside the bounded ingestion queue.
+    finalized_l1_timestamp: Option<u64>,
 }
 
 /// Highest finalized L1 height announced by the subscriber and whether catch-up has verified that
@@ -207,6 +209,26 @@ impl L1BlockTracker {
         }
         state.portal_pause = Some((block, paused));
         Ok(previous.is_some_and(|(_, current_paused)| current_paused) != paused)
+    }
+
+    /// Record the timestamp of a finalized L1 header observed independently of ingestion.
+    ///
+    /// The Zone engine uses this to learn that L1 activated a hardfork even when the lookahead is
+    /// full of older headers, so the queued pre-fork prefix can be checkpointed to free capacity.
+    /// Older observations are ignored.
+    pub fn observe_finalized_l1_timestamp(&self, timestamp: u64) {
+        let mut state = self.state.write();
+        if state
+            .finalized_l1_timestamp
+            .is_none_or(|current| timestamp > current)
+        {
+            state.finalized_l1_timestamp = Some(timestamp);
+        }
+    }
+
+    /// Return the newest finalized L1 header timestamp observed outside the ingestion queue.
+    pub fn finalized_l1_timestamp(&self) -> Option<u64> {
+        self.state.read().finalized_l1_timestamp
     }
 
     /// Record the highest finalized L1 height the subscriber has been asked to ingest.
