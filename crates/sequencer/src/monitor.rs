@@ -21,16 +21,24 @@
 //! number that IS within the EIP-2935 window, and the proof must include a
 //! block header chain linking that anchor back to `tempoBlockNumber`.
 
-use std::{ops::ControlFlow, sync::Arc, time::Duration};
+use std::{
+    ops::ControlFlow,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
 use alloy_signer_local::PrivateKeySigner;
 use eyre::{Result, WrapErr};
 use futures::StreamExt;
+use reth_chain_state::PersistedBlockSubscriptions;
 use tempo_alloy::TempoNetwork;
-use tokio::sync::Notify;
-use tokio_util::sync;
+use tokio::sync::{Notify, mpsc};
+use tokio_util::{sync, task::AbortOnDropHandle};
 use tracing::{debug, error, info, instrument, warn};
 use zone_prover::VerifierMode;
 
@@ -49,7 +57,7 @@ use crate::{
     withdrawals::SharedWithdrawalStore,
 };
 
-/// Maximum number of times to retry a failed batch submission before resyncing.
+/// Maximum number of times to retry a failed batch submission before restarting the pipeline.
 const MAX_RETRIES: u32 = 3;
 
 /// Initial delay between retries (doubles on each attempt).
@@ -103,8 +111,8 @@ impl ZoneMonitorSharedState {
 /// Monitors the Zone L2 chain for new finalized batch boundaries and submits
 /// them to the ZonePortal on L1.
 ///
-/// Local state only advances after a successful L1 submission. On repeated
-/// failures the monitor resyncs from the portal's on-chain `blockHash()`.
+/// Prepared batches are submitted in order. A submission failure rebuilds the monitor and its
+/// preparation pipeline from the portal-confirmed checkpoint.
 ///
 /// Canonical consistency is strict: a non-zero portal anchor must resolve to a canonical local
 /// block, and a reorg terminates the current monitor instance so it can be rebuilt from the portal
@@ -119,36 +127,88 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     /// [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor) on **Tempo L1**.
     withdrawal_store: SharedWithdrawalStore,
     /// Batch submitter for posting batches to the ZonePortal on **Tempo L1**.
-    batch_submitter: BatchSubmitter,
+    batch_submitter: Arc<BatchSubmitter>,
     /// Notifier for the withdrawal processor — signalled after each successful
     /// batch submission so it can process newly enqueued withdrawal slots.
     withdrawal_notify: Arc<Notify>,
     /// Notifier from the withdrawal processor when the current portal head slot
     /// is missing or stale and its bounded recovery page must be refilled.
     repair_notify: Arc<Notify>,
-    /// Last **Zone L2** block number that was successfully submitted to L1.
-    last_submitted_zone_block: u64,
-    /// Deposit queue hash from the previous block, used to construct the
-    /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
-    prev_processed_deposit_hash: B256,
-    /// Deposit counter from the previous batch, used to construct the
-    /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
-    prev_processed_deposit_number: u64,
-    /// Enabled-token prefix confirmed by the previous batch.
-    prev_processed_token_count: u64,
-    /// Previous zone block hash, used as `prev_block_hash` in [`BatchData`].
-    /// Initialized from the portal's on-chain `blockHash()` at startup.
-    prev_zone_block_hash: B256,
-    /// Most recent canonical zone block observed from the node.
-    latest_observed_zone_block: u64,
+    /// Commitments used to seed the preparation task.
+    preparation_cursor: BatchCursor,
+    /// Persisted Zone head observed by preparation.
+    observed_zone_block: Arc<AtomicU64>,
+    /// Zone height confirmed by submission and observed by preparation.
+    submitted_zone_block: Arc<AtomicU64>,
     /// Backpressured SPF and Nitro attestation worker required before configured settlement.
     settlement_prover: Option<SettlementProver>,
 }
 
-struct PortalResyncSnapshot {
-    portal_anchor: crate::settlement::PortalZoneAnchor,
-    previous_snapshot: ZoneBlockSnapshot,
-    pending_withdrawals: WithdrawalPage,
+/// Commitments at the tail of the prepared batch chain.
+#[derive(Debug, Clone, Copy)]
+struct BatchCursor {
+    zone_height: u64,
+    block_hash: B256,
+    processed_deposit_hash: B256,
+    processed_deposit_number: u64,
+    processed_token_count: u64,
+}
+
+impl BatchCursor {
+    fn advance(&mut self, batch: &BatchData) {
+        self.zone_height = batch.zone_height;
+        self.block_hash = batch.next_block_hash;
+        self.processed_deposit_hash = batch.next_processed_deposit_hash;
+        self.processed_deposit_number = batch.next_deposit_number;
+        self.processed_token_count = batch.next_processed_token_count;
+    }
+}
+
+/// A batch whose anchor, proof, and settlement certificate are ready for L1 submission.
+#[derive(Debug)]
+struct ReadyBatch {
+    prepared: PreparedBatch,
+    proof: Option<SettlementProof>,
+    verifier_mode: VerifierMode,
+    certificate: Option<SettlementCertificate>,
+    withdrawals: Vec<abi::Withdrawal>,
+}
+
+/// Discovers persisted batch boundaries and prepares the next submission independently of L1.
+struct BatchPreparer<P: ZoneSequencerProvider> {
+    config: ZoneMonitorConfig,
+    metrics: crate::metrics::ZoneMonitorMetrics,
+    provider: P,
+    batch_submitter: Arc<BatchSubmitter>,
+    cursor: BatchCursor,
+    latest_observed_zone_block: u64,
+    observed_zone_block: Arc<AtomicU64>,
+    submitted_zone_block: Arc<AtomicU64>,
+    settlement_prover: Option<SettlementProver>,
+}
+
+impl<P> BatchPreparer<P>
+where
+    P: ZoneSequencerProvider + PersistedBlockSubscriptions,
+{
+    async fn run(mut self, ready_tx: mpsc::Sender<ReadyBatch>) -> Result<()> {
+        // Subscribe before reading the head so a block persisted during startup cannot be missed.
+        let mut persisted = self.provider.persisted_block_stream();
+        let mut fallback = tokio::time::interval(self.config.poll_interval);
+
+        loop {
+            self.process_available_blocks(&ready_tx).await?;
+
+            tokio::select! {
+                _ = fallback.tick() => {}
+                notification = persisted.next() => {
+                    let Some(_tip) = notification else {
+                        return Err(eyre::eyre!("persisted zone block notification stream closed"));
+                    };
+                }
+            }
+        }
+    }
 }
 
 impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
@@ -190,13 +250,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         settlement_prover: Option<SettlementProver>,
     ) -> Result<Self> {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
-        let batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
+        let batch_submitter = Arc::new(BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
             l1_provider,
             config.chain_spec.clone(),
             signer,
             config.batch_anchor_config,
-        );
+        ));
         let portal_anchor = resolve_portal_zone_anchor(
             &provider,
             config.portal_address,
@@ -232,6 +292,15 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             .set(last_submitted_zone_block as f64);
         metrics.zone_to_l1_submission_lag_blocks.set(0.0);
 
+        let observed_zone_block = Arc::new(AtomicU64::new(last_submitted_zone_block));
+        let submitted_zone_block = Arc::new(AtomicU64::new(last_submitted_zone_block));
+        let preparation_cursor = BatchCursor {
+            zone_height: last_submitted_zone_block,
+            block_hash: prev_zone_block_hash,
+            processed_deposit_hash: prev_processed_deposit_hash,
+            processed_deposit_number: prev_processed_deposit_number,
+            processed_token_count: prev_processed_token_count,
+        };
         let monitor = Self {
             config,
             metrics,
@@ -240,12 +309,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             batch_submitter,
             withdrawal_notify,
             repair_notify,
-            last_submitted_zone_block,
-            prev_processed_deposit_hash,
-            prev_processed_deposit_number,
-            prev_processed_token_count,
-            prev_zone_block_hash,
-            latest_observed_zone_block: last_submitted_zone_block,
+            preparation_cursor,
+            observed_zone_block,
+            submitted_zone_block,
             settlement_prover,
         };
 
@@ -261,97 +327,92 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
     /// Run the monitor loop. This method never returns under normal operation.
     ///
-    /// Reconciles the canonical head at startup and after every canonical-state notification.
+    /// Reconciles the persisted head at startup and after every persisted-block notification.
     #[instrument(skip_all, fields(
         outbox = %self.config.outbox_address,
         inbox = %self.config.inbox_address,
     ))]
     /// Returns `Ok(())` only when `shutdown` fires; the token is observed at the poll
     /// boundary so an in-flight batch submission resolves before teardown.
-    pub async fn run(&mut self, shutdown: &sync::CancellationToken) -> Result<()> {
+    pub async fn run(mut self, shutdown: &sync::CancellationToken) -> Result<()>
+    where
+        P: PersistedBlockSubscriptions,
+    {
         info!("Native zone monitor started");
 
-        // Subscribe before reading the head so a block imported during startup cannot be missed.
-        let mut canonical = self.provider.canonical_state_stream();
-        let mut fallback = tokio::time::interval(self.config.poll_interval);
+        let preparation = self.batch_preparer();
+        let (ready_tx, mut ready_rx) = mpsc::channel(1);
+        let mut preparation_task = AbortOnDropHandle::new(tokio::spawn(preparation.run(ready_tx)));
 
         loop {
-            self.process_available_blocks(shutdown).await;
-
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => {
                     info!("Zone monitor observed shutdown");
                     return Ok(());
                 }
+                joined = &mut preparation_task => {
+                    return joined.wrap_err("batch preparation task panicked")?;
+                }
                 _ = self.repair_notify.notified() => {
                     self.refill_withdrawal_cache().await;
                 }
-                _ = fallback.tick() => {}
-                notification = canonical.next() => {
-                    let Some(notification) = notification else {
-                        return Err(eyre::eyre!("canonical zone state notification stream closed"));
+                ready = ready_rx.recv() => {
+                    let Some(ready) = ready else {
+                        return Err(eyre::eyre!("batch preparation channel closed"));
                     };
-                    if notification.reverted().is_some() {
-                        return Err(eyre::eyre!(
-                            "canonical zone chain reorged while the sequencer was active"
-                        ));
-                    }
+                    self.submit_ready_batch(ready).await?;
                 }
             }
         }
     }
 
-    async fn process_available_blocks(&mut self, shutdown: &sync::CancellationToken) {
-        let latest_zone_block = match self.provider.last_block_number() {
-            Ok(number) => number,
-            Err(error) => {
-                error!(%error, "Failed to read persisted zone head");
-                return;
-            }
-        };
-        let scan_from = self.latest_observed_zone_block.saturating_add(1);
-        if latest_zone_block < scan_from {
-            return;
-        }
-
-        match self
-            .process_block_range(scan_from, latest_zone_block, shutdown)
-            .await
-        {
-            Ok(_) => self.record_observed_zone_block(latest_zone_block),
-            Err(BatchSubmitError::Cancelled) => {}
-            Err(BatchSubmitError::PortalAdvanced) => {
-                unreachable!("portal advancement is reconciled while processing the batch")
-            }
-            Err(BatchSubmitError::PreparedAnchorInvalid(error)) => {
-                error!(
-                    from = scan_from,
-                    to = latest_zone_block,
-                    %error,
-                    "Prepared anchor invalidation escaped the rebuild loop; retrying on the next monitor tick"
-                );
-            }
-            Err(BatchSubmitError::ProverHardforkChanged { proved, current }) => {
-                error!(
-                    from = scan_from,
-                    to = latest_zone_block,
-                    %proved,
-                    %current,
-                    "Prover hardfork change escaped the rebuild loop; retrying on the next monitor tick"
-                );
-            }
-            Err(BatchSubmitError::Other(error)) => {
-                error!(
-                    from = scan_from,
-                    to = latest_zone_block,
-                    %error,
-                    "Failed to process canonical zone block range"
-                );
-            }
+    fn batch_preparer(&self) -> BatchPreparer<P> {
+        BatchPreparer {
+            config: self.config.clone(),
+            metrics: self.metrics.clone(),
+            provider: self.provider.clone(),
+            batch_submitter: self.batch_submitter.clone(),
+            cursor: self.preparation_cursor,
+            latest_observed_zone_block: self.preparation_cursor.zone_height,
+            observed_zone_block: self.observed_zone_block.clone(),
+            submitted_zone_block: self.submitted_zone_block.clone(),
+            settlement_prover: self.settlement_prover.clone(),
         }
     }
+}
 
+impl<P: ZoneSequencerProvider> BatchPreparer<P> {
+    async fn process_available_blocks(
+        &mut self,
+        ready_tx: &mpsc::Sender<ReadyBatch>,
+    ) -> Result<()> {
+        let latest_zone_block = self
+            .provider
+            .last_block_number()
+            .map_err(|error| eyre::eyre!(error))?;
+        let scan_from = self.latest_observed_zone_block.saturating_add(1);
+        if latest_zone_block < scan_from {
+            return Ok(());
+        }
+
+        self.process_block_range(scan_from, latest_zone_block, ready_tx)
+            .await?;
+        self.latest_observed_zone_block = latest_zone_block;
+        self.observed_zone_block
+            .store(latest_zone_block, Ordering::Relaxed);
+        self.metrics
+            .latest_zone_block_observed
+            .set(latest_zone_block as f64);
+        self.metrics.zone_to_l1_submission_lag_blocks.set(
+            latest_zone_block.saturating_sub(self.submitted_zone_block.load(Ordering::Relaxed))
+                as f64,
+        );
+        Ok(())
+    }
+}
+
+impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// Rebuild the in-memory withdrawal store from authoritative chain state.
     ///
     /// The L1 portal only stores queue hashes, so the monitor reconstructs one head page from
@@ -417,19 +478,21 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             error!(%error, "Failed to refill the portal withdrawal head page");
         }
     }
+}
 
+impl<P: ZoneSequencerProvider> BatchPreparer<P> {
     /// Process finalized batch boundaries in `[from, to]`.
     ///
     /// The builder records each batch boundary with one `BatchFinalized` event.
     /// The monitor must walk those boundaries one at a time so the L2 outbox
     /// index and L1 portal index advance in lockstep.
-    #[instrument(skip(self), fields(from, to))]
+    #[instrument(skip(self, ready_tx), fields(from, to))]
     async fn process_block_range(
         &mut self,
         from: u64,
         to: u64,
-        shutdown: &sync::CancellationToken,
-    ) -> std::result::Result<bool, BatchSubmitError> {
+        ready_tx: &mpsc::Sender<ReadyBatch>,
+    ) -> Result<bool> {
         let block_count = to - from + 1;
         info!(from, to, block_count, "Processing zone block range");
 
@@ -447,32 +510,31 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             to,
             first_boundary = boundaries[0].block_number,
             last_boundary = boundaries[boundaries.len() - 1].block_number,
-            "Submitting finalized zone batches"
+            "Preparing finalized Zone batches"
         );
 
         for (idx, boundary) in boundaries.into_iter().enumerate() {
             let boundary_block = boundary.block_number;
-            if boundary_block <= self.last_submitted_zone_block {
+            if boundary_block <= self.cursor.zone_height {
                 continue;
             }
-            let range_start = self.last_submitted_zone_block + 1;
+            let range_start = self.cursor.zone_height + 1;
             info!(
                 batch = idx + 1,
                 zone_from = range_start,
                 zone_to = boundary_block,
-                "Submitting finalized zone batch"
+                "Preparing finalized zone batch"
             );
-            let before_submit = self.last_submitted_zone_block;
-            self.process_finalized_batch(range_start, boundary, shutdown)
-                .await?;
-            if self.last_submitted_zone_block < boundary_block {
-                return Err(eyre::eyre!(
-                    "zone batch boundary {boundary_block} remains unsubmitted after reconciliation \
-                     (previous anchor {before_submit}, current anchor {})",
-                    self.last_submitted_zone_block
-                )
-                .into());
-            }
+
+            // Reserve queue capacity before doing expensive work. This bounds speculative work to
+            // one ready batch beyond the batch currently being submitted.
+            let permit = ready_tx
+                .reserve()
+                .await
+                .map_err(|_| eyre::eyre!("batch submission worker stopped"))?;
+            let ready = self.process_finalized_batch(boundary).await?;
+            self.cursor.advance(&ready.prepared.batch);
+            permit.send(ready);
         }
 
         Ok(true)
@@ -480,11 +542,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
     /// Process one boundary-aligned finalized batch.
     async fn process_finalized_batch(
-        &mut self,
-        from: u64,
+        &self,
         boundary: FinalizedBatchLog,
-        shutdown: &sync::CancellationToken,
-    ) -> std::result::Result<(), BatchSubmitError> {
+    ) -> std::result::Result<ReadyBatch, BatchSubmitError> {
+        let from = self.cursor.zone_height.saturating_add(1);
         let to = boundary.block_number;
         let finalized_batch =
             fetch_finalized_batch(&self.provider, self.config.outbox_address, &boundary).await?;
@@ -501,95 +562,66 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             );
         }
 
-        let batch_data = BatchData {
+        let batch = BatchData {
             zone_height: to,
             tempo_block_number: end_state.tempo_block_number,
-            prev_block_hash: self.prev_zone_block_hash,
+            prev_block_hash: self.cursor.block_hash,
             next_block_hash: end_state.block_hash,
-            prev_processed_deposit_hash: self.prev_processed_deposit_hash,
+            prev_processed_deposit_hash: self.cursor.processed_deposit_hash,
             next_processed_deposit_hash: end_state.processed_deposit_hash,
-            prev_deposit_number: self.prev_processed_deposit_number,
+            prev_deposit_number: self.cursor.processed_deposit_number,
             next_deposit_number: end_state.processed_deposit_number,
-            prev_processed_token_count: self.prev_processed_token_count,
+            prev_processed_token_count: self.cursor.processed_token_count,
             next_processed_token_count: end_state.processed_token_count,
             withdrawal_queue_hash: finalized_batch.finalized_hash,
             withdrawal_batch_index: finalized_batch.finalized_index,
         };
 
         loop {
-            if shutdown.is_cancelled() {
-                return Err(BatchSubmitError::Cancelled);
-            }
-            let prepared = self
-                .batch_submitter
-                .prepare_batch(batch_data.clone())
-                .await?;
+            let prepared = self.batch_submitter.prepare_batch(batch.clone()).await?;
             match self
-                .prove_and_submit_batch(
-                    from,
-                    &prepared,
-                    to,
-                    finalized_batch.withdrawals.clone(),
-                    shutdown,
-                )
+                .prepare_artifacts(from, prepared, finalized_batch.withdrawals.clone())
                 .await
             {
                 Err(BatchSubmitError::PreparedAnchorInvalid(error)) => {
                     warn!(
                         zone_from = from,
                         zone_to = to,
-                        anchor_block_number = prepared.anchor_block_number(),
-                        anchor_block_hash = %prepared.anchor.block_hash(),
-                        error = %error,
-                        "Prepared batch anchor expired or changed; rebuilding the settlement attempt"
+                        %error,
+                        "Prepared batch anchor expired or changed; rebuilding preparation"
                     );
-                }
-                Err(BatchSubmitError::PortalAdvanced) => {
-                    warn!(
-                        pending_zone_height = to,
-                        "Portal already committed the pending Zone height; resyncing"
-                    );
-                    let portal_anchor = self.resync_from_portal().await?;
-                    if portal_anchor < to {
-                        return Err(eyre::eyre!(
-                            "portal resynced to zone block {portal_anchor}, before pending batch boundary {to}"
-                        )
-                        .into());
-                    }
-                    return Ok(());
                 }
                 Err(BatchSubmitError::ProverHardforkChanged { proved, current }) => {
                     self.metrics.prover_hardfork_rebuild_total.increment(1);
-                    warn!(%proved, %current, zone_from = from, zone_to = to,
-                        "L1 prover policy changed; rebuilding the settlement attempt");
+                    warn!(
+                        %proved,
+                        %current,
+                        zone_from = from,
+                        zone_to = to,
+                        "L1 prover policy changed; rebuilding preparation"
+                    );
                 }
                 result => return result,
             }
         }
     }
 
-    /// Collect a certificate and submit, proving and preflighting when a prover is configured.
-    ///
-    /// Without a prover, or after proving or proof verification fails, selects
-    /// [`VerifierMode::NoProof`] and collects its certificate. Certificate collection errors do
-    /// not trigger fallback.
-    /// Submission has its own retry and reconciliation logic.
-    async fn prove_and_submit_batch(
-        &mut self,
+    /// Prepare the proof and certificate selected by the live L1 verifier policy.
+    async fn prepare_artifacts(
+        &self,
         from: u64,
-        batch: &PreparedBatch,
-        last_zone_block: u64,
+        prepared: PreparedBatch,
         withdrawals: Vec<abi::Withdrawal>,
-        shutdown: &sync::CancellationToken,
-    ) -> std::result::Result<(), BatchSubmitError> {
+    ) -> std::result::Result<ReadyBatch, BatchSubmitError> {
+        let to = prepared.batch.zone_height;
         let nitro_attempt = async {
             let Some(prover) = &self.settlement_prover else {
                 return Ok::<_, BatchSubmitError>(ControlFlow::Break(None));
             };
-            let proof = prover.prove(from, last_zone_block, batch.clone());
+            let proof = prover.prove(from, to, prepared.clone());
             tokio::pin!(proof);
 
-            let certificate = self.prepare_certificate(batch, VerifierMode::NitroV1);
+            let certificate = self.prepare_certificate(&prepared, VerifierMode::NitroV1);
             tokio::pin!(certificate);
 
             // Poll both concurrently. `NoProof` fallback decision doesn't wait for `Nitro` quorum.
@@ -610,11 +642,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             Ok::<_, BatchSubmitError>(ControlFlow::Continue((proof, certificate)))
         };
 
-        let (verifier_mode, proof_bundle, certificate) = match tokio::select! {
-            biased; // Prefer cancellation if shutdown and preparation are both ready.
-            () = shutdown.cancelled() => return Err(BatchSubmitError::Cancelled),
-            result = nitro_attempt => result?,
-        } {
+        let (verifier_mode, proof, certificate) = match nitro_attempt.await? {
             ControlFlow::Continue((proof, certificate)) => {
                 (VerifierMode::NitroV1, Some(proof), certificate)
             }
@@ -624,63 +652,65 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     self.metrics.batch_no_proof_fallback_total.increment(1);
                 }
                 // Dropping the Nitro attempt releases its signature route before the fallback.
-                let certificate = tokio::select! {
-                    biased;
-                    () = shutdown.cancelled() => return Err(BatchSubmitError::Cancelled),
-                    result = self.prepare_certificate(batch, VerifierMode::NoProof) => result?,
-                };
+                let certificate = self
+                    .prepare_certificate(&prepared, VerifierMode::NoProof)
+                    .await?;
                 (VerifierMode::NoProof, None, certificate)
             }
         };
 
-        self.submit_batch_with_retry(
-            batch,
-            proof_bundle.as_ref(),
-            (verifier_mode, certificate),
-            last_zone_block,
+        Ok(ReadyBatch {
+            prepared,
+            proof,
+            verifier_mode,
+            certificate,
             withdrawals,
-        )
-        .await
+        })
     }
 
-    /// Submit a `submitBatch` transaction to the ZonePortal on L1 with exponential
-    /// backoff retry.
-    ///
-    /// On success:
-    /// - Advances `prev_zone_block_hash`, `prev_processed_deposit_hash`, and
-    ///   `last_submitted_zone_block` to reflect the submitted range.
-    /// - Stores withdrawals under the receipt's assigned portal queue index when
-    ///   the batch included withdrawals.
-    /// - Signals the [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor)
-    ///   so it can finalize newly enqueued withdrawal slots.
-    ///
-    /// The verifier mode, proof, and certificate never change across attempts. Each attempt
-    /// first reconciles with the portal; after [`MAX_RETRIES`] failures, the anchor is resynced.
-    async fn submit_batch_with_retry(
-        &mut self,
+    async fn prepare_certificate(
+        &self,
         prepared: &PreparedBatch,
-        proof_bundle: Option<&SettlementProof>,
-        settlement: (VerifierMode, Option<SettlementCertificate>),
-        last_zone_block: u64,
-        withdrawals: Vec<abi::Withdrawal>,
-    ) -> std::result::Result<(), BatchSubmitError> {
-        let (verifier_mode, certificate) = settlement;
+        verifier_mode: VerifierMode,
+    ) -> Result<Option<SettlementCertificate>, BatchSubmitError> {
+        match &self.config.settlements {
+            Some(settlements) => settlements.prepare(prepared, verifier_mode).await.map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
+    /// Submit a prepared batch to the ZonePortal on L1 with exponential backoff retry.
+    ///
+    /// A portal mismatch or exhausted retries invalidates the pipeline so the monitor can restart
+    /// from portal-confirmed state. The verifier mode, proof, and certificate stay fixed across
+    /// retries.
+    async fn submit_ready_batch(&mut self, ready: ReadyBatch) -> Result<()> {
+        let ReadyBatch {
+            prepared,
+            proof,
+            verifier_mode,
+            certificate,
+            withdrawals,
+        } = ready;
         let batch_data = &prepared.batch;
+        let last_zone_block = batch_data.zone_height;
         let mut delay = INITIAL_RETRY_DELAY;
 
         for attempt in 1..=MAX_RETRIES {
-            // Reconcile before every attempt. A prior submitBatch may have landed even when its
-            // receipt timed out, in which case waiting for the old certificate can block forever.
+            // A prior transaction may have landed even if its receipt timed out. Check the portal
+            // before each attempt and rebuild the whole pipeline if its predecessor has changed.
             let portal_hash = match self.batch_submitter.read_portal_block_hash().await {
                 Ok(portal_hash) => portal_hash,
-                Err(e) => {
+                Err(error) => {
                     if attempt < MAX_RETRIES {
                         self.metrics.batch_submit_retry_total.increment(1);
                         warn!(
                             attempt,
                             max_retries = MAX_RETRIES,
                             delay_secs = delay.as_secs(),
-                            error = %e,
+                            %error,
                             "Failed reading portal state before batch submission, retrying"
                         );
                         tokio::time::sleep(delay).await;
@@ -689,7 +719,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     }
                     self.metrics.batch_submit_failure_total.increment(1);
                     error!(
-                        error = %e,
+                        %error,
                         last_zone_block,
                         "Failed reading portal state before batch submission after {MAX_RETRIES} retries"
                     );
@@ -697,26 +727,22 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 }
             };
             if portal_hash != batch_data.prev_block_hash {
-                warn!(
-                    local_prev = %batch_data.prev_block_hash,
-                    portal_hash = %portal_hash,
-                    "prev_block_hash mismatch with portal, resyncing"
+                eyre::bail!(
+                    "portal block hash {portal_hash} no longer matches predecessor {} for zone \
+                     batch {last_zone_block}; invalidating prepared batch pipeline",
+                    batch_data.prev_block_hash
                 );
-                let portal_anchor = self.resync_from_portal().await?;
-                if portal_anchor < last_zone_block {
-                    return Err(eyre::eyre!(
-                        "portal resynced to zone block {portal_anchor}, before pending batch \
-                         boundary {last_zone_block}"
-                    )
-                    .into());
-                }
-                return Ok(());
             }
 
             let submit_started = std::time::Instant::now();
             match self
                 .batch_submitter
-                .submit_batch(prepared, proof_bundle, certificate.as_ref(), verifier_mode)
+                .submit_batch(
+                    &prepared,
+                    proof.as_ref(),
+                    certificate.as_ref(),
+                    verifier_mode,
+                )
                 .await
             {
                 Ok(event) => {
@@ -731,7 +757,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
-                    let blocks_in_batch = last_zone_block - self.last_submitted_zone_block;
+                    let previous_zone_block = self.submitted_zone_block();
+                    let blocks_in_batch = last_zone_block - previous_zone_block;
                     info!(
                         last_zone_block,
                         blocks_in_batch,
@@ -749,18 +776,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         .withdrawals_per_batch
                         .record(withdrawals.len() as f64);
 
-                    // Only advance local state on success.
-                    self.prev_zone_block_hash = batch_data.next_block_hash;
-                    self.prev_processed_deposit_hash = batch_data.next_processed_deposit_hash;
-                    self.prev_processed_deposit_number = batch_data.next_deposit_number;
-                    self.prev_processed_token_count = batch_data.next_processed_token_count;
-                    self.last_submitted_zone_block = last_zone_block;
+                    self.submitted_zone_block
+                        .store(last_zone_block, Ordering::Relaxed);
                     self.metrics
                         .latest_zone_block_submitted_to_l1
                         .set(last_zone_block as f64);
                     self.update_submission_lag();
 
-                    // Store withdrawals under the logical portal queue index assigned on-chain.
                     if let Some(portal_index) = portal_index {
                         if !withdrawals.is_empty() {
                             let count = withdrawals.len();
@@ -773,52 +795,44 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                                 );
                             }
                         }
-                    } else {
-                        if !batch_data.withdrawal_queue_hash.is_zero() || !withdrawals.is_empty() {
-                            warn!(
-                                withdrawal_queue_hash = %batch_data.withdrawal_queue_hash,
-                                withdrawal_count = withdrawals.len(),
-                                "submitBatch emitted NO_QUEUE_INDEX for a batch that locally had withdrawals"
-                            );
-                        }
+                    } else if !batch_data.withdrawal_queue_hash.is_zero() || !withdrawals.is_empty()
+                    {
+                        warn!(
+                            withdrawal_queue_hash = %batch_data.withdrawal_queue_hash,
+                            withdrawal_count = withdrawals.len(),
+                            "submitBatch emitted NO_QUEUE_INDEX for a batch that locally had withdrawals"
+                        );
                     }
 
                     self.withdrawal_notify.notify_one();
-
                     return Ok(());
                 }
-                Err(BatchSubmitError::Cancelled) => return Err(BatchSubmitError::Cancelled),
                 Err(BatchSubmitError::PortalAdvanced) => {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
-                    warn!(
-                        local_prev = %batch_data.prev_block_hash,
-                        last_zone_block,
-                        "Portal already committed the pending Zone height; resyncing"
+                    eyre::bail!(
+                        "portal advanced while submitting zone batch {last_zone_block}; \
+                         invalidating prepared batch pipeline"
                     );
-                    let portal_anchor = self.resync_from_portal().await?;
-                    if portal_anchor < last_zone_block {
-                        return Err(eyre::eyre!(
-                            "portal resynced to zone block {portal_anchor}, before pending batch \
-                             boundary {last_zone_block}"
-                        )
-                        .into());
-                    }
-                    return Ok(());
                 }
-                Err(
-                    error @ (BatchSubmitError::PreparedAnchorInvalid(_)
-                    | BatchSubmitError::ProverHardforkChanged { .. }),
-                ) => return Err(error),
-                Err(BatchSubmitError::Other(e)) => {
+                Err(BatchSubmitError::PreparedAnchorInvalid(error)) => {
+                    return Err(error.wrap_err(format!(
+                        "prepared anchor invalid while submitting zone batch {last_zone_block}"
+                    )));
+                }
+                Err(error @ BatchSubmitError::ProverHardforkChanged { .. }) => {
+                    self.metrics.prover_hardfork_rebuild_total.increment(1);
+                    return Err(error.into());
+                }
+                Err(BatchSubmitError::Other(error)) => {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
-                    // Check if the failure is due to a changed L1 hardfork.
-                    // It means we shouldn't retry the batch submission, and instead the full batch re-proving
-                    // is needed.
-                    if let Some(proved) = proof_bundle.map(|proof| proof.hardfork) {
+
+                    // A failed submission may mean L1 crossed a prover-policy hardfork while this
+                    // batch was being prepared. Rebuild it with the current verifier in that case.
+                    if let Some(proved) = proof.as_ref().map(|proof| proof.hardfork) {
                         match active_l1_hardfork(
                             self.batch_submitter.l1_provider(),
                             self.config.chain_spec.as_ref(),
@@ -826,10 +840,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         .await
                         {
                             Ok(current) if current != proved => {
+                                self.metrics.prover_hardfork_rebuild_total.increment(1);
                                 return Err(BatchSubmitError::ProverHardforkChanged {
                                     proved,
                                     current,
-                                });
+                                }
+                                .into());
                             }
                             Err(error) => {
                                 warn!(%error, "Failed checking L1 hardfork after batch submission error");
@@ -837,13 +853,14 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                             Ok(_) => {}
                         }
                     }
+
                     if attempt < MAX_RETRIES {
                         self.metrics.batch_submit_retry_total.increment(1);
                         warn!(
                             attempt,
                             max_retries = MAX_RETRIES,
                             delay_secs = delay.as_secs(),
-                            error = %e,
+                            %error,
                             "Batch submission failed, retrying"
                         );
                         tokio::time::sleep(delay).await;
@@ -851,7 +868,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     } else {
                         self.metrics.batch_submit_failure_total.increment(1);
                         error!(
-                            error = %e,
+                            %error,
                             last_zone_block,
                             tempo_block_number = batch_data.tempo_block_number,
                             prev_block_hash = %batch_data.prev_block_hash,
@@ -863,118 +880,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             }
         }
 
-        // All retries exhausted — resync from portal.
-        self.resync_from_portal()
-            .await
-            .wrap_err("failed to resync after exhausting batch submission retries")?;
-
         Err(eyre::eyre!(
             "batch submission failed after {MAX_RETRIES} retries for zone block {last_zone_block}"
-        )
-        .into())
-    }
-
-    /// Resync the local submission anchor from portal-confirmed on-chain state.
-    ///
-    /// Called after exhausting retries or when a preflight hash mismatch is
-    /// detected, so subsequent batches start from the portal's actual accepted
-    /// zone block rather than stale local values.
-    ///
-    /// Returns the portal-confirmed canonical Zone block number. Callers must verify that this
-    /// anchor covers any batch boundary they were attempting to submit.
-    async fn resync_from_portal(&mut self) -> Result<u64> {
-        self.metrics.resync_from_portal_total.increment(1);
-        let old_hash = self.prev_zone_block_hash;
-        let old_last_submitted = self.last_submitted_zone_block;
-        let (
-            store_batches_before_resync,
-            store_first_slot_before_resync,
-            store_last_slot_before_resync,
-        ) = {
-            let store = self.withdrawal_store.lock();
-            store.summary()
-        };
-        let snapshot = self.build_portal_resync_snapshot().await?;
-        let portal_anchor = snapshot.portal_anchor;
-        let portal_hash = portal_anchor.block_hash;
-        let last_submitted_zone_block = portal_anchor.block_number;
-        let deposit_hash = snapshot.previous_snapshot.processed_deposit_hash;
-        let deposit_number = snapshot.previous_snapshot.processed_deposit_number;
-
-        warn!(
-            old_prev_block_hash = %old_hash,
-            new_block_hash = %portal_hash,
-            old_last_submitted_zone_block = old_last_submitted,
-            new_last_submitted_zone_block = last_submitted_zone_block,
-            store_batches_before_resync,
-            store_first_slot_before_resync,
-            store_last_slot_before_resync,
-            %deposit_hash,
-            deposit_number,
-            "Resynced from portal and zone state"
-        );
-        self.prev_zone_block_hash = portal_hash;
-        self.last_submitted_zone_block = last_submitted_zone_block;
-        // Rewind boundary discovery to the portal-confirmed anchor. The caller may only advance
-        // this cursor again after every discovered boundary is confirmed submitted.
-        self.latest_observed_zone_block = last_submitted_zone_block;
-        self.prev_processed_deposit_hash = deposit_hash;
-        self.prev_processed_deposit_number = deposit_number;
-        self.prev_processed_token_count = snapshot.previous_snapshot.processed_token_count;
-        self.replace_pending_withdrawals(snapshot.pending_withdrawals);
-        self.metrics
-            .latest_zone_block_submitted_to_l1
-            .set(last_submitted_zone_block as f64);
-        self.update_submission_lag();
-        Ok(last_submitted_zone_block)
-    }
-
-    async fn prepare_certificate(
-        &self,
-        prepared: &PreparedBatch,
-        verifier_mode: VerifierMode,
-    ) -> Result<Option<SettlementCertificate>, BatchSubmitError> {
-        match &self.config.settlements {
-            Some(settlements) => settlements.prepare(prepared, verifier_mode).await.map(Some),
-            None => Ok(None),
-        }
-    }
-
-    async fn build_portal_resync_snapshot(&self) -> Result<PortalResyncSnapshot> {
-        let portal_anchor = resolve_portal_zone_anchor(
-            &self.provider,
-            self.config.portal_address,
-            self.batch_submitter.l1_provider(),
-        )
-        .await
-        .wrap_err("failed to resolve portal-confirmed zone block during resync")?;
-        let previous_snapshot = Self::snapshot_at_or_genesis(
-            &self.provider,
-            self.config.inbox_address,
-            portal_anchor.block_number,
-        )
-        .wrap_err("failed to read portal-confirmed zone commitments")?;
-        let pending_withdrawals = self.fetch_pending_withdrawals_from_chain().await?;
-
-        let confirmed_portal_anchor = resolve_portal_zone_anchor(
-            &self.provider,
-            self.config.portal_address,
-            self.batch_submitter.l1_provider(),
-        )
-        .await
-        .wrap_err("failed to confirm portal-confirmed zone block during resync")?;
-        if confirmed_portal_anchor != portal_anchor {
-            eyre::bail!(
-                "portal anchor changed while building resync snapshot: initial={portal_anchor:?}, \
-                 confirmed={confirmed_portal_anchor:?}"
-            );
-        }
-
-        Ok(PortalResyncSnapshot {
-            portal_anchor,
-            previous_snapshot,
-            pending_withdrawals,
-        })
+        ))
     }
 
     fn snapshot_at_or_genesis(
@@ -994,29 +902,26 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         read_zone_block_snapshot(provider, inbox_address, zone_block_number)
     }
 
-    fn record_observed_zone_block(&mut self, latest_zone_block: u64) {
-        self.latest_observed_zone_block = latest_zone_block;
+    fn update_submission_lag(&self) {
+        let latest_observed_zone_block = self.observed_zone_block.load(Ordering::Relaxed);
+        let submitted_zone_block = self.submitted_zone_block();
         self.metrics
-            .latest_zone_block_observed
-            .set(latest_zone_block as f64);
-        self.update_submission_lag();
+            .zone_to_l1_submission_lag_blocks
+            .set(latest_observed_zone_block.saturating_sub(submitted_zone_block) as f64);
     }
 
-    fn update_submission_lag(&self) {
-        self.metrics.zone_to_l1_submission_lag_blocks.set(
-            self.latest_observed_zone_block
-                .saturating_sub(self.last_submitted_zone_block) as f64,
-        );
+    fn submitted_zone_block(&self) -> u64 {
+        self.submitted_zone_block.load(Ordering::Relaxed)
     }
 }
 
 /// Spawn the zone monitor as a background task.
 ///
-/// The monitor consumes canonical Zone state notifications and submits finalized batch
+/// The monitor consumes persisted Zone block notifications and submits finalized batch
 /// boundaries to the ZonePortal on Tempo L1. Local state only advances on successful submission.
 ///
 /// The `l1_provider` must already include the sequencer wallet for signing L1 transactions.
-pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
+pub(crate) fn spawn_zone_monitor<P>(
     config: ZoneMonitorConfig,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
@@ -1024,7 +929,10 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     shared_state: ZoneMonitorSharedState,
     settlement_prover: Option<SettlementProver>,
     shutdown: sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<()>
+where
+    P: ZoneSequencerProvider + PersistedBlockSubscriptions,
+{
     let ZoneMonitorSharedState {
         withdrawal_store,
         withdrawal_notify,
@@ -1036,7 +944,7 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
                 info!("Zone monitor stopped before start");
                 return;
             }
-            let mut monitor = match ZoneMonitor::new_with_provider(
+            let monitor = match ZoneMonitor::new_with_provider(
                 config.clone(),
                 zone_provider.clone(),
                 l1_provider.clone(),
@@ -1188,10 +1096,6 @@ mod tests {
         (U256::ZERO, values).abi_encode_params().into()
     }
 
-    fn abi_encode_portal_checkpoint(hash: B256, height: u64) -> Bytes {
-        abi_encode_multicall(vec![abi_encode_b256(hash), abi_encode_u64(height)])
-    }
-
     fn test_monitor(
         l1: Asserter,
         zone_provider: TestZoneProvider,
@@ -1212,21 +1116,25 @@ mod tests {
         };
         let l1_provider = mock_provider(l1);
         let chain_spec = config.chain_spec.clone();
+        let cursor = BatchCursor {
+            zone_height: 10,
+            block_hash: B256::repeat_byte(0xbb),
+            processed_deposit_hash: B256::repeat_byte(0xaa),
+            processed_deposit_number: 0,
+            processed_token_count: 0,
+        };
 
         ZoneMonitor {
             config,
             metrics: crate::metrics::ZoneMonitorMetrics::default(),
             provider: zone_provider,
             withdrawal_store: SharedWithdrawalStore::new(),
-            batch_submitter: BatchSubmitter::new(portal_address, l1_provider, chain_spec),
+            batch_submitter: Arc::new(BatchSubmitter::new(portal_address, l1_provider, chain_spec)),
             withdrawal_notify: Arc::new(Notify::new()),
             repair_notify: Arc::new(Notify::new()),
-            last_submitted_zone_block: 10,
-            prev_processed_deposit_hash: B256::repeat_byte(0xaa),
-            prev_processed_deposit_number: 0,
-            prev_processed_token_count: 0,
-            prev_zone_block_hash: B256::repeat_byte(0xbb),
-            latest_observed_zone_block: 50,
+            preparation_cursor: cursor,
+            observed_zone_block: Arc::new(AtomicU64::new(50)),
+            submitted_zone_block: Arc::new(AtomicU64::new(10)),
             settlement_prover: None,
         }
     }
@@ -1257,37 +1165,33 @@ mod tests {
         }
     }
 
+    fn ready_batch(batch: BatchData) -> ReadyBatch {
+        ReadyBatch {
+            prepared: prepared(batch),
+            proof: None,
+            verifier_mode: VerifierMode::NoProof,
+            certificate: None,
+            withdrawals: Vec::new(),
+        }
+    }
+
     #[tokio::test]
-    async fn proof_verification_failure_enters_no_proof_submission_path() {
+    async fn proof_failure_prepares_no_proof_fallback() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
         monitor.settlement_prover = Some(SettlementProver::fixed(Err(eyre::eyre!(
             "execution reverted: out of gas"
         ))));
-        // The fallback must reach the submission loop. Fail its portal reads so the
-        // test does not need a signer or a successful L1 transaction.
-        for _ in 0..MAX_RETRIES {
-            l1.push_failure_msg("portal read failed");
-        }
-        l1.push_failure_msg("resync failed");
 
-        let error = monitor
-            .prove_and_submit_batch(
-                11,
-                &prepared(test_batch_data()),
-                20,
-                Vec::new(),
-                &sync::CancellationToken::new(),
-            )
+        let ready = monitor
+            .batch_preparer()
+            .prepare_artifacts(11, prepared(test_batch_data()), Vec::new())
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("failed to resync after exhausting")
-        );
-        assert!(l1.read_q().is_empty(), "fallback must reach submission");
+        assert_eq!(ready.verifier_mode, VerifierMode::NoProof);
+        assert!(ready.proof.is_none());
+        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
@@ -1296,7 +1200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proof_verification_setup_failure_collects_no_proof_quorum_until_leader_demotion() {
+    async fn proof_failure_collects_no_proof_quorum() {
         let proof = Some(Err(eyre::eyre!("failed to read portal verifier")));
         assert_no_proof_quorum(proof).await;
     }
@@ -1313,7 +1217,7 @@ mod tests {
             tx
         });
         let (commands, mut proposals) = tokio::sync::mpsc::channel(1);
-        let settlements = SettlementManager::new(
+        monitor.config.settlements = Some(SettlementManager::new(
             crate::attestation::AttestationDomain {
                 l1_chain_id: 1337,
                 portal_address: monitor.config.portal_address,
@@ -1326,10 +1230,9 @@ mod tests {
             monitor.config.chain_spec.clone(),
             BatchAnchorConfig::default(),
             commands,
-        );
-        monitor.config.settlements = Some(settlements);
-        let header = tempo_alloy::rpc::TempoHeaderResponse {
-            inner: alloy_rpc_types_eth::Header {
+        ));
+        let header = TempoHeaderResponse {
+            inner: RpcHeader {
                 hash: B256::ZERO,
                 inner: TempoHeader::default(),
                 total_difficulty: None,
@@ -1337,7 +1240,6 @@ mod tests {
             },
             timestamp_millis: 0,
         };
-        // `NoProof` prepares once. A configured prover also prepares a Nitro certificate first.
         for _ in 0..(1 + usize::from(proof_tx.is_some())) {
             l1.push_success(&mock_l1_header(1_000));
             l1.push_success(&abi_encode_multicall(vec![
@@ -1349,21 +1251,14 @@ mod tests {
             l1.push_success(&serde_json::json!("0x7b"));
             l1.push_success(&header);
         }
-        let shutdown = sync::CancellationToken::new();
-        let task_shutdown = shutdown.clone();
+
         let task = tokio::spawn(async move {
             monitor
-                .prove_and_submit_batch(
-                    11,
-                    &prepared(test_batch_data()),
-                    20,
-                    Vec::new(),
-                    &task_shutdown,
-                )
+                .batch_preparer()
+                .prepare_artifacts(11, prepared(test_batch_data()), Vec::new())
                 .await
         });
         if let Some(proof_tx) = proof_tx {
-            // Fail proving after the Nitro proposal, forcing a fresh `NoProof` quorum.
             let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
                 .await
                 .unwrap()
@@ -1391,68 +1286,18 @@ mod tests {
             VerifierMode::NoProof.config_hash()
         );
         assert!(!task.is_finished(), "a second signature is still required");
-        shutdown.cancel();
-        let result = tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(result, Err(BatchSubmitError::Cancelled)));
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
         assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
-    async fn validation_failure_enters_no_proof_submission_path() {
-        let l1 = Asserter::new();
-        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        monitor.settlement_prover =
-            Some(SettlementProver::fixed(Err(eyre::eyre!("invalid proof"))));
-        let prepared = prepared(test_batch_data());
-        // Fail the fallback's submission reads so the test needs no L1 signer.
-        for _ in 0..MAX_RETRIES {
-            l1.push_failure_msg("portal read failed");
-        }
-        l1.push_failure_msg("resync failed");
-
-        let error = monitor
-            .prove_and_submit_batch(
-                11,
-                &prepared,
-                20,
-                Vec::new(),
-                &sync::CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("failed to resync after exhausting")
-        );
-        assert!(l1.read_q().is_empty(), "fallback must reach submission");
-    }
-
-    #[tokio::test]
-    async fn submission_error_rebuilds_on_hardfork_change() {
+    async fn submission_error_invalidates_pipeline_on_hardfork_change() {
         use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
 
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        let batch = BatchData {
-            zone_height: 20,
-            tempo_block_number: 123,
-            prev_block_hash: B256::repeat_byte(0xbb),
-            next_block_hash: B256::repeat_byte(0xcc),
-            prev_processed_deposit_hash: B256::ZERO,
-            next_processed_deposit_hash: B256::ZERO,
-            prev_deposit_number: 0,
-            next_deposit_number: 0,
-            prev_processed_token_count: 0,
-            next_processed_token_count: 0,
-            withdrawal_queue_hash: B256::ZERO,
-            withdrawal_batch_index: 1,
-        };
-        // The first attempt fails after selecting the ABI, then L1 activates T13.
+        let batch = test_batch_data();
         l1.push_success(&abi_encode_b256(batch.prev_block_hash));
         l1.push_success(&mock_l1_header(999));
         l1.push_failure_msg("submission metadata temporarily unavailable");
@@ -1464,22 +1309,22 @@ mod tests {
             },
             hardfork: TempoHardfork::T12,
         };
-        let error = monitor
-            .submit_batch_with_retry(
-                &prepared(batch),
-                Some(&proof),
-                (VerifierMode::NitroV1, None),
-                20,
-                Vec::new(),
-            )
-            .await
-            .unwrap_err();
+        let ready = ReadyBatch {
+            prepared: prepared(batch),
+            proof: Some(proof),
+            verifier_mode: VerifierMode::NitroV1,
+            certificate: None,
+            withdrawals: Vec::new(),
+        };
+
+        let error = monitor.submit_ready_batch(ready).await.unwrap_err();
+
         assert!(matches!(
-            error,
-            BatchSubmitError::ProverHardforkChanged {
+            error.downcast_ref::<BatchSubmitError>(),
+            Some(BatchSubmitError::ProverHardforkChanged {
                 proved: TempoHardfork::T12,
                 current: TempoHardfork::T13,
-            }
+            })
         ));
         assert!(l1.read_q().is_empty());
     }
@@ -1527,100 +1372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resync_rejects_zero_hash_at_nonzero_height_without_changing_state() {
-        let l1 = Asserter::new();
-        l1.push_success(&abi_encode_portal_checkpoint(B256::ZERO, 42));
-        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        monitor.prev_processed_deposit_number = 7;
-        monitor.prev_processed_token_count = 2;
-        monitor.withdrawal_store.lock().add_withdrawal(
-            3,
-            abi::Withdrawal {
-                token: Address::repeat_byte(0x10),
-                senderTag: B256::repeat_byte(0x11),
-                to: Address::repeat_byte(0x12),
-                amount: 100,
-                memo: B256::ZERO,
-                gasLimit: 0,
-                fallbackNonce: 1,
-                callbackData: Default::default(),
-                encryptedSender: Default::default(),
-            },
-        );
-
-        let error = monitor.resync_from_portal().await.unwrap_err();
-
-        assert!(format!("{error:#}").contains(
-            "inconsistent ZonePortal checkpoint: zero block hash at nonzero Zone height 42"
-        ));
-        assert_eq!(monitor.prev_zone_block_hash, B256::repeat_byte(0xbb));
-        assert_eq!(monitor.last_submitted_zone_block, 10);
-        assert_eq!(monitor.latest_observed_zone_block, 50);
-        assert_eq!(monitor.prev_processed_deposit_hash, B256::repeat_byte(0xaa));
-        assert_eq!(monitor.prev_processed_deposit_number, 7);
-        assert_eq!(monitor.prev_processed_token_count, 2);
-        assert_eq!(monitor.withdrawal_store.lock().batch_count(), 1);
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
-    async fn resync_accepts_zero_hash_at_zero_height() {
-        let l1 = Asserter::new();
-        l1.push_success(&abi_encode_portal_checkpoint(B256::ZERO, 0));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(0),
-            abi_encode_u64(0),
-        ]));
-        l1.push_success(&abi_encode_portal_checkpoint(B256::ZERO, 0));
-        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-
-        assert_eq!(monitor.resync_from_portal().await.unwrap(), 0);
-
-        assert_eq!(monitor.prev_zone_block_hash, B256::ZERO);
-        assert_eq!(monitor.last_submitted_zone_block, 0);
-        assert_eq!(monitor.latest_observed_zone_block, 0);
-        assert_eq!(monitor.prev_processed_deposit_hash, B256::ZERO);
-        assert_eq!(monitor.prev_processed_deposit_number, 0);
-        assert_eq!(monitor.prev_processed_token_count, 0);
-        assert_eq!(monitor.withdrawal_store.lock().batch_count(), 0);
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
-    async fn resync_uses_portal_confirmed_zone_block_for_processed_deposit_hash() {
-        let l1 = Asserter::new();
-        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
-        let confirmed_zone_block = 42;
-        let confirmed_deposit_hash = B256::repeat_byte(0x33);
-        let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
-
-        l1.push_success(&abi_encode_portal_checkpoint(
-            portal_hash,
-            confirmed_zone_block,
-        ));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(7),
-            abi_encode_u64(7),
-        ]));
-        l1.push_success(&abi_encode_portal_checkpoint(
-            portal_hash,
-            confirmed_zone_block,
-        ));
-
-        let mut monitor = test_monitor(l1.clone(), zone);
-        monitor.prev_processed_token_count = 99;
-
-        let anchor = monitor.resync_from_portal().await.unwrap();
-
-        assert_eq!(anchor, confirmed_zone_block);
-        assert_eq!(monitor.prev_zone_block_hash, portal_hash);
-        assert_eq!(monitor.last_submitted_zone_block, confirmed_zone_block);
-        assert_eq!(monitor.prev_processed_deposit_hash, confirmed_deposit_hash);
-        assert_eq!(monitor.prev_processed_token_count, 0);
-    }
-
-    #[tokio::test]
-    async fn refill_withdrawal_cache_does_not_resync_the_portal_anchor() {
+    async fn refill_withdrawal_cache_does_not_change_submission_cursor() {
         let l1 = Asserter::new();
         let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
         let zone = mock_zone_provider(portal_hash, 42, B256::repeat_byte(0x33));
@@ -1631,9 +1383,7 @@ mod tests {
         ]));
 
         let monitor = test_monitor(l1.clone(), zone);
-        let old_hash = monitor.prev_zone_block_hash;
-        let old_last_submitted = monitor.last_submitted_zone_block;
-        let old_deposit_hash = monitor.prev_processed_deposit_hash;
+        let old_last_submitted = monitor.submitted_zone_block();
         monitor.withdrawal_store.lock().add_withdrawal(
             3,
             abi::Withdrawal {
@@ -1653,282 +1403,31 @@ mod tests {
 
         let store = monitor.withdrawal_store.lock();
         assert_eq!(store.batch_count(), 0);
-        assert_eq!(monitor.prev_zone_block_hash, old_hash);
-        assert_eq!(monitor.last_submitted_zone_block, old_last_submitted);
-        assert_eq!(monitor.prev_processed_deposit_hash, old_deposit_hash);
+        assert_eq!(monitor.submitted_zone_block(), old_last_submitted);
         assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
-    async fn resync_preserves_last_known_good_state_when_restore_fails() {
+    async fn preflight_hash_mismatch_invalidates_pipeline() {
         let l1 = Asserter::new();
         let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
-        let confirmed_zone_block = 42;
-        let confirmed_deposit_hash = B256::repeat_byte(0x33);
-        let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
-
-        l1.push_success(&abi_encode_portal_checkpoint(
-            portal_hash,
-            confirmed_zone_block,
-        ));
-        l1.push_failure_msg("head read failed");
-        l1.push_failure_msg("tail read failed");
-
-        let mut monitor = test_monitor(l1.clone(), zone);
-        let old_hash = monitor.prev_zone_block_hash;
-        let old_last_submitted = monitor.last_submitted_zone_block;
-        let old_latest_observed = monitor.latest_observed_zone_block;
-        let old_deposit_hash = monitor.prev_processed_deposit_hash;
-        let old_deposit_number = monitor.prev_processed_deposit_number;
-        monitor.withdrawal_store.lock().add_withdrawal(
-            3,
-            abi::Withdrawal {
-                token: Address::repeat_byte(0x10),
-                senderTag: B256::repeat_byte(0x11),
-                to: Address::repeat_byte(0x12),
-                amount: 100,
-                memo: B256::ZERO,
-                gasLimit: 0,
-                fallbackNonce: 1,
-                callbackData: Default::default(),
-                encryptedSender: Default::default(),
-            },
-        );
-
-        let error = monitor.resync_from_portal().await.unwrap_err();
-
-        assert!(error.to_string().contains("head read failed"));
-        let store = monitor.withdrawal_store.lock();
-        assert_eq!(store.batch_count(), 1);
-        assert_eq!(monitor.prev_zone_block_hash, old_hash);
-        assert_eq!(monitor.last_submitted_zone_block, old_last_submitted);
-        assert_eq!(monitor.latest_observed_zone_block, old_latest_observed);
-        assert_eq!(monitor.prev_processed_deposit_hash, old_deposit_hash);
-        assert_eq!(monitor.prev_processed_deposit_number, old_deposit_number);
-    }
-
-    #[tokio::test]
-    async fn resync_preserves_last_known_good_state_when_portal_anchor_changes() {
-        let l1 = Asserter::new();
-        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
-        let changed_portal_hash = B256::from(U256::from(8).to_be_bytes::<32>());
-        let zone = mock_zone_provider(portal_hash, 42, B256::repeat_byte(0x33));
-        let mut changed_header = TempoHeader::default();
-        changed_header.inner.number = 43;
-        zone.add_block(
-            changed_portal_hash,
-            Block {
-                header: changed_header,
-                body: Default::default(),
-            },
-        );
-
-        l1.push_success(&abi_encode_portal_checkpoint(portal_hash, 42));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(7),
-            abi_encode_u64(7),
-        ]));
-        l1.push_success(&abi_encode_portal_checkpoint(changed_portal_hash, 43));
-
-        let mut monitor = test_monitor(l1.clone(), zone);
-        let old_hash = monitor.prev_zone_block_hash;
-        let old_last_submitted = monitor.last_submitted_zone_block;
-        let old_latest_observed = monitor.latest_observed_zone_block;
-        let old_deposit_hash = monitor.prev_processed_deposit_hash;
-        let old_deposit_number = monitor.prev_processed_deposit_number;
-        monitor.withdrawal_store.lock().add_withdrawal(
-            3,
-            abi::Withdrawal {
-                token: Address::repeat_byte(0x10),
-                senderTag: B256::repeat_byte(0x11),
-                to: Address::repeat_byte(0x12),
-                amount: 100,
-                memo: B256::ZERO,
-                gasLimit: 0,
-                fallbackNonce: 1,
-                callbackData: Default::default(),
-                encryptedSender: Default::default(),
-            },
-        );
-
-        let error = monitor.resync_from_portal().await.unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("portal anchor changed while building resync snapshot")
-        );
-        assert_eq!(monitor.withdrawal_store.lock().batch_count(), 1);
-        assert_eq!(monitor.prev_zone_block_hash, old_hash);
-        assert_eq!(monitor.last_submitted_zone_block, old_last_submitted);
-        assert_eq!(monitor.latest_observed_zone_block, old_latest_observed);
-        assert_eq!(monitor.prev_processed_deposit_hash, old_deposit_hash);
-        assert_eq!(monitor.prev_processed_deposit_number, old_deposit_number);
-    }
-
-    #[tokio::test]
-    async fn preflight_hash_mismatch_resyncs_to_portal_confirmed_anchor() {
-        let l1 = Asserter::new();
-        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
-        let confirmed_zone_block = 42;
-        let confirmed_deposit_hash = B256::repeat_byte(0x33);
-        let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
-
         l1.push_success(&abi_encode_b256(portal_hash));
-        l1.push_success(&abi_encode_portal_checkpoint(
-            portal_hash,
-            confirmed_zone_block,
-        ));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(7),
-            abi_encode_u64(7),
-        ]));
-        l1.push_success(&abi_encode_portal_checkpoint(
-            portal_hash,
-            confirmed_zone_block,
-        ));
 
-        let mut monitor = test_monitor(l1.clone(), zone);
-        let batch_data = BatchData {
-            zone_height: 20,
-            tempo_block_number: 123,
-            prev_block_hash: B256::repeat_byte(0x99),
-            next_block_hash: B256::repeat_byte(0x55),
-            prev_processed_deposit_hash: B256::repeat_byte(0x77),
-            next_processed_deposit_hash: B256::repeat_byte(0x66),
-            prev_deposit_number: 0,
-            next_deposit_number: 0,
-            prev_processed_token_count: 0,
-            next_processed_token_count: 0,
-            withdrawal_queue_hash: B256::ZERO,
-            withdrawal_batch_index: 8,
-        };
-
-        monitor
-            .submit_batch_with_retry(
-                &prepared(batch_data.clone()),
-                None,
-                (VerifierMode::NitroV1, None),
-                20,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(monitor.prev_zone_block_hash, portal_hash);
-        assert_eq!(monitor.last_submitted_zone_block, confirmed_zone_block);
-        assert_eq!(monitor.prev_processed_deposit_hash, confirmed_deposit_hash);
-        assert_ne!(monitor.prev_zone_block_hash, batch_data.next_block_hash);
-        assert_ne!(
-            monitor.prev_processed_deposit_hash,
-            batch_data.next_processed_deposit_hash
-        );
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
-    async fn preflight_hash_mismatch_rejects_anchor_before_pending_boundary() {
-        let l1 = Asserter::new();
-        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
-        let confirmed_zone_block = 15;
-        let pending_boundary = 20;
-        let confirmed_deposit_hash = B256::repeat_byte(0x33);
-        let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
-
-        l1.push_success(&abi_encode_b256(portal_hash));
-        l1.push_success(&abi_encode_portal_checkpoint(
-            portal_hash,
-            confirmed_zone_block,
-        ));
-        l1.push_success(&abi_encode_multicall(vec![
-            abi_encode_u64(7),
-            abi_encode_u64(7),
-        ]));
-        l1.push_success(&abi_encode_portal_checkpoint(
-            portal_hash,
-            confirmed_zone_block,
-        ));
-
-        let mut monitor = test_monitor(l1.clone(), zone);
-        let batch_data = BatchData {
-            zone_height: pending_boundary,
-            tempo_block_number: 123,
-            prev_block_hash: B256::repeat_byte(0x99),
-            next_block_hash: B256::repeat_byte(0x55),
-            prev_processed_deposit_hash: B256::repeat_byte(0x77),
-            next_processed_deposit_hash: B256::repeat_byte(0x66),
-            prev_deposit_number: 0,
-            next_deposit_number: 0,
-            prev_processed_token_count: 0,
-            next_processed_token_count: 0,
-            withdrawal_queue_hash: B256::ZERO,
-            withdrawal_batch_index: 8,
-        };
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        let mut batch = test_batch_data();
+        batch.prev_block_hash = B256::repeat_byte(0x99);
 
         let error = monitor
-            .submit_batch_with_retry(
-                &prepared(batch_data),
-                None,
-                (VerifierMode::NitroV1, None),
-                pending_boundary,
-                Vec::new(),
-            )
+            .submit_ready_batch(ready_batch(batch))
             .await
             .unwrap_err();
 
         assert!(
             error
                 .to_string()
-                .contains("before pending batch boundary 20")
+                .contains("invalidating prepared batch pipeline")
         );
-        assert_eq!(monitor.last_submitted_zone_block, confirmed_zone_block);
-        assert_eq!(monitor.latest_observed_zone_block, confirmed_zone_block);
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
-    async fn preflight_hash_mismatch_propagates_failed_resync() {
-        let l1 = Asserter::new();
-        let portal_hash = B256::repeat_byte(0x77);
-        let zone = TestZoneProvider::new();
-
-        l1.push_success(&abi_encode_b256(portal_hash));
-        l1.push_failure_msg("resync unavailable");
-
-        let mut monitor = test_monitor(l1.clone(), zone);
-        let batch_data = BatchData {
-            zone_height: 20,
-            tempo_block_number: 123,
-            prev_block_hash: B256::repeat_byte(0x99),
-            next_block_hash: B256::repeat_byte(0x55),
-            prev_processed_deposit_hash: B256::repeat_byte(0x77),
-            next_processed_deposit_hash: B256::repeat_byte(0x66),
-            prev_deposit_number: 0,
-            next_deposit_number: 0,
-            prev_processed_token_count: 0,
-            next_processed_token_count: 0,
-            withdrawal_queue_hash: B256::ZERO,
-            withdrawal_batch_index: 8,
-        };
-
-        let error = monitor
-            .submit_batch_with_retry(
-                &prepared(batch_data),
-                None,
-                (VerifierMode::NitroV1, None),
-                20,
-                Vec::new(),
-            )
-            .await
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("failed to resolve portal-confirmed zone block during resync")
-        );
-        assert_eq!(monitor.last_submitted_zone_block, 10);
-        assert_eq!(monitor.latest_observed_zone_block, 50);
+        assert_eq!(monitor.submitted_zone_block(), 10);
         assert!(l1.read_q().is_empty());
     }
 }

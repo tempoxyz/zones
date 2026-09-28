@@ -189,8 +189,6 @@ pub(crate) struct ZoneMonitorMetrics {
 
     /// Batches that selected the proofless verifier after proving or preflight failed.
     pub batch_no_proof_fallback_total: Counter,
-    /// Number of times local monitor state was resynced from the portal.
-    pub resync_from_portal_total: Counter,
 
     /// Failed attempts to rebuild the in-memory withdrawal store from chain state.
     pub withdrawal_store_restore_failure_total: Counter,

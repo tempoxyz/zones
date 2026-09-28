@@ -10,7 +10,7 @@ use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::TransportResult;
-use reth_chain_state::CanonStateSubscriptions;
+use reth_chain_state::{CanonStateSubscriptions, PersistedBlockSubscriptions};
 use reth_storage_api::{BlockReader, StateProviderFactory};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
@@ -137,10 +137,9 @@ pub struct ZoneSequencerHandle {
 /// Spawn all zone sequencer background tasks.
 ///
 /// This is the top-level POC entrypoint that starts:
-/// - **Zone monitor** — consumes native canonical Zone blocks and receipts, extracts withdrawal
-///   events into the shared store, builds [`crate::BatchData`], and submits each batch
-///   synchronously to the ZonePortal on Tempo L1. Local state only advances on successful
-///   submission.
+/// - **Zone monitor** — prepares the next persisted Zone batch while the preceding batch is being
+///   submitted to the ZonePortal. Submission remains ordered, and confirmed state only advances
+///   after a successful L1 receipt.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawals` for each pending withdrawal.
 /// - **Settlement prover** — when `prover_config` is set, settlement waits for a successful SPF
@@ -152,7 +151,7 @@ pub struct ZoneSequencerHandle {
 ///
 /// `shutdown` stops both tasks gracefully: it is observed at their poll boundaries, so an
 /// in-flight L1 transaction resolves before teardown.
-pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
+pub async fn spawn_zone_sequencer<P>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
@@ -160,7 +159,10 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     prover_config: Option<SettlementProverConfig>,
     settlements: Option<SettlementManager>,
     shutdown: tokio_util::sync::CancellationToken,
-) -> ZoneSequencerHandle {
+) -> ZoneSequencerHandle
+where
+    P: ZoneSequencerProvider + PersistedBlockSubscriptions,
+{
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.

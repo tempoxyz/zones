@@ -59,7 +59,7 @@ serde_json.workspace = true
 schnellru.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
