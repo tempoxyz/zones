@@ -779,13 +779,18 @@ mod tests {
                 "T12=old:5000",
                 "--sequencer.prover-address",
                 "T13=new:5000",
+                "--sequencer.prover-address",
+                "T14=t14:5000",
             ],
-            vec!["--sequencer.prover-address", "T12=old:5000,T13=new:5000"],
+            vec![
+                "--sequencer.prover-address",
+                "T12=old:5000,T13=new:5000,T14=t14:5000",
+            ],
         ] {
             let args = ZoneArgsParser::try_parse_from(common.into_iter().chain(flags))
                 .unwrap()
                 .zone;
-            assert_eq!(args.prover_addresses.len(), 2);
+            assert_eq!(args.prover_addresses.len(), 3);
             assert!(
                 ProverAddresses::new(args.prover_addresses)
                     .unwrap()

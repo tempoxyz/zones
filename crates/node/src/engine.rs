@@ -669,6 +669,11 @@ mod tests {
     fn t13_spec(activation: u64) -> ZoneChainSpec {
         use reth_chainspec::EthChainSpec as _;
         let mut genesis = tempo_chainspec::spec::DEV.genesis().clone();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t14Time".into(), serde_json::Value::Null)
+            .unwrap();
         genesis.config.chain_id =
             zone_primitives::constants::zone_chain_id(tempo_chainspec::spec::DEV.chain().id(), 1)
                 .unwrap();

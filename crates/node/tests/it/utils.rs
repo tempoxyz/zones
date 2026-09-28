@@ -1087,6 +1087,10 @@ impl ZoneTestNode {
             .config
             .extra_fields
             .insert_value("t13Time".into(), activation)?;
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t14Time".into(), serde_json::Value::Null)?;
         let spec = Arc::new(ZoneChainSpec::from_genesis(genesis.clone())?);
         let node = Self::launch_with_genesis(
             l1_rpc_url.to_string(),

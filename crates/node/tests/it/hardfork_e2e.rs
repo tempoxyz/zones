@@ -34,6 +34,10 @@ async fn test_t12_to_t13_tip1096_activation() -> eyre::Result<()> {
     // lower bound, and consensus rejects future blocks, so wait for activation before T13.
     let activation = now_secs() + 30;
     let mut genesis = zone_node::genesis::genesis_template()?;
+    genesis
+        .config
+        .extra_fields
+        .insert_value("t14Time".into(), serde_json::Value::Null)?;
     genesis.config.chain_id = zone_primitives::constants::zone_chain_id(1_337, 1096)?;
     genesis
         .config

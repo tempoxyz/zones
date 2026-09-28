@@ -114,6 +114,11 @@ mod tests {
         genesis
             .config
             .extra_fields
+            .insert_value("t14Time".into(), serde_json::Value::Null)
+            .unwrap();
+        genesis
+            .config
+            .extra_fields
             .insert_value("t13Time".into(), 1_000u64)
             .unwrap();
         ZoneChainSpec {

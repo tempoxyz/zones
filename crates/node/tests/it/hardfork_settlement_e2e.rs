@@ -361,6 +361,10 @@ fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result
         .config
         .extra_fields
         .insert_value("t13Time".into(), activation)?;
+    genesis
+        .config
+        .extra_fields
+        .insert_value("t14Time".into(), serde_json::Value::Null)?;
     for account in initial_zone_factory_state(signer.address()) {
         genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
     }
