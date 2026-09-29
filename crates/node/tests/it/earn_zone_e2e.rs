@@ -841,7 +841,7 @@ impl EarnZoneFixture {
             }
             _ => unreachable!("EarnFlow contains only synchronous deposit and redeem"),
         };
-        let private_user_topic = B256::left_padding_from(private_user.as_slice());
+        let private_user_topic = private_user.into_word();
         let filter = Filter::new()
             .address(self.router)
             .from_block(0)

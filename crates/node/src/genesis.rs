@@ -6,7 +6,7 @@
 
 use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, U256};
 use tempo_primitives::TempoHeader;
 use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, tempo_state, zone_fee_manager};
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
@@ -65,7 +65,7 @@ pub fn l1_anchored_genesis(
         .get_or_insert_with(Default::default)
         .insert(
             zone_fee_manager::slots::DEFAULT_FEE_TOKEN.into(),
-            B256::left_padding_from(default_fee_token.as_slice()),
+            default_fee_token.into_word(),
         );
 
     Ok((genesis, genesis_block_number))
@@ -74,7 +74,7 @@ pub fn l1_anchored_genesis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
+    use alloy_primitives::{B256, address};
     use tempo_contracts::precompiles::PATH_USD_ADDRESS;
     use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -98,7 +98,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             fee_manager_storage[&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN)],
-            B256::left_padding_from(PATH_USD_ADDRESS.as_slice()),
+            PATH_USD_ADDRESS.into_word(),
         );
     }
 
@@ -126,7 +126,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             fee_manager_storage[&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN)],
-            B256::left_padding_from(default_fee_token.as_slice()),
+            default_fee_token.into_word(),
         );
     }
 }

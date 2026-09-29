@@ -70,7 +70,7 @@ fn corrupt_token_hex(token: &str) -> String {
 }
 
 fn address_topic(address: Address) -> String {
-    format!("{:#x}", B256::left_padding_from(address.as_slice()))
+    format!("{:#x}", address.into_word())
 }
 
 fn signed_sponsored_raw_transaction(
