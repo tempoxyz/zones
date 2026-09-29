@@ -30,6 +30,9 @@ before updating a status, following the existing non-atomic read/write pattern.
 
 The workflow code revision is pinned separately from its ClusterWorkflowTemplates;
 both must match for a reproducible trial. The temporary Tempo base includes the
-quiet-build guard. Candidate dependency selection, image retention, repeated-run
+quiet-build guard. Successful CI workflows and their archived artifacts expire after seven days.
+Failed or errored CI workflows, PVCs, and artifacts are retained for 30 days for recovery.
+Unresolved cleanup must be handled within that window; it is not indefinite storage.
+Candidate dependency selection, image/genesis retention, repeated-run
 runtime measurements, and submission-timeout handling remain rollout prerequisites
 before making the suite required.
