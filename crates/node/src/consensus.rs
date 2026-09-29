@@ -141,6 +141,8 @@ mod tests {
         let mut header = spec.genesis_header().clone();
         header.inner.number = 1;
         header.inner.timestamp = timestamp / 1000;
+        header.inner.nonce = Default::default();
+        header.inner.base_fee_per_gas = Some(0);
         header.timestamp_millis_part = timestamp % 1000;
         header.shared_gas_limit = 0;
         header.general_gas_limit = 0;
