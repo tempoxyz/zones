@@ -1,7 +1,7 @@
-diff --git a/xtask/src/generate_state_bloat.rs b/xtask/src/generate_state_bloat.rs
---- a/xtask/src/generate_state_bloat.rs
-+++ b/xtask/src/generate_state_bloat.rs
-@@ -46,6 +46,10 @@ pub(crate) struct GenerateStateBloat {
+diff --git a/crates/state-bloat/src/generate.rs b/crates/state-bloat/src/generate.rs
+--- a/crates/state-bloat/src/generate.rs
++++ b/crates/state-bloat/src/generate.rs
+@@ -46,6 +46,10 @@ pub struct GenerateStateBloat {
      )]
      mnemonic: String,
  
@@ -13,7 +13,7 @@ diff --git a/xtask/src/generate_state_bloat.rs b/xtask/src/generate_state_bloat.
      #[arg(short, long, default_value = "1024")]
      size: u64,
 @@ -77,6 +81,7 @@ impl GenerateStateBloat {
-     pub(crate) async fn run(self) -> eyre::Result<()> {
+     pub async fn run(self) -> eyre::Result<()> {
          let Self {
              mnemonic,
 +            mnemonic_file,
