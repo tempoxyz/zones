@@ -1,6 +1,6 @@
 use super::*;
 use crate::{abi::DepositType, subscriber::L1SubscriberError};
-use alloy_consensus::{Header, ReceiptWithBloom};
+use alloy_consensus::{Header, ReceiptWithBloom, Sealable as _};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
 use alloy_sol_types::SolEvent;
@@ -473,14 +473,10 @@ fn seal(header: TempoHeader) -> SealedHeader<TempoHeader> {
     SealedHeader::seal_slow(header)
 }
 
-fn header_hash(header: &TempoHeader) -> B256 {
-    keccak256(alloy_rlp::encode(header))
-}
-
 fn header_response(header: TempoHeader) -> TempoHeaderResponse {
     TempoHeaderResponse {
         inner: RpcHeader {
-            hash: header_hash(&header),
+            hash: header.hash_slow(),
             inner: header,
             total_difficulty: None,
             size: None,
@@ -548,7 +544,7 @@ fn calculate_test_receipts_root(receipts: &[TempoTransactionReceipt]) -> B256 {
 fn verify_receipts_accepts_matching_root_and_logs_bloom() {
     let block_number = 42;
     let header = make_test_header(block_number);
-    let block_hash = header_hash(&header);
+    let block_hash = header.hash_slow();
     let block = NumHash::new(block_number, block_hash);
     let receipts = vec![
         make_test_receipt(
@@ -578,7 +574,7 @@ fn verify_receipts_accepts_matching_root_and_logs_bloom() {
 fn verify_receipts_rejects_receipts_root_mismatch() {
     let block_number = 42;
     let header = make_test_header(block_number);
-    let block_hash = header_hash(&header);
+    let block_hash = header.hash_slow();
     let block = NumHash::new(block_number, block_hash);
     let receipts = vec![make_test_receipt(
         block_number,
@@ -603,7 +599,7 @@ fn verify_receipts_rejects_receipts_root_mismatch() {
 fn verify_receipts_rejects_changed_receipt_bloom() {
     let block_number = 42;
     let header = make_test_header(block_number);
-    let block_hash = header_hash(&header);
+    let block_hash = header.hash_slow();
     let block = NumHash::new(block_number, block_hash);
     let receipts = vec![make_test_receipt(
         block_number,
@@ -630,7 +626,7 @@ fn verify_receipts_rejects_changed_receipt_bloom() {
 fn verify_receipts_rejects_logs_bloom_mismatch() {
     let block_number = 42;
     let header = make_test_header(block_number);
-    let block_hash = header_hash(&header);
+    let block_hash = header.hash_slow();
     let block = NumHash::new(block_number, block_hash);
     let receipts = vec![make_test_receipt(
         block_number,
@@ -791,8 +787,8 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
 
     let header_10 = make_test_header(10);
-    let header_11 = make_chained_header(11, header_hash(&header_10));
-    let header_12 = make_chained_header(12, header_hash(&header_11));
+    let header_11 = make_chained_header(11, header_10.hash_slow());
+    let header_12 = make_chained_header(12, header_11.hash_slow());
     let anchor_12 = seal(header_12.clone()).num_hash();
 
     // Initial sync through finalized block 10.
@@ -886,8 +882,8 @@ async fn test_sync_finalized_once_extends_a_moving_finalized_target_until_stable
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
 
     let header_10 = make_test_header(10);
-    let header_11 = make_chained_header(11, header_hash(&header_10));
-    let header_12 = make_chained_header(12, header_hash(&header_11));
+    let header_11 = make_chained_header(11, header_10.hash_slow());
+    let header_12 = make_chained_header(12, header_11.hash_slow());
 
     asserter.push_success(&Some(header_response(header_10.clone())));
     push_header_and_empty_receipts(&asserter, header_10);
@@ -1001,7 +997,7 @@ fn test_drain_returns_block_grouped_deposits() {
     });
 
     let h10 = make_test_header(10);
-    let h10_hash = header_hash(&h10);
+    let h10_hash = h10.hash_slow();
     queue.enqueue(h10, L1PortalEvents::from_deposits(vec![d1]));
     queue.enqueue(
         make_chained_header(11, h10_hash),
@@ -1300,11 +1296,11 @@ fn finalized_queue_tracks_tip_after_consumption() {
     assert!(queue.last_enqueued().is_none());
 
     let h100 = make_test_header(100);
-    let h100_hash = header_hash(&h100);
+    let h100_hash = h100.hash_slow();
     queue.enqueue(h100, L1PortalEvents::default());
 
     let h101 = make_chained_header(101, h100_hash);
-    let h101_hash = header_hash(&h101);
+    let h101_hash = h101.hash_slow();
     queue.enqueue(h101, L1PortalEvents::default());
 
     confirm_shared(&queue);
@@ -1326,7 +1322,7 @@ fn finalized_queue_tracks_tip_after_consumption() {
 fn external_enqueue_reports_discontinuity_without_panicking() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
-    let h10_hash = header_hash(&h10);
+    let h10_hash = h10.hash_slow();
     assert!(
         queue
             .try_enqueue_sealed(seal(h10), L1PortalEvents::default())
@@ -1349,8 +1345,8 @@ fn external_enqueue_reports_discontinuity_without_panicking() {
 fn external_enqueue_accepts_duplicate_producers() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
-    let h11 = make_chained_header(11, header_hash(&h10));
-    let h12 = make_chained_header(12, header_hash(&h11));
+    let h11 = make_chained_header(11, h10.hash_slow());
+    let h12 = make_chained_header(12, h11.hash_slow());
     let duplicate = seal(h10);
     assert!(
         queue
@@ -1374,8 +1370,8 @@ fn external_enqueue_accepts_duplicate_producers() {
 fn confirm_operational_through_is_idempotent_and_drains_stale_entries() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
-    let h11 = make_chained_header(11, header_hash(&h10));
-    let h12 = make_chained_header(12, header_hash(&h11));
+    let h11 = make_chained_header(11, h10.hash_slow());
+    let h12 = make_chained_header(12, h11.hash_slow());
     let anchor = seal(h12.clone()).num_hash();
     for header in [h10, h11, h12] {
         queue
@@ -1429,8 +1425,8 @@ fn canonical_import_reconciliation_is_idempotent_across_checkpoint_and_full_bloc
 fn deferred_checkpoint_work_survives_until_operational_confirmation() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
-    let h11 = make_chained_header(11, header_hash(&h10));
-    let h12 = make_chained_header(12, header_hash(&h11));
+    let h11 = make_chained_header(11, h10.hash_slow());
+    let h12 = make_chained_header(12, h11.hash_slow());
     for header in [h10, h11, h12] {
         queue
             .try_enqueue_sealed(seal(header), L1PortalEvents::default())
@@ -1460,7 +1456,7 @@ fn deferred_checkpoint_work_survives_until_operational_confirmation() {
 fn restart_can_seed_deferred_checkpoint_work() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
-    let h11 = make_chained_header(11, header_hash(&h10));
+    let h11 = make_chained_header(11, h10.hash_slow());
     let mut deferred = crate::queue::DeferredPortalWork::new(L1BlockDeposits {
         header: seal(h10),
         events: L1PortalEvents::default(),
@@ -1526,7 +1522,7 @@ fn confirm_operational_through_rejects_a_conflicting_anchor() {
 fn finalized_deposit_queue_panics_on_discontinuity() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
-    let h10_hash = header_hash(&h10);
+    let h10_hash = h10.hash_slow();
     queue.enqueue(h10, L1PortalEvents::default());
     queue.enqueue(make_chained_header(12, h10_hash), L1PortalEvents::default());
 }
@@ -1535,7 +1531,7 @@ fn finalized_deposit_queue_panics_on_discontinuity() {
 fn finalized_queue_accepts_only_contiguous_blocks() {
     let mut queue = PendingDeposits::default();
     let h10 = make_test_header(10);
-    let h10_hash = header_hash(&h10);
+    let h10_hash = h10.hash_slow();
 
     assert!(
         queue
@@ -1575,7 +1571,7 @@ fn finalized_queue_tip_redelivery_is_idempotent() {
 fn finalized_queue_rejects_gap_without_mutation() {
     let mut queue = PendingDeposits::default();
     let h10 = make_test_header(10);
-    let h10_hash = header_hash(&h10);
+    let h10_hash = h10.hash_slow();
     queue.enqueue(h10, L1PortalEvents::default());
 
     let err = queue
@@ -1597,7 +1593,7 @@ fn finalized_queue_rejects_gap_without_mutation() {
 fn finalized_queue_rejects_parent_mismatch_without_mutation() {
     let mut queue = PendingDeposits::default();
     let h10 = make_test_header(10);
-    let h10_hash = header_hash(&h10);
+    let h10_hash = h10.hash_slow();
     queue.enqueue(h10, L1PortalEvents::default());
 
     let err = queue
@@ -1616,7 +1612,7 @@ fn finalized_queue_rejects_parent_mismatch_without_mutation() {
 fn finalized_queue_rejects_conflicting_tip_without_mutation() {
     let mut queue = PendingDeposits::default();
     let h10 = make_test_header(10);
-    let h10_hash = header_hash(&h10);
+    let h10_hash = h10.hash_slow();
     queue.enqueue(h10, L1PortalEvents::default());
 
     let mut conflicting = make_test_header(10);
@@ -1647,7 +1643,7 @@ fn finalized_queue_rejects_stale_blocks() {
 fn finalized_queue_rejects_confirmation_mismatch_without_mutation() {
     let mut queue = PendingDeposits::default();
     let h10 = make_test_header(10);
-    let h10_hash = header_hash(&h10);
+    let h10_hash = h10.hash_slow();
     queue.enqueue(h10, L1PortalEvents::default());
 
     let err = queue
@@ -2372,7 +2368,7 @@ async fn paused_subscriber_wedges_at_lookahead_then_resumes_contiguously() {
     let mut headers = Vec::new();
     for number in 1..=tip {
         let header = make_chained_header(number, parent);
-        parent = header_hash(&header);
+        parent = header.hash_slow();
         headers.push(header);
     }
     let asserter = Asserter::new();

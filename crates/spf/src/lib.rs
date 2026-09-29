@@ -1438,7 +1438,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let checkpoint_hash = keccak256(alloy_rlp::encode(checkpoint));
+        let checkpoint_hash = checkpoint.hash_slow();
         let anchor = TempoHeader {
             inner: Header {
                 parent_hash: checkpoint_hash,

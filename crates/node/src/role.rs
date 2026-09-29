@@ -1121,8 +1121,8 @@ where
 mod tests {
     use std::{future::pending, time::Duration};
 
+    use alloy_consensus::Sealable as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-    use reth_primitives_traits::SealedHeader;
     use reth_provider::test_utils::MockEthProvider;
     use tempo_primitives::{TempoHeader, TempoPrimitives};
     use tokio::sync::{mpsc, oneshot};
@@ -1160,12 +1160,12 @@ mod tests {
         let provider = MockEthProvider::<TempoPrimitives>::new();
         let mut recovery_header = TempoHeader::default();
         recovery_header.inner.number = 7;
-        let recovery_hash = SealedHeader::seal_slow(recovery_header.clone()).hash();
+        let recovery_hash = recovery_header.hash_slow();
         provider.add_header(recovery_hash, recovery_header);
 
         let mut head = TempoHeader::default();
         head.inner.number = 9;
-        let head_hash = SealedHeader::seal_slow(head.clone()).hash();
+        let head_hash = head.hash_slow();
         provider.add_header(head_hash, head);
 
         assert_eq!(
