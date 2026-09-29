@@ -259,8 +259,7 @@ fn native_factory_account(owner: Address) -> GenesisAccount {
     // uint32 nextZoneId, address owner, and the implementation-lock flag.
     let packed_factory_config: U256 =
         U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32_usize);
-    let factory_storage =
-        BTreeMap::from([(B256::ZERO, B256::from(packed_factory_config.to_be_bytes()))]);
+    let factory_storage = BTreeMap::from([(B256::ZERO, packed_factory_config.into())]);
     GenesisAccount::default()
         .with_code(Some(Bytes::from_static(&[0xef])))
         .with_storage(Some(factory_storage))
