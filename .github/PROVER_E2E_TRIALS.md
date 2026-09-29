@@ -42,6 +42,7 @@ Observed preview timings (September 29, 2026):
 
 | Work | Observed wall time |
 | --- | --- |
+| Fresh automatic build, deploy, three fast plans, cleanup and status | 40m29s |
 | Fresh candidate/prover and PCR-patched L1 preparation | 23m22s |
 | Distinct old + candidate prover and PCR-patched L1 preparation | 27m38s–33m41s |
 | Warm-fixture settlement/fallback/recovery, provisioning and cleanup | 14m01s–15m19s |
