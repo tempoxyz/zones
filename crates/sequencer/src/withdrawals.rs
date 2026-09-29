@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     fn abi_encode_u64(value: u64) -> Bytes {
-        Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>())
+        value.abi_encode().into()
     }
 
     fn abi_encode_multicall(values: Vec<Bytes>) -> Bytes {
@@ -1373,7 +1373,7 @@ mod tests {
     }
 
     fn abi_encode_b256(value: B256) -> Bytes {
-        Bytes::copy_from_slice(value.as_slice())
+        value.into()
     }
 
     fn test_processor(
