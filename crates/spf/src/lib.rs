@@ -66,14 +66,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
 
     // Capture the pre-batch deposit state from the parent Zone state. The
     // transition output commits to this exact pair.
-    let previous_processed_hash = B256::from(
-        read_zone_storage(
-            &mut zone_state,
-            ZONE_INBOX_ADDRESS,
-            inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
-        )?
-        .to_be_bytes::<32>(),
-    );
+    let previous_processed_hash = B256::from(read_zone_storage(
+        &mut zone_state,
+        ZONE_INBOX_ADDRESS,
+        inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
+    )?);
     let previous_processed_number = read_zone_storage(
         &mut zone_state,
         ZONE_INBOX_ADDRESS,
@@ -96,14 +93,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     let mut tempo_database =
         TempoWitnessDatabase::from_tempo_state_witness(witness.tempo_state_witness)?;
     let (witnessed_tempo_number, witnessed_tempo_hash) = tempo_database.checkpoint();
-    let zone_tempo_hash = B256::from(
-        read_zone_storage(
-            &mut zone_state,
-            TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
-        )?
-        .to_be_bytes::<32>(),
-    );
+    let zone_tempo_hash = B256::from(read_zone_storage(
+        &mut zone_state,
+        TEMPO_STATE_ADDRESS,
+        U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
+    )?);
     let zone_tempo_number = read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
@@ -224,14 +218,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // These reads see the final execution overlay rather than just the parent
     // witness. They are the contract state values committed by the batch
     // output: inbox progress, the finalized withdrawal batch, and TempoState.
-    let next_processed_hash = B256::from(
-        read_zone_storage(
-            &mut zone_state,
-            ZONE_INBOX_ADDRESS,
-            inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
-        )?
-        .to_be_bytes::<32>(),
-    );
+    let next_processed_hash = B256::from(read_zone_storage(
+        &mut zone_state,
+        ZONE_INBOX_ADDRESS,
+        inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
+    )?);
     let next_processed_number = read_zone_storage(
         &mut zone_state,
         ZONE_INBOX_ADDRESS,
@@ -249,14 +240,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         .iter()
         .any(|block| block.finalize_withdrawal_batch_count.is_some());
     let (withdrawal_queue_hash, withdrawal_batch_index) = if has_withdrawal_finalization {
-        let hash = B256::from(
-            read_zone_storage(
-                &mut zone_state,
-                ZONE_OUTBOX_ADDRESS,
-                outbox::slots::WITHDRAWAL_QUEUE_HASH,
-            )?
-            .to_be_bytes::<32>(),
-        );
+        let hash = B256::from(read_zone_storage(
+            &mut zone_state,
+            ZONE_OUTBOX_ADDRESS,
+            outbox::slots::WITHDRAWAL_QUEUE_HASH,
+        )?);
         let index_slot = read_zone_storage(
             &mut zone_state,
             ZONE_OUTBOX_ADDRESS,
@@ -270,14 +258,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             witness.public_inputs.expected_withdrawal_batch_index,
         )
     };
-    let final_tempo_hash = B256::from(
-        read_zone_storage(
-            &mut zone_state,
-            TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
-        )?
-        .to_be_bytes::<32>(),
-    );
+    let final_tempo_hash = B256::from(read_zone_storage(
+        &mut zone_state,
+        TEMPO_STATE_ADDRESS,
+        U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
+    )?);
     let final_tempo_number = read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
@@ -1067,7 +1052,7 @@ mod tests {
             U256::ZERO,
             alloy_consensus::constants::KECCAK_EMPTY,
             Vec::new(),
-            Some((slot, U256::from_be_bytes(hash.0))),
+            Some((slot, hash.into())),
         );
         let mut database = WitnessDatabase::from_zone_state_witness(witness, state_root).unwrap();
 
@@ -1240,10 +1225,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            database
-                .read_l1_storage(account, B256::from(slot.to_be_bytes::<32>()), 9)
-                .unwrap(),
-            B256::from(value.to_be_bytes::<32>())
+            database.read_l1_storage(account, slot.into(), 9).unwrap(),
+            B256::from(value)
         );
     }
 
