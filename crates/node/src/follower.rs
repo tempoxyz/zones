@@ -13,7 +13,7 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
 use std::{
     collections::{BTreeMap, HashMap},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::dispatch::abi_decoder_config_for_spec;
@@ -36,7 +36,6 @@ use zone_prover::VerifierMode;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
 use crate::{
-    engine::{validate_block_timestamp, zone_hardfork_ready},
     replication::{PeerBlock, decode_peer_block},
     settlement_attestation::{AttestationContext, build_settlement_attestation},
 };
@@ -616,34 +615,6 @@ where
             block_number,
         )?;
 
-        // Apply the producer's readiness rule to live and backfilled imports too. An observed
-        // finalized tip may be newer than the embedded anchor during checkpoint catch-up.
-        // Reject before submitting to the engine so L1 catching up can make a retry admissible.
-        let l1_timestamp = headers
-            .last()
-            .expect("validated nonempty range")
-            .timestamp()
-            .max(
-                self.context
-                    .deposit_queue
-                    .latest_header()
-                    .map_or(0, |header| header.timestamp()),
-            )
-            .max(
-                self.context
-                    .l1_block_tracker
-                    .finalized_l1_timestamp()
-                    .unwrap_or_default(),
-            );
-        eyre::ensure!(
-            zone_hardfork_ready(
-                &self.context.attestation.chain_spec,
-                block.timestamp(),
-                l1_timestamp
-            ),
-            "peer block {block_number} activates a Zone hardfork before finalized L1"
-        );
-
         if let DecodedTempoImport::Full {
             deposits,
             enabled_tokens,
@@ -1057,23 +1028,25 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
     })
 }
 
+/// Reject peer blocks too far ahead of the local clock before they reach `newPayload`.
+fn validate_block_timestamp(timestamp_millis: u64, now: SystemTime) -> eyre::Result<()> {
+    let now_millis = now.duration_since(UNIX_EPOCH)?.as_millis();
+    eyre::ensure!(
+        u128::from(timestamp_millis) <= now_millis + 100,
+        "block timestamp {timestamp_millis} exceeds local clock {now_millis} by more than 100 ms"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
-    use alloy_consensus::Sealable as _;
     use alloy_eips::NumHash;
-    use alloy_primitives::{Address, B256};
-    use alloy_provider::{Provider as _, ProviderBuilder, mock::Asserter};
-    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-    use reth_provider::test_utils::MockEthProvider;
-    use tempo_alloy::TempoNetwork;
-    use tempo_primitives::TempoPrimitives;
+    use alloy_primitives::B256;
     use tokio_util::sync;
-    use zone_chainspec::ZoneChainSpec;
     use zone_l1::{DepositQueue, EnabledToken, L1BlockDeposits, L1BlockTracker, L1PortalEvents};
     use zone_p2p::{BackfillCommand, LeadershipSchedule, LeadershipState};
-    use zone_sequencer::{BatchAnchorConfig, attestation::AttestationDomain};
 
     use super::*;
 
@@ -1742,105 +1715,15 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn future_live_and_backfill_blocks_never_reach_engine() {
-        let provider = MockEthProvider::<TempoPrimitives>::new();
-        let parent = TempoHeader::default();
-        provider.add_header(parent.hash_slow(), parent.clone());
-        let mut l1_header = TempoHeader::default();
-        l1_header.inner.number = 1;
-        let prepared = zone_l1::PreparedL1Block {
-            header: SealedHeader::seal_slow(l1_header.clone()),
-            queued_deposits: vec![],
-            decryptions: vec![],
-            enabled_tokens: vec![],
-            follows_checkpoint_blocks: false,
-        };
-        let deposit_queue = DepositQueue::new();
-        deposit_queue.enqueue(l1_header, L1PortalEvents::default());
-        let l1_block_tracker = L1BlockTracker::default();
-        l1_block_tracker
-            .record_with_portal_events(prepared.header.num_hash(), L1PortalEvents::default())
-            .unwrap();
-        let leader = PrivateKey::from_seed(1).public_key();
-        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
-        let follower = FollowerBlockSync::new(
-            FollowerBlockSyncContext {
-                provider,
-                engine: ConsensusEngineHandle::new(engine_tx),
-                l1_block_tracker,
-                deposit_queue,
-                attestation: AttestationContext::new(
-                    AttestationDomain {
-                        l1_chain_id: 1337,
-                        portal_address: Address::ZERO,
-                        zone_id: 1,
-                    },
-                    None,
-                    None,
-                    HashMap::new(),
-                    ProviderBuilder::new_with_network::<TempoNetwork>()
-                        .connect_mocked_client(Asserter::new())
-                        .erased(),
-                    Arc::new(ZoneChainSpec {
-                        inner: tempo_chainspec::spec::DEV.clone(),
-                    }),
-                    BatchAnchorConfig::default(),
-                ),
-                schedule: LeadershipSchedule::seeded(LeadershipState::new(1, leader.clone(), 0)),
-                peer_tips: PeerTipRegistry::default(),
-                proof_collector: None,
-            },
-            BlockSyncP2p {
-                events: mpsc::channel(1).1,
-                commands: mpsc::channel(1).0,
-                backfill_responses: mpsc::channel(1).1,
-                backfill_commands: mpsc::channel(1).0,
-            },
-            sync::CancellationToken::new(),
+    #[test]
+    fn future_clock_allowance_is_inclusive() {
+        let now = UNIX_EPOCH + Duration::from_millis(10_000);
+        validate_block_timestamp(10_100, now).unwrap();
+        assert_eq!(
+            validate_block_timestamp(10_101, now)
+                .unwrap_err()
+                .to_string(),
+            "block timestamp 10101 exceeds local clock 10000 by more than 100 ms"
         );
-        let mut block = Block::default();
-        block.header.inner.number = 1;
-        block.header.inner.parent_hash = parent.hash_slow();
-        block.body.transactions =
-            vec![zone_payload::build_advance_tempo_tx(&prepared, 1337).into_inner()];
-
-        for live_sender in [Some(leader), None] {
-            block.header.inner.timestamp = 4_102_444_800;
-            let pending = |block| PendingPeerBlock {
-                block: PeerBlock {
-                    block,
-                    witness: None,
-                },
-                live_sender: live_sender.clone(),
-            };
-            let error = tokio::time::timeout(
-                Duration::from_secs(1),
-                follower.import_peer_block(pending(block.clone())),
-            )
-            .await
-            .unwrap()
-            .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .starts_with("block timestamp 4102444800000 exceeds local clock ")
-            );
-            assert!(matches!(
-                engine_rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
-            assert_eq!(follower.context.provider.best_block_number().unwrap(), 0);
-            assert!(follower.context.deposit_queue.peek().is_some());
-
-            // The otherwise identical, timely block gets through admission to newPayload.
-            block.header.inner.timestamp = 0;
-            tokio::select! {
-                result = follower.import_peer_block(pending(block.clone())) => {
-                    panic!("timely block did not reach the engine: {result:?}");
-                }
-                message = engine_rx.recv() => assert!(message.is_some()),
-            }
-        }
     }
 }
