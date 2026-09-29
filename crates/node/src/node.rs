@@ -104,7 +104,7 @@ use zone_payload::{
     ZonePayloadFactory, ZonePayloadTypes,
 };
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
-use zone_rpc::{ZoneDebugApiRpcServer};
+use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle, ProverAddresses,
     SettlementManager, SettlementProver, SettlementProverConfig, WithdrawalBatchLimits,
