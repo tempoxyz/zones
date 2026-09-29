@@ -16,7 +16,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
 };
 use alloy_eips::eip2718::Encodable2718;
-use alloy_provider::ProviderBuilder;
+use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
 use alloy_signer::SignerSync;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolError};
@@ -47,20 +47,6 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-
-alloy::sol! {
-    interface IMulticall3 {
-        struct Call {
-            address target;
-            bytes callData;
-        }
-
-        function aggregate(Call[] memory calls)
-            external
-            payable
-            returns (uint256 blockNumber, bytes[] memory returnData);
-    }
-}
 
 fn corrupt_token_hex(token: &str) -> String {
     let mut bytes = hex::decode(token).expect("token hex should decode");
