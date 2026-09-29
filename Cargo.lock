@@ -3772,7 +3772,7 @@ dependencies = [
 
 [[package]]
 name = "exithatch"
-version = "0.3.1"
+version = "0.3.2"
 
 [[package]]
 name = "eyre"
@@ -11955,7 +11955,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-vsock-proxy"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "clap",
  "libc",
@@ -11968,7 +11968,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-xtask"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -12009,7 +12009,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-zone"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "reth-cli-util",
  "reth-node-core",
@@ -12019,7 +12019,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-zone-contracts"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-contract",
  "alloy-network",
@@ -12038,7 +12038,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-zone-prover-enclave"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-genesis",
@@ -12063,7 +12063,7 @@ dependencies = [
 
 [[package]]
 name = "tempo-zone-prover-utils"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -13874,7 +13874,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zone-chainspec"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-eips",
  "alloy-evm",
@@ -13894,7 +13894,7 @@ dependencies = [
 
 [[package]]
 name = "zone-checker"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -13942,7 +13942,7 @@ dependencies = [
 
 [[package]]
 name = "zone-evm"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -13977,7 +13977,7 @@ dependencies = [
 
 [[package]]
 name = "zone-hardfork"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-hardforks",
  "paste",
@@ -13985,7 +13985,7 @@ dependencies = [
 
 [[package]]
 name = "zone-l1"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -14027,7 +14027,7 @@ dependencies = [
 
 [[package]]
 name = "zone-node"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -14126,7 +14126,7 @@ dependencies = [
 
 [[package]]
 name = "zone-p2p"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-primitives",
  "alloy-signer-local",
@@ -14151,7 +14151,7 @@ dependencies = [
 
 [[package]]
 name = "zone-payload"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -14193,7 +14193,7 @@ dependencies = [
 
 [[package]]
 name = "zone-precompiles"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aes-gcm",
  "alloy",
@@ -14224,7 +14224,7 @@ dependencies = [
 
 [[package]]
 name = "zone-primitives"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -14235,7 +14235,7 @@ dependencies = [
 
 [[package]]
 name = "zone-prover"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -14260,7 +14260,7 @@ dependencies = [
 
 [[package]]
 name = "zone-rpc"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -14299,7 +14299,7 @@ dependencies = [
 
 [[package]]
 name = "zone-sequencer"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -14352,7 +14352,7 @@ dependencies = [
 
 [[package]]
 name = "zone-spf"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
