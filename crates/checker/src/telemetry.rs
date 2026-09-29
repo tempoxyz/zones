@@ -27,6 +27,8 @@ mod activity_event {
     pub(super) const PORTAL_DEPOSIT_BOUNCE_BACK: &str = "portal_deposit_bounce_back";
     pub(super) const PORTAL_DEPOSIT_BOUNCE_BACK_PENDING: &str =
         "portal_deposit_bounce_back_pending";
+    pub(super) const PORTAL_FORCED_EXITS_ACTIVATED: &str = "portal_forced_exits_activated";
+    pub(super) const PORTAL_FORCED_EXIT_REQUESTED: &str = "portal_forced_exit_requested";
     pub(super) const PORTAL_FORCED_EXIT_COMPENSATION_PENDING: &str =
         "portal_forced_exit_compensation_pending";
     pub(super) const PORTAL_REFUND_ACCOUNTED: &str = "portal_refund_accounted";
@@ -35,6 +37,7 @@ mod activity_event {
     pub(super) const ZONE_DEPOSIT_BOUNCE_BACK_REQUESTED: &str =
         "zone_deposit_bounce_back_requested";
     pub(super) const ZONE_WITHDRAWAL_BURNED: &str = "zone_withdrawal_burned";
+    pub(super) const ZONE_FORCED_WITHDRAWAL_BURNED: &str = "zone_forced_withdrawal_burned";
     pub(super) const ZONE_WITHDRAWAL_BOUNCE_BACK_MINTED: &str =
         "zone_withdrawal_bounce_back_minted";
     pub(super) const ZONE_WITHDRAWAL_BOUNCE_BACK_PENDING: &str =
@@ -198,6 +201,12 @@ fn log_tempo_event(event: &L1PortalEvent, context: &ActivityContext) {
         L1PortalEvent::DepositBounceBackPending { .. } => {
             activity_log!(context, activity_event::PORTAL_DEPOSIT_BOUNCE_BACK_PENDING,)
         }
+        L1PortalEvent::ForcedExitsActivated => {
+            activity_log!(context, activity_event::PORTAL_FORCED_EXITS_ACTIVATED,)
+        }
+        L1PortalEvent::ForcedExitRequested => {
+            activity_log!(context, activity_event::PORTAL_FORCED_EXIT_REQUESTED,)
+        }
         L1PortalEvent::ForcedExitCompensationPending { .. } => {
             activity_log!(
                 context,
@@ -222,7 +231,7 @@ fn log_zone_action(action: &L2BridgeAction, context: &ActivityContext) {
             ..
         } => activity_log!(context, activity_event::ZONE_DEPOSIT_FAILED,),
         L2BridgeAction::ForcedWithdrawalRequested { .. } => {
-            activity_log!(context, activity_event::ZONE_WITHDRAWAL_BURNED,)
+            activity_log!(context, activity_event::ZONE_FORCED_WITHDRAWAL_BURNED,)
         }
         L2BridgeAction::WithdrawalRequested { origin, .. } => match origin {
             WithdrawalOrigin::DepositBounceBack => {
