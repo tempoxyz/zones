@@ -19,8 +19,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
-    ZoneShadowProverAddOnsConfig, dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
+    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
@@ -263,24 +263,33 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks || rpc_only,
-        "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
-    );
-    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone())?;
-    eyre::ensure!(
-        !args.enable_prover || !should_sequence_blocks || prover_addresses.is_some(),
-        "settlement proving requires --sequencer.prover-address for Nitro attestation"
-    );
-    eyre::ensure!(
         args.shadow_prover_pcrs.is_none() || (rpc_only && !should_sequence_blocks),
         "--shadow-prover.pcrs requires an rpc_only follower; it is not a settlement policy"
     );
+    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone())?;
+    let prover_config = if !args.enable_prover {
+        None
+    } else if should_sequence_blocks {
+        let addresses = prover_addresses.ok_or_else(|| {
+            eyre::eyre!(
+                "settlement proving requires --sequencer.prover-address for Nitro attestation"
+            )
+        })?;
+        Some(ZoneProverConfig::Settlement(addresses))
+    } else {
+        eyre::ensure!(
+            rpc_only,
+            "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
+        );
+        Some(ZoneProverConfig::Shadow {
+            prover_addresses,
+            proof_verifier: args.shadow_prover_pcrs.clone(),
+        })
+    };
 
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
-            #[cfg(feature = "test-utils")]
-            enable_proof_persistence: false,
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
             // scheduled leader, so it never submits an L1 settlement transaction.
@@ -295,17 +304,10 @@ async fn configure_sequencing(
                 max_batch_gas: args.withdrawal_max_batch_gas,
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
-            enable_prover: args.enable_prover,
-            prover_addresses: prover_addresses.clone(),
         });
-    } else if args.enable_prover {
-        node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
-            zone_id,
-            batch_anchor_config: BatchAnchorConfig::default(),
-            prover_runtime: prover_addresses
-                .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
-            proof_verifier: args.shadow_prover_pcrs.clone(),
-        });
+    }
+    if let Some(config) = prover_config {
+        node = node.with_prover(config);
     }
     if let Some(config) = p2p_config {
         node = node.with_p2p(config);

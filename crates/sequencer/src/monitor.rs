@@ -926,7 +926,7 @@ pub(crate) fn spawn_zone_monitor<P>(
     l1_provider: DynProvider<TempoNetwork>,
     signer: PrivateKeySigner,
     shared_state: ZoneMonitorSharedState,
-    settlement_prover: Option<SettlementProver>,
+    prover: Option<SettlementProver>,
     shutdown: sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -951,7 +951,7 @@ where
                 withdrawal_store.clone(),
                 withdrawal_notify.clone(),
                 repair_notify.clone(),
-                settlement_prover.clone(),
+                prover.clone(),
             )
             .await
             {

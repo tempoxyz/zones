@@ -72,7 +72,7 @@ use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptionKeyRotation, L1BlockTracker, L1Deposit,
     L1PortalEvents, L1StateCache, encryption_key_address, state::EnabledTokenRegistry,
 };
-use zone_node::{ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
+use zone_node::{ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, zone_chain_id as derive_zone_chain_id};
@@ -655,7 +655,6 @@ where
                 provider,
                 None,
                 None,
-                None,
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
@@ -1116,6 +1115,7 @@ impl ZoneTestNode {
             None,
             true,
             additional_decryption_keys,
+            None,
         )
         .await
     }
@@ -1296,6 +1296,7 @@ impl ZoneTestNode {
             p2p_config,
             spawn_engine,
             Vec::new(),
+            None,
         )
         .await
     }
@@ -1311,6 +1312,7 @@ impl ZoneTestNode {
         p2p_config: Option<P2pConfig>,
         spawn_engine: bool,
         additional_decryption_keys: Vec<SecretKey>,
+        prover_config: Option<ZoneProverConfig>,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -1398,7 +1400,6 @@ impl ZoneTestNode {
             zone_node = zone_node
                 .with_p2p(p2p_config)
                 .with_sequencer(ZoneSequencerAddOnsConfig {
-                    enable_proof_persistence: !portal_address.is_zero(),
                     sequencer_signer: sequencer_signer.clone(),
                     l1_transaction_signer,
                     zone_id,
@@ -1406,9 +1407,10 @@ impl ZoneTestNode {
                     batch_anchor_config: Default::default(),
                     withdrawal_poll_interval: Duration::from_secs(5),
                     withdrawal_batch_limits: Default::default(),
-                    enable_prover: false,
-                    prover_addresses: None,
                 });
+        }
+        if let Some(config) = prover_config {
+            zone_node = zone_node.with_prover(config);
         }
         // Multi-sequencer nodes run the real role controller, which owns the engine; the
         // harness must not drive a second head writer against the same queue.
@@ -3908,6 +3910,37 @@ pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
         L1ProxyMode::Direct,
         None,
         false,
+        None,
+    )
+    .await?
+    .cluster)
+}
+
+/// Start a real-L1 cluster whose nodes run settlement proving, so every node persists witnesses
+/// before canonicalization.
+///
+/// No prover listens on the routed endpoint: every proof fails fast and settlement falls back to
+/// the `NoProof` verifier.
+pub(crate) async fn start_real_p2p_cluster_with_settlement_proving(
+    withdrawal_batch_interval_blocks: u64,
+    active_nodes: usize,
+) -> eyre::Result<RealP2pCluster> {
+    let unreachable = TempoHardfork::VARIANTS
+        .iter()
+        .map(|&hardfork| zone_sequencer::HardforkProverAddress {
+            hardfork,
+            address: "127.0.0.1:1".to_owned(),
+        })
+        .collect();
+    let prover_addresses =
+        zone_sequencer::ProverAddresses::new(unreachable)?.expect("hardforks are non-empty");
+    Ok(start_real_p2p_cluster_inner(
+        withdrawal_batch_interval_blocks,
+        active_nodes,
+        L1ProxyMode::Direct,
+        None,
+        false,
+        Some(ZoneProverConfig::Settlement(prover_addresses)),
     )
     .await?
     .cluster)
@@ -3925,6 +3958,7 @@ pub(crate) async fn start_real_p2p_cluster_with_l1_proxy(
         L1ProxyMode::All,
         Some(l1_block_time),
         false,
+        None,
     )
     .await?;
     Ok((
@@ -3947,6 +3981,7 @@ pub(crate) async fn start_real_p2p_cluster_with_per_node_l1_proxies(
         L1ProxyMode::PerNode,
         Some(l1_block_time),
         false,
+        None,
     )
     .await?;
     let proxies: [TcpChaosProxy; 3] = parts
@@ -3968,6 +4003,7 @@ pub(crate) async fn start_real_p2p_network_chaos_cluster(
         L1ProxyMode::PerNode,
         Some(l1_block_time),
         true,
+        None,
     )
     .await?;
     let proxies = parts
@@ -4002,6 +4038,7 @@ async fn start_real_p2p_cluster_inner(
     proxy_mode: L1ProxyMode,
     l1_block_time: Option<Duration>,
     proxy_p2p: bool,
+    prover_config: Option<ZoneProverConfig>,
 ) -> eyre::Result<RealP2pClusterParts> {
     eyre::ensure!(
         (2..=3).contains(&active_nodes),
@@ -4154,6 +4191,7 @@ async fn start_real_p2p_cluster_inner(
                 Some(config),
                 false,
                 additional_decryption_keys,
+                prover_config.clone(),
             )
             .await?,
         );

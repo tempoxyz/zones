@@ -94,8 +94,9 @@ impl fmt::Debug for SettlementProverConfig {
 /// Inputs for observational SPF validation on RPC followers.
 pub type ShadowProverConfig = SettlementProverConfig;
 
+/// Validation worker whose attested proofs gate L1 settlement.
 #[derive(Debug, Clone)]
-pub(crate) struct SettlementProver {
+pub struct SettlementProver {
     sender: mpsc::Sender<ProverJob>,
 }
 
@@ -201,7 +202,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
     }
 }
 
-pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
+/// Spawn the node's settlement prover, shared by every leader generation.
+pub fn spawn_settlement_prover<P: ZoneSequencerProvider>(
     config: SettlementProverConfig,
     proofs: ProofCollectorHandle,
     zone_provider: P,
@@ -261,6 +263,20 @@ fn spawn_prover<P: ZoneSequencerProvider>(
 
     tokio::spawn(async move {
         while let Some(job) = receiver.recv().await {
+            // A leader generation that stepped down no longer waits for its proof.
+            if job
+                .response
+                .as_ref()
+                .is_some_and(oneshot::Sender::is_closed)
+            {
+                debug!(
+                    target: "zone::sequencer::prover",
+                    zone_from = job.from,
+                    zone_to = job.to,
+                    "Skipping settlement proof nobody awaits"
+                );
+                continue;
+            }
             metrics
                 .queue_duration_seconds
                 .record(job.enqueued_at.elapsed().as_secs_f64());
