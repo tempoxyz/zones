@@ -43,6 +43,7 @@ use tempo_chainspec::{
 };
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
+    ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
@@ -66,7 +67,7 @@ use tempo_zone_contracts::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
-use zone_chainspec::ZoneChainSpec;
+use zone_chainspec::{ZoneChainSpec, test_utils::set_tempo_fork};
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptionKeyRotation, L1BlockTracker, L1Deposit,
     L1PortalEvents, L1StateCache, encryption_key_address, state::EnabledTokenRegistry,
@@ -229,6 +230,29 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
         );
     }
 
+    // The T13 native verifier shadows its Solidity stub. Run that same stub at an ordinary
+    // address and redirect only submitBatch's proof call; certificate domains stay canonical.
+    let mock_verifier = genesis.alloc[&ZONE_VERIFIER_ADDRESS].clone();
+    genesis.alloc.insert(
+        address!("000000000000000000000000000000000000beef"),
+        mock_verifier,
+    );
+    let portal = genesis.alloc.get_mut(&ZONE_PORTAL_IMPL_ADDRESS).unwrap();
+    let mut code = portal.code.as_ref().unwrap().to_vec();
+    // (2**160 - 1) & sload(16): this unique sequence loads the proof-call target.
+    // Replace PUSH1 0x10; SLOAD with PUSH2 0xBEEF, preserving all jump offsets.
+    const VERIFIER_LOAD: [u8; 13] = alloy_primitives::hex!("600160a01b6001900360105416");
+    let mut matches = code
+        .windows(VERIFIER_LOAD.len())
+        .enumerate()
+        .filter_map(|(offset, bytes)| (bytes == VERIFIER_LOAD).then_some(offset));
+    let offset = matches
+        .next()
+        .ok_or_else(|| eyre::eyre!("portal verifier load changed"))?;
+    eyre::ensure!(matches.next().is_none(), "ambiguous portal verifier load");
+    code[offset + 9..offset + 12].copy_from_slice(&[0x61, 0xbe, 0xef]);
+    portal.code = Some(code.into());
+
     // The native factory requires the initial token's TIP-403 policy binding to exist.
     let token_policy_slot = keccak256(
         (
@@ -382,8 +406,6 @@ async fn handle_test_l1_rpc_request(
                         ))
                     })
                     .unwrap_or(serde_json::Value::Null)
-            } else if input.starts_with(&ZonePortal::blockHashCall::SELECTOR) {
-                serde_json::json!(const_hex::encode_prefixed(B256::ZERO.abi_encode()))
             } else {
                 answer_portal_call(&input, &enabled_tokens)
                     .map(|data| serde_json::json!(const_hex::encode_prefixed(data)))
@@ -406,9 +428,12 @@ async fn handle_test_l1_rpc_request(
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
-/// Answers portal view calls directly or within a Multicall3 batch.
+/// Answers a [`ZonePortal`] view call against the mock registry and genesis checkpoint, either
+/// issued directly or as an inner call of a Multicall3 `aggregate` batch.
 fn answer_portal_call(input: &[u8], enabled_tokens: &[Address]) -> Option<Vec<u8>> {
-    if input.starts_with(&ZonePortal::zoneHeightCall::SELECTOR) {
+    if input.starts_with(&ZonePortal::blockHashCall::SELECTOR) {
+        Some(B256::ZERO.abi_encode())
+    } else if input.starts_with(&ZonePortal::zoneHeightCall::SELECTOR) {
         Some(U256::ZERO.abi_encode())
     } else if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
         Some(U256::from(enabled_tokens.len()).abi_encode())
@@ -630,6 +655,7 @@ where
                 provider,
                 None,
                 None,
+                None,
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
@@ -723,7 +749,7 @@ impl ZoneTestNode {
             }
             previous = current;
         }
-        eyre::bail!("ZoneEngine kept producing blocks after cancellation")
+        eyre::bail!("ZoneEngine kept producing blocks after cancellation");
     }
 
     /// Returns an HTTP provider connected to this zone node.
@@ -1057,10 +1083,7 @@ impl ZoneTestNode {
             .await?;
         let chain_id = derive_zone_chain_id(1_337, zone_id)?;
         genesis.config.chain_id = chain_id;
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), activation)?;
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         let spec = Arc::new(ZoneChainSpec::from_genesis(genesis.clone())?);
         let node = Self::launch_with_genesis(
             l1_rpc_url.to_string(),
@@ -1384,7 +1407,7 @@ impl ZoneTestNode {
                     withdrawal_poll_interval: Duration::from_secs(5),
                     withdrawal_batch_limits: Default::default(),
                     enable_prover: false,
-                    prover_address: None,
+                    prover_addresses: None,
                 });
         }
         // Multi-sequencer nodes run the real role controller, which owns the engine; the
@@ -1409,7 +1432,10 @@ impl ZoneTestNode {
             )
             .apply(|mut c| {
                 c.network.discovery.disable_discovery = true;
-                if p2p_enabled {
+                // A node attached to a real portal may have the standalone sequencer started
+                // after launch. Match production by making every settleable block durable
+                // immediately. Synthetic P2P nodes need the same policy for replication.
+                if p2p_enabled || !portal_address.is_zero() {
                     c.engine.persistence_threshold = 0;
                     c.engine.memory_block_buffer_target = Some(0);
                 }
@@ -2558,7 +2584,7 @@ impl L1TestNode {
 
         // Admin can grant ISSUER_ROLE to self
         let receipt = IRolesAuth::new(token, &provider)
-            .grantRole(*ISSUER_ROLE, self.dev_address())
+            .grantRole(ISSUER_ROLE, self.dev_address())
             .send()
             .await?
             .get_receipt()
@@ -2738,26 +2764,6 @@ impl L1TestNode {
     /// Start an L1 dev node with the default configuration (500ms block time).
     pub(crate) async fn start() -> eyre::Result<Self> {
         Self::start_with(|_| {}).await
-    }
-
-    /// Start in T12 with the legacy shared runtimes; normal block execution installs T13.
-    pub(crate) async fn start_with_t13(activation: u64) -> eyre::Result<Self> {
-        use reth_chainspec::EthChainSpec as _;
-        use tempo_contracts::precompiles::initial_zone_factory_state;
-        Self::start_with(|cfg| {
-            let mut genesis = cfg.chain.genesis().clone();
-            genesis
-                .config
-                .extra_fields
-                .insert_value("t13Time".into(), activation)
-                .unwrap();
-            for account in initial_zone_factory_state(l1_dev_signer().address()) {
-                genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
-            }
-            cfg.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
-            cfg.dev.block_time = None;
-        })
-        .await
     }
 
     /// Start an L1 dev node, applying a closure to customise the [`NodeConfig`]
@@ -3653,6 +3659,9 @@ pub(crate) async fn spawn_sequencer_with_config(
     use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone_sequencer::ZoneSequencerConfig {
+        chain_spec: std::sync::Arc::new(zone_chainspec::ZoneChainSpec {
+            inner: tempo_chainspec::spec::DEV.clone(),
+        }),
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
         retry_connection_interval: Duration::from_millis(100),
@@ -3662,7 +3671,6 @@ pub(crate) async fn spawn_sequencer_with_config(
         outbox_address: ZONE_OUTBOX_ADDRESS,
         inbox_address: ZONE_INBOX_ADDRESS,
         batch_anchor_config,
-        attestation_store: None,
     };
 
     zone.spawn_sequencer(config, sequencer_signer).await
@@ -5347,8 +5355,7 @@ impl L1Fixture {
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,
-            encryption_key_rotations: vec![],
-            leader_transitions: vec![],
+            ..Default::default()
         };
         queue.enqueue(header, events);
     }

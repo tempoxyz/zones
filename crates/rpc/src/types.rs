@@ -32,6 +32,7 @@ pub struct ZoneExecutionWitness {
     #[serde(flatten)]
     pub execution_witness: ExecutionWitness,
     /// Tempo checkpoint committed by the parent Zone state.
+    #[serde(with = "zone_primitives::serde_rlp")]
     pub initial_tempo_header: TempoHeader,
     /// Deduplicated RLP-encoded account and storage proof nodes for all Tempo reads.
     pub tempo_state: Vec<Bytes>,

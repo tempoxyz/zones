@@ -13,10 +13,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked,id=sccache \
     RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
-    cargo build --profile ${RUST_PROFILE} \
+    cargo build --locked --profile ${RUST_PROFILE} \
         --bin tempo-zone --features "jemalloc" \
     && RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
-    cargo build --profile ${RUST_PROFILE} \
+    cargo build --locked --profile ${RUST_PROFILE} \
         --bin tempo-xtask
 
 # Solidity contracts compiled for shared runtimes, routers, and zone genesis artifacts.

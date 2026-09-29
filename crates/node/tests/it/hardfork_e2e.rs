@@ -16,7 +16,7 @@ use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, LegacyTempoAdvanced, TEMPO_STATE_ADDRESS, TempoAdvanced,
     ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, finalizeTempoCall, legacyFinalizeTempoCall,
 };
-use zone_chainspec::ZoneChainSpec;
+use zone_chainspec::{ZoneChainSpec, test_utils::set_tempo_fork};
 use zone_l1::{EnabledToken, L1PortalEvents};
 
 use crate::utils::{
@@ -34,15 +34,8 @@ async fn test_t12_to_t13_tip1096_activation() -> eyre::Result<()> {
     // lower bound, and consensus rejects future blocks, so wait for activation before T13.
     let activation = now_secs() + 30;
     let mut genesis = zone_node::genesis::genesis_template()?;
+    set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
     genesis.config.chain_id = zone_primitives::constants::zone_chain_id(1_337, 1096)?;
-    genesis
-        .config
-        .extra_fields
-        .insert_value("t12Time".into(), 0)?;
-    genesis
-        .config
-        .extra_fields
-        .insert_value("t13Time".into(), activation)?;
     let spec = ZoneChainSpec::from_genesis(genesis.clone())?;
     assert_eq!(spec.tempo_hardfork_at(activation - 1), TempoHardfork::T12);
     assert_eq!(spec.tempo_hardfork_at(activation), TempoHardfork::T13);

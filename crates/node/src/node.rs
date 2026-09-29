@@ -74,7 +74,7 @@ use tempo_primitives::{
     self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
 use tempo_transaction_pool::{
-    AA2dPool, AA2dPoolConfig, TempoTransactionPool,
+    AA2dPool, AA2dPoolConfig, TempoTransactionPool, TempoTransactionPoolExt,
     amm::AmmLiquidityCache,
     ordering::TempoTipOrdering,
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
@@ -91,7 +91,9 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
     L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt, encryption_key_address,
+    initialize_portal_pause,
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
+    watch_portal_pause,
 };
 use zone_p2p::{
     BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pCommand, P2pConfig,
@@ -104,10 +106,10 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle,
-    SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
-    attestation::AttestationDomain, create_proof_collector, spawn_shadow_prover,
-    spawn_zone_sequencer,
+    BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle, ProverAddresses,
+    SettlementManager, SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits,
+    ZoneSequencerConfig, attestation::AttestationDomain, create_proof_collector,
+    spawn_shadow_prover, spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -207,9 +209,8 @@ pub struct ZoneSequencerAddOnsConfig {
     ///
     /// Implies enable_proof_persistence.
     pub enable_prover: bool,
-    /// Remote Nitro prover TCP address. Required for proof-gated settlement; when absent, the SPF
-    /// runs in-process but settlement fails because no NSM attestation can be produced.
-    pub prover_address: Option<String>,
+    /// Remote Nitro prover endpoints. Required when proof-gated settlement is enabled.
+    pub prover_addresses: Option<ProverAddresses>,
 }
 
 impl ZoneSequencerAddOnsConfig {
@@ -226,12 +227,12 @@ impl ZoneSequencerAddOnsConfig {
 pub enum ProverRuntime {
     /// Execute the SPF in this process.
     InProcess,
-    /// Send witnesses to the prover at the given `HOST:PORT` address.
-    Remote(String),
+    /// Route witnesses to the endpoint assigned to the live L1 hardfork.
+    Remote(ProverAddresses),
 }
 
 impl ProverRuntime {
-    fn remote_address(&self) -> Option<&str> {
+    fn remote_addresses(&self) -> Option<&ProverAddresses> {
         match self {
             Self::InProcess => None,
             Self::Remote(address) => Some(address),
@@ -248,6 +249,8 @@ pub struct ZoneShadowProverAddOnsConfig {
     pub batch_anchor_config: BatchAnchorConfig,
     /// Where to execute the SPF.
     pub prover_runtime: ProverRuntime,
+    /// Independently approved enclave measurements for local, observational verification.
+    pub proof_verifier: Option<zone_prover::ShadowProofVerifier>,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -475,6 +478,7 @@ impl NodeTypes for ZoneNode {
 pub struct ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
 {
     inner: RpcAddOns<
@@ -514,6 +518,7 @@ where
 impl<N> std::fmt::Debug for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -571,6 +576,7 @@ struct P2PRuntime {
     commands: Sender<P2pCommand>,
     backfill_commands: Sender<BackfillCommand>,
     attestation: AttestationContext,
+    settlements: Option<SettlementManager>,
     schedule: LeadershipSchedule,
     local_ed25519_public_key: P2pPeerId,
     role_status: SharedRoleStatus,
@@ -581,6 +587,7 @@ struct P2PRuntime {
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
@@ -680,9 +687,10 @@ where
                     zone_id: config.zone_id,
                     batch_anchor_config: config.batch_anchor_config,
                     prover_runtime: config
-                        .prover_address
+                        .prover_addresses
                         .clone()
                         .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
+                    proof_verifier: None,
                 })
         });
         let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
@@ -754,6 +762,22 @@ where
                 None
             };
 
+        let task_executor = ctx.node.task_executor().clone();
+        if !self.portal_address.is_zero() {
+            // Initialize the pause gate before block production starts, so a restart during a
+            // pause does not produce blocks while ingestion catches up.
+            initialize_portal_pause(&l1_provider, self.portal_address, &self.l1_block_tracker)
+                .await;
+            task_executor.spawn_critical_task(
+                "portal-pause-watcher",
+                watch_portal_pause(
+                    l1_provider.clone(),
+                    self.portal_address,
+                    self.l1_block_tracker.clone(),
+                ),
+            );
+        }
+
         let l1_subscriber = L1Subscriber::new(
             self.l1_config.clone(),
             ctx.node.provider().clone(),
@@ -765,7 +789,6 @@ where
             finalized_batch_submission_sender,
             self.encryption_keys.clone(),
         );
-        let task_executor = ctx.node.task_executor().clone();
         task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
@@ -774,8 +797,9 @@ where
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
             Some(
                 Self::start_p2p(
-                    config,
+                    config.with_storage_directory(ctx.config.datadir().data_dir().join("p2p")),
                     &l1_provider,
+                    ctx.node.provider().chain_spec(),
                     l1_chain_id,
                     genesis_zone_id,
                     self.portal_address,
@@ -892,7 +916,8 @@ where
                     handle.eth_handlers().api.clone(),
                     l1_provider.clone(),
                 )),
-                prover_address: config.prover_address.clone(),
+                prover_addresses: config.prover_addresses.clone(),
+                proof_verifier: None,
             });
 
         let shadow_prover_config =
@@ -906,11 +931,23 @@ where
                         handle.eth_handlers().api.clone(),
                         l1_provider.clone(),
                     )),
-                    prover_address: config
-                        .prover_runtime
-                        .remote_address()
-                        .map(ToOwned::to_owned),
+                    prover_addresses: config.prover_runtime.remote_addresses().cloned(),
+                    proof_verifier: config.proof_verifier.clone(),
                 });
+
+        let readiness_config = if rpc_only {
+            shadow_prover_config.as_ref()
+        } else {
+            prover_config.as_ref()
+        };
+        if let Some(config) = readiness_config
+            && let Some(addresses) = config.prover_addresses.clone()
+        {
+            let chain_spec = config.chain_spec.clone();
+            task_executor.spawn_critical_task("prover-upgrade-readiness", async move {
+                addresses.monitor_upgrade_readiness(chain_spec).await;
+            });
+        }
 
         if let (Some(runtime_config), Some(submissions)) =
             (shadow_prover_config, finalized_batch_submissions)
@@ -950,6 +987,7 @@ where
             commands,
             backfill_commands,
             attestation,
+            settlements,
             schedule,
             local_ed25519_public_key,
             role_status,
@@ -966,15 +1004,16 @@ where
                     provider.clone(),
                     backfill_commands.clone(),
                     backfill_requests_rx,
+                    proof_collector.clone(),
                 ),
             );
             let sequencer = match self.sequencer_config.take() {
                 Some(config) => Some(Self::build_leader_sequencer_deps(
                     config,
+                    provider.chain_spec(),
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
-                    attestation.store.clone(),
                     proof_collector.clone(),
                     prover_config.clone(),
                 )?),
@@ -995,6 +1034,7 @@ where
                 commands,
                 backfill_commands,
                 attestation,
+                settlements,
                 portal_address: self.portal_address,
                 sequencer,
                 peer_tips,
@@ -1045,7 +1085,6 @@ where
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
-                None,
                 proof_collector,
                 prover_config,
             )
@@ -1270,6 +1309,7 @@ async fn seed_leadership_schedule(
 impl<N> ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
@@ -1285,6 +1325,7 @@ where
     async fn start_p2p(
         config: P2pConfig,
         l1_provider: &DynProvider<TempoNetwork>,
+        chain_spec: Arc<ZoneChainSpec>,
         l1_chain_id: u64,
         genesis_zone_id: u32,
         portal_address: Address,
@@ -1313,8 +1354,8 @@ where
             pinned_sequencer_set_version,
             config.block_attestation_signer(),
             config.block_attestation_addresses(),
-            AttestationStore::default(),
             l1_provider.clone(),
+            chain_spec,
             anchor_config,
         );
         let schedule = config.leadership();
@@ -1326,6 +1367,19 @@ where
             tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
         let (sinks, commands, backfill_commands) =
             Self::launch_p2p_network(config, network_id, task_executor, backfill_requests_tx)?;
+
+        let settlements = attestation.signer.clone().map(|signer| {
+            SettlementManager::new(
+                attestation.domain,
+                attestation.pinned_sequencer_set_version,
+                signer,
+                attestation.addresses.clone(),
+                attestation.l1_provider.clone(),
+                attestation.chain_spec.clone(),
+                attestation.anchor_config,
+                commands.clone(),
+            )
+        });
 
         let role_status: SharedRoleStatus = Default::default();
         let peer_tips = PeerTipRegistry::default();
@@ -1372,6 +1426,7 @@ where
             commands,
             backfill_commands,
             attestation,
+            settlements,
             schedule,
             local_ed25519_public_key,
             role_status,
@@ -1458,14 +1513,15 @@ where
     /// Build the leader-generation sequencer dependencies (activated only while leader).
     fn build_leader_sequencer_deps(
         config: ZoneSequencerAddOnsConfig,
+        chain_spec: Arc<ZoneChainSpec>,
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        attestation_store: AttestationStore,
         proof_collector: Option<ProofCollectorHandle>,
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
+            chain_spec,
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
@@ -1475,7 +1531,6 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
-            attestation_store: Some(attestation_store),
         };
         Ok(LeaderSequencerDeps {
             config,
@@ -1654,12 +1709,12 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         sequencer_addr: Address,
-        attestation_store: Option<AttestationStore>,
         proof_collector: Option<ProofCollectorHandle>,
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
+            chain_spec: zone_provider.chain_spec(),
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
@@ -1669,7 +1724,6 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
-            attestation_store,
         };
         let l1_transaction_signer = config
             .l1_transaction_signer
@@ -1681,6 +1735,7 @@ where
             zone_provider,
             proof_collector,
             prover_config,
+            None,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
@@ -1718,6 +1773,7 @@ where
 impl<N> RethRpcAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
@@ -1740,6 +1796,7 @@ where
 impl<N> EngineValidatorAddOn<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
@@ -2029,6 +2086,7 @@ where
             pending_limit: pool_config.pending_limit,
             queued_limit: pool_config.queued_limit,
             max_txs_per_sender: pool_config.max_account_slots,
+            ..Default::default()
         };
         let aa_2d_pool = AA2dPool::new(aa_2d_config);
         let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;
@@ -2040,6 +2098,7 @@ where
                 DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
                 amm_liquidity_cache.clone(),
             )
+            .with_minimum_fee_cap(0)
             // Zones collect the selected fee token directly and never route through FeeAMM.
             .with_disable_fee_amm_check(true)
         });
@@ -2149,12 +2208,8 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
 
-        // SAFETY: test-only env mutation; no other test reads this variable.
-        unsafe { std::env::set_var("ZONE_L1_DEV_CHAIN_IDS", "31318, 31319") };
-        assert_eq!(tempo_chain_spec_for_l1(31318).unwrap().chain().id(), 1337);
-        assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
-        assert!(tempo_chain_spec_for_l1(999_999).is_none());
-        unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
+        assert!(tempo_chain_spec_for_l1(31318).is_none());
+        assert!(tempo_chain_spec_for_l1(31319).is_none());
     }
 
     #[test]

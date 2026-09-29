@@ -15,6 +15,12 @@ pub struct L1PortalEvents {
     /// The portal allows at most one distinct transition per Tempo block.
     #[serde(default)]
     pub leader_transitions: Vec<LeaderTransition>,
+    /// Portal-wide pause state left by this block's `PortalPaused`/`PortalResumed` events, if any.
+    ///
+    /// Automatic expiry emits no event, so this is only a lower bound on transitions; the
+    /// finalized Portal state poller observes expiry.
+    #[serde(default)]
+    pub portal_pause: Option<bool>,
 }
 
 /// A finalized `SequencerEncryptionKeyUpdated` Portal event.
@@ -82,12 +88,14 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 5] = [
+    const SIGNATURE_HASHES: [B256; 7] = [
         DepositMade::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
         SequencerEncryptionKeyUpdated::SIGNATURE_HASH,
         LeaderUpdated::SIGNATURE_HASH,
+        PortalPaused::SIGNATURE_HASH,
+        PortalResumed::SIGNATURE_HASH,
     ];
 
     /// Create portal events from deposits only.
@@ -228,6 +236,14 @@ impl L1PortalEvents {
                     epoch: event.epoch,
                     activation_tempo_block: event.activationTempoBlock,
                 });
+            }
+            ZonePortalEvents::PortalPaused(event) => {
+                info!(l1_block = block_number, account = %event.account, "Portal-wide pause on L1");
+                self.portal_pause = Some(true);
+            }
+            ZonePortalEvents::PortalResumed(event) => {
+                info!(l1_block = block_number, account = %event.account, "Portal-wide resume on L1");
+                self.portal_pause = Some(false);
             }
             _ => {}
         }

@@ -117,12 +117,8 @@ impl TempoState {
         let mut final_timestamp_millis_part = 0;
 
         for header_rlp in headers {
-            let mut header_cursor = header_rlp.as_ref();
-            let header = TempoHeader::decode(&mut header_cursor)
+            let header: TempoHeader = alloy_rlp::decode_exact(header_rlp)
                 .map_err(|_| TempoStateError::invalid_rlp_data())?;
-            if !header_cursor.is_empty() {
-                return Err(TempoStateError::invalid_rlp_data().into());
-            }
             if header.parent_hash() != previous_block_hash {
                 return Err(TempoStateError::invalid_parent_hash().into());
             }
@@ -584,11 +580,9 @@ mod tests {
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;
 
-        assert!(
-            harness
-                .finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(vec![0xff]), false)?
-                .is_revert()
-        );
+        let output = harness.finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(vec![0xff]), false)?;
+        assert!(output.is_revert());
+        assert_eq!(output.bytes, TempoStateAbi::InvalidRlpData {}.abi_encode());
         harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 
@@ -600,11 +594,9 @@ mod tests {
         let mut malformed = encode_header(&child_header(genesis_hash, 1)).to_vec();
         malformed.push(0);
 
-        assert!(
-            harness
-                .finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(malformed), false)?
-                .is_revert()
-        );
+        let output = harness.finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(malformed), false)?;
+        assert!(output.is_revert());
+        assert_eq!(output.bytes, TempoStateAbi::InvalidRlpData {}.abi_encode());
         harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 

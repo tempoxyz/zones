@@ -129,6 +129,9 @@ trait AvailableBlockDrain {
     /// `None` authorizes production; `Some(exit)` halts the drain with that reason.
     fn apply_permit(&self, block: &mut Self::Block) -> Option<EngineExit>;
 
+    /// Returns whether a finalized Portal pause currently forbids producing another block.
+    fn production_paused(&self) -> bool;
+
     /// Completes and consumes one block.
     async fn advance_one(
         &mut self,
@@ -137,12 +140,12 @@ trait AvailableBlockDrain {
     ) -> eyre::Result<()>;
 }
 
-/// Drain available blocks until the queue is empty, cancellation is observed, or the
-/// leadership permit halts production.
+/// Drain available blocks until the queue is empty, cancellation is observed, the Portal is
+/// paused, or the leadership permit halts production.
 ///
-/// Cancellation and the permit are checked only before starting a new advance. An advance
-/// already in flight is always allowed to finish so its queue confirmation and canonical head
-/// remain consistent.
+/// Cancellation, the pause, and the permit are checked only before starting a new advance. An
+/// advance already in flight is always allowed to finish so its queue confirmation and canonical
+/// head remain consistent.
 async fn drain_all_available<D>(
     drain: &mut D,
     stop: &CancellationToken,
@@ -159,6 +162,12 @@ where
         };
         if let Some(exit) = drain.apply_permit(&mut block) {
             return Ok(Some(exit));
+        }
+        // The subscriber publishes a pause before enqueueing its block. Reading the gate after
+        // selecting the candidate therefore stops before the pause block itself. The block stays
+        // queued and is produced once the pause clears.
+        if drain.production_paused() {
+            return Ok(None);
         }
         drain.advance_one(block, stop).await?;
     }
@@ -474,6 +483,7 @@ impl AvailableBlockDrain for ZoneEngine {
             &self.chain_spec,
             &queued_headers,
             &latest_l1_header,
+            self.l1_block_tracker.finalized_l1_timestamp(),
             self.l1_block_tracker.finalized_target(),
             self.last_header.timestamp_millis(),
             wall_clock_timestamp_millis,
@@ -498,6 +508,10 @@ impl AvailableBlockDrain for ZoneEngine {
         self.production_permit
             .as_ref()
             .and_then(|permit| block.apply_permit(permit))
+    }
+
+    fn production_paused(&self) -> bool {
+        self.l1_block_tracker.portal_paused()
     }
 
     async fn advance_one(
@@ -541,7 +555,7 @@ impl AvailableTempoImport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TempoImportDecision {
-    /// Wait until the queued L1 tip activates the hardfork required by the next Zone block.
+    /// Wait until finalized L1 activates the hardfork required by the next Zone block.
     WaitForHardforkMatch,
     /// Wait until the subscriber confirms the queued finalized target did not advance.
     WaitForFinalizedTarget,
@@ -555,6 +569,7 @@ fn tempo_import_decision(
     chain_spec: &ZoneChainSpec,
     queued_headers: &[SealedHeader<TempoHeader>],
     latest_l1_header: &SealedHeader<TempoHeader>,
+    finalized_l1_timestamp: Option<u64>,
     finalized_target: Option<FinalizedTarget>,
     parent_timestamp_millis: u64,
     wall_clock_timestamp_millis: u64,
@@ -569,7 +584,13 @@ fn tempo_import_decision(
         wall_clock_timestamp_millis,
     );
     let zone_hardfork = chain_spec.tempo_hardfork_at(next_timestamp_millis / 1000);
-    let l1_tip_hardfork = chain_spec.tempo_hardfork_at(latest_l1_header.timestamp());
+    // Also consult finalized L1 observed outside the queue: after a long pause the lookahead can be
+    // full of pre-fork headers, and the activation header cannot arrive until some are consumed.
+    let l1_tip_hardfork = chain_spec.tempo_hardfork_at(
+        latest_l1_header
+            .timestamp()
+            .max(finalized_l1_timestamp.unwrap_or_default()),
+    );
 
     if !zone_hardfork.is_t13() {
         return TempoImportDecision::ImportFull;
@@ -625,8 +646,14 @@ fn zone_timestamp_millis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use reth_chainspec::EthChainSpec as _;
+    use std::{
+        collections::VecDeque,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tokio::sync::oneshot;
+    use zone_chainspec::test_utils::set_tempo_fork;
 
     #[test]
     fn zone_timestamp_uses_l1_timestamp_as_a_lower_bound() {
@@ -642,17 +669,13 @@ mod tests {
     fn zone_timestamp_allows_parent_timestamp_when_catching_up_in_same_millisecond() {
         assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_000);
     }
+
     fn t13_spec(activation: u64) -> ZoneChainSpec {
-        use reth_chainspec::EthChainSpec as _;
         let mut genesis = tempo_chainspec::spec::DEV.genesis().clone();
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         genesis.config.chain_id =
             zone_primitives::constants::zone_chain_id(tempo_chainspec::spec::DEV.chain().id(), 1)
                 .unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), activation)
-            .unwrap();
         ZoneChainSpec::from_genesis(genesis).unwrap()
     }
 
@@ -773,17 +796,32 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&t12),
                 &t12,
+                None,
                 finalized_target(1, true),
                 98_000,
                 100_000
             ),
             TempoImportDecision::WaitForHardforkMatch
         );
+        // A full lookahead of T12 headers: finalized L1 observed outside the queue proves activation.
+        assert_eq!(
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&t12),
+                &t12,
+                Some(100),
+                finalized_target(2, false),
+                98_000,
+                100_000
+            ),
+            TempoImportDecision::ImportCheckpoints(1)
+        );
         assert_eq!(
             tempo_import_decision(
                 &spec,
                 std::slice::from_ref(&t12),
                 &t13,
+                None,
                 None,
                 98_000,
                 100_000,
@@ -795,6 +833,7 @@ mod tests {
                 &spec,
                 &[t12, t13.clone()],
                 &t13,
+                None,
                 finalized_target(2, false),
                 98_000,
                 100_000,
@@ -806,6 +845,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&t13),
                 &t13,
+                None,
                 finalized_target(2, true),
                 99_000,
                 100_000
@@ -823,6 +863,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&t12),
                 &t12,
+                None,
                 finalized_target(1, true),
                 98_000,
                 99_000
@@ -842,6 +883,7 @@ mod tests {
                 &spec,
                 &[t12],
                 &t13,
+                None,
                 finalized_target(2, true),
                 98_000,
                 99_000,
@@ -862,6 +904,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&first),
                 &first,
+                None,
                 finalized_target(199, false),
                 99_000,
                 100_000,
@@ -879,6 +922,7 @@ mod tests {
                 &spec,
                 &headers,
                 headers.last().unwrap(),
+                None,
                 finalized_target(199, false),
                 99_000,
                 100_000,
@@ -892,6 +936,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&target),
                 &target,
+                None,
                 finalized_target(199, false),
                 99_000,
                 100_000,
@@ -903,6 +948,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&target),
                 &target,
+                None,
                 finalized_target(199, true),
                 99_000,
                 100_000,
@@ -918,6 +964,7 @@ mod tests {
         release_first: Option<oneshot::Receiver<()>>,
         /// Blocks (by value) the permit rejects, with the exit it produces.
         denied: Vec<(u64, EngineExit)>,
+        portal_paused: Arc<AtomicBool>,
     }
 
     impl AvailableBlockDrain for PausedDrain {
@@ -932,6 +979,10 @@ mod tests {
                 .iter()
                 .find(|(denied, _)| *denied == *block)
                 .map(|(_, exit)| exit.clone())
+        }
+
+        fn production_paused(&self) -> bool {
+            self.portal_paused.load(Ordering::Relaxed)
         }
 
         async fn advance_one(
@@ -966,6 +1017,7 @@ mod tests {
             first_started: Some(first_started),
             release_first: Some(release_first),
             denied: Vec::new(),
+            portal_paused: Arc::default(),
         };
 
         let task = tokio::spawn(async move {
@@ -1002,6 +1054,7 @@ mod tests {
                     epoch: 7,
                 },
             )],
+            portal_paused: Arc::default(),
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -1028,6 +1081,7 @@ mod tests {
             first_started: None,
             release_first: None,
             denied: vec![(5, EngineExit::Fenced { tempo_anchor: 5 })],
+            portal_paused: Arc::default(),
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -1036,6 +1090,50 @@ mod tests {
         assert_eq!(exit, Some(EngineExit::Fenced { tempo_anchor: 5 }));
         assert!(drain.advanced.is_empty());
         assert_eq!(drain.pending, [5]);
+    }
+
+    #[tokio::test]
+    async fn portal_pause_finishes_the_in_flight_block_then_retains_the_backlog() {
+        let stop = CancellationToken::new();
+        let (first_started, started) = oneshot::channel();
+        let (release, release_first) = oneshot::channel();
+        let portal_paused = Arc::new(AtomicBool::new(false));
+        let mut drain = PausedDrain {
+            pending: VecDeque::from([1, 2, 3]),
+            advanced: Vec::new(),
+            first_started: Some(first_started),
+            release_first: Some(release_first),
+            denied: Vec::new(),
+            portal_paused: portal_paused.clone(),
+        };
+
+        let task = tokio::spawn(async move {
+            let exit = drain_all_available(&mut drain, &stop)
+                .await
+                .expect("drain succeeds");
+            (drain, exit)
+        });
+
+        started.await.expect("the first block starts");
+        portal_paused.store(true, Ordering::Relaxed);
+        release
+            .send(())
+            .expect("the first block is still in flight");
+
+        // A pause does not stop the engine loop; the backlog stays queued.
+        let (mut drain, exit) = task.await.expect("drain task succeeds");
+        assert_eq!(exit, None);
+        assert_eq!(drain.advanced, [1]);
+        assert_eq!(drain.pending, [2, 3]);
+
+        // Resume or expiry clears the gate and the next drain catches up.
+        portal_paused.store(false, Ordering::Relaxed);
+        let exit = drain_all_available(&mut drain, &CancellationToken::new())
+            .await
+            .expect("drain succeeds");
+        assert_eq!(exit, None);
+        assert_eq!(drain.advanced, [1, 2, 3]);
+        assert!(drain.pending.is_empty());
     }
 
     #[test]

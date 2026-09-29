@@ -27,9 +27,9 @@ use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
-use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
+use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
-use reth_tasks::TaskExecutor;
+use reth_tasks::{TaskExecutor, cancel::CancelOnDrop};
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, PoolTransaction as _, TransactionPool,
     ValidPoolTransaction, error::InvalidPoolTransactionError,
@@ -209,7 +209,7 @@ where
             );
         }
 
-        let state = StateProviderDatabase::new(state_provider.as_ref());
+        let state = StateProviderDatabase::new(state_provider.as_ref().into_evm_state_provider());
         let mut db = State::builder()
             .with_database(
                 Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>
@@ -238,7 +238,6 @@ where
             shared_gas_limit: 0,
             timestamp_millis_part: attributes.timestamp_millis_part(),
             consensus_context: None,
-            subblock_fee_recipients: Default::default(),
         };
         let mut builder = self
             .evm_config
@@ -325,6 +324,7 @@ where
                 block_number,
                 self.withdrawal_batch_interval_blocks,
                 follows_checkpoint_blocks,
+                total_deposits > 0,
                 self.withdrawal_reveal_encryptor.as_deref(),
                 chain_id,
             )?;
@@ -594,12 +594,13 @@ fn is_l1_storage_unavailable(error: &(dyn Error + 'static)) -> bool {
     false
 }
 
-/// Finalize withdrawals when the current pending list is non-empty or at a batch boundary.
+/// Finalize a batch after processing deposits, with pending withdrawals, or at a batch boundary.
 fn finalize_withdrawal_batch_if_needed<B>(
     builder: &mut B,
     block_number: u64,
     interval_blocks: u64,
     follows_checkpoint_blocks: bool,
+    has_processed_deposits: bool,
     encryptor: Option<&dyn WithdrawalRevealEncryptor>,
     chain_id: u64,
 ) -> Result<(), PayloadBuilderError>
@@ -613,6 +614,7 @@ where
         block_number,
         interval_blocks,
         follows_checkpoint_blocks,
+        has_processed_deposits,
     ) {
         return Ok(());
     }
@@ -666,8 +668,10 @@ fn should_finalize_withdrawal_batch(
     block_number: u64,
     interval_blocks: u64,
     follows_checkpoint_blocks: bool,
+    has_processed_deposits: bool,
 ) -> bool {
     has_pending_withdrawals
+        || has_processed_deposits
         || block_number.is_multiple_of(interval_blocks)
         || follows_checkpoint_blocks
 }
@@ -871,7 +875,7 @@ mod tests {
     use alloy_rlp::Decodable;
     use alloy_sol_types::SolCall;
     use reth_primitives_traits::{Recovered, SealedHeader};
-    use reth_revm::cancelled::CancelOnDrop;
+    use reth_tasks::cancel::CancelOnDrop;
     use reth_transaction_pool::{
         BestTransactions, TransactionOrigin, ValidPoolTransaction,
         error::InvalidPoolTransactionError,
@@ -893,16 +897,20 @@ mod tests {
 
         assert_eq!(blocks, 120);
         assert!(!super::should_finalize_withdrawal_batch(
-            false, 119, blocks, false
+            false, 119, blocks, false, false
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            false, 120, blocks, false
+            false, 120, blocks, false, false
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            true, 121, blocks, false
+            true, 121, blocks, false, false
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            false, 150, blocks, true
+            false, 150, blocks, true, false
+        ));
+        // Deposit-only blocks must settle before the interval to reopen portal capacity.
+        assert!(super::should_finalize_withdrawal_batch(
+            false, 121, blocks, false, true
         ));
     }
 

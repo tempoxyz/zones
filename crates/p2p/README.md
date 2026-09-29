@@ -60,6 +60,27 @@ against that bootstrap — `leader`, `follower`, or `rpc-follower`. There is no 
 leadership changes only through an operator-triggered `setLeader` transaction finalized on L1.
  
 
+## Witness support
+
+Live blocks and backfill responses use bare RLP unless the receiving peer has explicitly
+advertised support for witness envelope v1. Witness collection and proving remain independent
+of this transport choice; followers can collect witnesses locally when they receive bare RLP.
+
+Every node announces `ResponseFrame::Capabilities(1)` every 5 seconds using response frame
+`[2, 1]` on the existing backfill-response channel. The payload is a capability version byte;
+version 1 means witness-envelope v1 is supported. Version 0 and unknown versions do not enable
+witnesses, even if the peer previously announced version 1. This is an unsolicited control frame,
+independent of backfill request IDs and leadership. Older nodes ignore the unknown response tag;
+a new Commonware channel would instead disconnect them. Block/completion frames and the
+authenticated network namespace are unchanged. Only authenticated remote manifest members can
+update capability state.
+
+Advertisements expire after 15 seconds without a refresh. The state is shared by live replication
+and backfill and starts empty after a local restart. Commonware does not expose connection
+generations, so a remote rollback may receive witness envelopes until the last advertisement
+expires; it then automatically receives bare RLP again. This is a bounded fallback, not an
+instantaneous rollback guarantee.
+
 ## Commonware network
 
 Nodes use [Commonware](https://commonware.xyz/) to communicate. Discovery is disabled: the
@@ -210,7 +231,7 @@ This key is independent from the shared `--sequencer-key-file`; reusing that sha
 would collapse several nodes into one recoverable quorum identity.
 
 Add `--sequencer.enable-prover` to run the detached shadow prover on this follower, and optionally
-`--sequencer.prover-address HOST:PORT` to use a remote prover. The follower scans finalized
+`--sequencer.prover-address HARDFORK=HOST:PORT` (repeat per L1 hardfork) to use remote provers. The follower scans finalized
 `submitBatch` transactions, decodes the accepted quorum certificate inputs, and proves the exact
 anchor committed by the transaction after the matching Zone range is canonical locally. This is
 observational: proof success or failure never changes settlement or the follower's RPC service.

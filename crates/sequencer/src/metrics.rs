@@ -17,6 +17,10 @@ pub(crate) struct SequencerMetrics {
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_prover")]
 pub(crate) struct ProverMetrics {
+    /// 1 when the current or next-72-hour chainspec hardfork has no configured prover endpoint.
+    /// Refreshed every minute, independently of proving activity.
+    pub(crate) missing_hardfork_prover: Gauge,
+
     /// Time a finalized batch candidate spends waiting for the prover worker.
     pub(crate) queue_duration_seconds: Histogram,
 
@@ -50,11 +54,20 @@ pub(crate) struct ProverMetrics {
     /// Time spent comparing SPF output with the finalized batch candidate.
     pub(crate) output_validation_duration_seconds: Histogram,
 
-    /// Number of finalized batch candidates rejected by the SPF or with mismatched SPF output.
-    pub(crate) validation_failure_total: Counter,
+    /// Time spent verifying a Nitro proof locally or through the L1 verifier.
+    pub(crate) proof_verification_duration_seconds: Histogram,
+    /// Nitro proofs accepted by the configured local or L1 verifier.
+    pub(crate) proof_verification_success_total: Counter,
+    /// Nitro proofs rejected by the verifier.
+    pub(crate) proof_verification_failure_total: Counter,
+    /// Proof verification attempts interrupted by setup, RPC, budget, or worker errors.
+    pub(crate) proof_verification_error_total: Counter,
+    /// Remote proof checks skipped because the L1 verifier is not active before T13.
+    pub(crate) proof_verification_skipped_total: Counter,
 
-    /// Number of attempts that could not complete due to input, connectivity, protocol, or worker errors.
-    pub(crate) operational_failure_total: Counter,
+    /// Number of prover attempts that failed, regardless of whether validation rejected
+    /// the candidate or an operational error prevented completion.
+    pub(crate) failure_total: Counter,
 
     /// Number of finalized batch candidates that passed prover validation.
     pub(crate) validation_success_total: Counter,
@@ -171,6 +184,11 @@ pub(crate) struct ZoneMonitorMetrics {
     /// Retry attempts for batch submissions.
     pub batch_submit_retry_total: Counter,
 
+    /// Settlement attempts rebuilt because the live L1 prover hardfork changed.
+    pub prover_hardfork_rebuild_total: Counter,
+
+    /// Batches that selected the proofless verifier after proving or preflight failed.
+    pub batch_no_proof_fallback_total: Counter,
     /// Number of times local monitor state was resynced from the portal.
     pub resync_from_portal_total: Counter,
 

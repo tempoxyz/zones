@@ -61,7 +61,7 @@ pub async fn create_proof_collector<P: ZoneSequencerProvider>(
 #[derive(Clone, Debug)]
 pub struct ProofCollectorHandle {
     store: Arc<ProofStore>,
-    requests: mpsc::Sender<CollectRequest>,
+    requests: mpsc::Sender<ProofRequest>,
 }
 
 impl ProofCollectorHandle {
@@ -78,7 +78,7 @@ impl ProofCollectorHandle {
     ) -> Result<Option<Arc<StoredBlockProof>>> {
         let (response, result) = oneshot::channel();
         self.requests
-            .send(CollectRequest {
+            .send(ProofRequest::Collect {
                 number,
                 hash,
                 response,
@@ -88,6 +88,28 @@ impl ProofCollectorHandle {
         result
             .await
             .context("proof collector stopped before persistence")?
+    }
+
+    /// Persist a received witness without recollecting it. The caller must bind its metadata
+    /// to the imported block; this does not validate witness contents or completeness.
+    pub async fn persist_received(&self, proof: StoredBlockProof) -> Result<()> {
+        proof.validate()?;
+        let (response, result) = oneshot::channel();
+        self.requests
+            .send(ProofRequest::Persist {
+                proof: Box::new(proof),
+                response,
+            })
+            .await
+            .context("proof collector stopped")?;
+        result
+            .await
+            .context("proof collector stopped before persistence")?
+    }
+
+    /// Whether an imported block still needs a durable witness for future settlement.
+    pub fn requires_witness(&self, number: u64) -> bool {
+        number > self.store.state.read().pruned_through
     }
 
     /// Fill any restart or upgrade gaps before allowing a proving node to advance.
@@ -107,7 +129,7 @@ impl ProofCollectorHandle {
     }
 
     /// Return a retained witness for this exact block without waiting for collection.
-    pub(crate) fn get(&self, number: u64, hash: B256) -> Option<Arc<StoredBlockProof>> {
+    pub fn get(&self, number: u64, hash: B256) -> Option<Arc<StoredBlockProof>> {
         let state = self.store.state.read();
         if number <= state.pruned_through {
             return None;
@@ -124,7 +146,7 @@ struct ProofCollector<P> {
     config: ProofCollectorConfig,
     provider: P,
     store: Arc<ProofStore>,
-    requests: mpsc::Receiver<CollectRequest>,
+    requests: mpsc::Receiver<ProofRequest>,
 }
 
 impl<P: ZoneSequencerProvider> ProofCollector<P> {
@@ -143,8 +165,16 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
                     let Some(request) = request else {
                         return;
                     };
-                    let result = self.collect_and_persist(request.number, request.hash).await;
-                    let _ = request.response.send(result);
+                    match request {
+                        ProofRequest::Collect { number, hash, response } => {
+                            let result = self.collect_and_persist(number, hash).await;
+                            let _ = response.send(result);
+                        }
+                        ProofRequest::Persist { proof, response } => {
+                            let result = self.persist(*proof).await.map(|_| ());
+                            let _ = response.send(result);
+                        }
+                    }
                     continue;
                 }
                 _ = fallback.tick() => {}
@@ -210,6 +240,19 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             proof.witness.block_number == number,
             "witness height does not match Zone block {number}"
         );
+        self.persist(proof).await
+    }
+
+    async fn persist(&self, proof: StoredBlockProof) -> Result<Option<Arc<StoredBlockProof>>> {
+        let number = proof.witness.block_number;
+        let block_hash = proof.witness.block_hash;
+        if number <= self.store.state.read().pruned_through {
+            return Ok(None);
+        }
+        // Retrying an already persisted witness must not unlink its durable file first.
+        if self.store.contains(number, block_hash) {
+            return Ok(self.store.state.read().proofs.get(&number).cloned());
+        }
         let store = self.store.clone();
         let proof = tokio::task::spawn_blocking(move || {
             store.remove_files(number..=number)?;
@@ -482,10 +525,16 @@ impl StoredBlockProof {
     }
 }
 
-struct CollectRequest {
-    number: u64,
-    hash: B256,
-    response: oneshot::Sender<Result<Option<Arc<StoredBlockProof>>>>,
+enum ProofRequest {
+    Collect {
+        number: u64,
+        hash: B256,
+        response: oneshot::Sender<Result<Option<Arc<StoredBlockProof>>>>,
+    },
+    Persist {
+        proof: Box<StoredBlockProof>,
+        response: oneshot::Sender<Result<()>>,
+    },
 }
 
 fn sync_directory(directory: &Path) -> Result<()> {
@@ -747,24 +796,30 @@ mod tests {
         for outcome in 0..3 {
             let directory = tempfile::tempdir().unwrap();
             let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
-            let (requests, mut receiver) = mpsc::channel::<CollectRequest>(1);
+            let (requests, mut receiver) = mpsc::channel::<ProofRequest>(1);
             let handle = ProofCollectorHandle { store, requests };
             let waiter = handle.collect_and_persist(1, B256::ZERO);
             tokio::pin!(waiter);
             let responder = async {
-                let request = receiver.recv().await.unwrap();
-                assert_eq!(request.hash, B256::ZERO);
+                let ProofRequest::Collect {
+                    number,
+                    hash,
+                    response,
+                } = receiver.recv().await.unwrap()
+                else {
+                    panic!("expected a collection request");
+                };
+                assert_eq!(number, 1);
+                assert_eq!(hash, B256::ZERO);
                 // Completion depends only on the response, not background readiness.
                 match outcome {
                     0 => {
-                        request
-                            .response
+                        response
                             .send(Ok(Some(Arc::new(proof(1, B256::ZERO)))))
                             .unwrap();
                     }
                     1 => {
-                        request
-                            .response
+                        response
                             .send(Err(std::io::Error::from(
                                 std::io::ErrorKind::PermissionDenied,
                             )

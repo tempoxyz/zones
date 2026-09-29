@@ -1,6 +1,6 @@
 //! Tempo EVM setup and Zone-block execution.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::borrow::Cow;
 
 use alloy_consensus::{
     Signed, TxLegacy,
@@ -93,6 +93,12 @@ pub(crate) fn execute_zone_block(
     zone_state
         .block_hashes
         .insert(parent_number, block.parent_hash);
+
+    if parent.inner.base_fee_per_gas.is_none() {
+        return Err(Error::MissingParentBaseFee {
+            block_index: zone_block_index,
+        });
+    }
 
     let attributes = next_block_env_attributes(evm_config.chain_spec(), parent, block)?;
     let env = evm_config
@@ -197,7 +203,6 @@ pub(crate) fn next_block_env_attributes(
         shared_gas_limit: 0,
         timestamp_millis_part: block.timestamp_millis_part,
         consensus_context: None,
-        subblock_fee_recipients: HashMap::new(),
     })
 }
 
@@ -222,9 +227,7 @@ pub(crate) fn next_block_execution_context(
         },
         general_gas_limit: 0,
         shared_gas_limit: 0,
-        validator_set: None,
         consensus_context: None,
-        subblock_fee_recipients: HashMap::new(),
     }
 }
 
@@ -346,7 +349,8 @@ fn decode_user_transactions(
     block_index: usize,
     transactions: &[Bytes],
 ) -> Result<Vec<Recovered<TempoTxEnvelope>>, Error> {
-    let mut decoded = Vec::with_capacity(transactions.len());
+    // Not using with_capacity because input is untrusted.
+    let mut decoded = Vec::new();
     for (transaction_index, encoded_transaction) in transactions.iter().enumerate() {
         let transaction =
             TempoTxEnvelope::decode_2718_exact(encoded_transaction).map_err(|_| {

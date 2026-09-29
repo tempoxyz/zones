@@ -112,6 +112,14 @@ pub(crate) struct GenerateZoneGenesis {
     /// controls whether it remains in the final genesis state.
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
+
+    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
+    #[arg(long)]
+    pub(crate) t12_time: Option<u64>,
+
+    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
+    #[arg(long)]
+    pub(crate) t13_time: Option<u64>,
 }
 
 impl GenerateZoneGenesis {
@@ -251,7 +259,7 @@ impl GenerateZoneGenesis {
             );
         }
 
-        let chain_config = ChainConfig {
+        let mut chain_config = ChainConfig {
             chain_id: self.chain_id,
             homestead_block: Some(0),
             eip150_block: Some(0),
@@ -273,6 +281,14 @@ impl GenerateZoneGenesis {
             deposit_contract_address: Some(Address::ZERO),
             ..Default::default()
         };
+
+        for (name, timestamp) in [("t12Time", self.t12_time), ("t13Time", self.t13_time)] {
+            if let Some(timestamp) = timestamp {
+                chain_config
+                    .extra_fields
+                    .insert_value(name.into(), timestamp)?;
+            }
+        }
 
         let mut genesis = Genesis::default()
             .with_gas_limit(self.gas_limit)
@@ -589,11 +605,11 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<(
 
             let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
             // Allow address(0) to mint (system transactions use sender=0)
-            token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
+            token.grant_role_internal(Address::ZERO, ISSUER_ROLE)?;
             // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
-            token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+            token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
             // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
-            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
 
             // Set a large supply cap
             token.set_supply_cap(
@@ -711,4 +727,57 @@ fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
     )?;
     println!("Initialized StorageCredits");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn genesis_preserves_explicit_fork_timestamps() {
+        for (t12, t13) in [
+            (None, None),
+            (Some(0), Some(0)),
+            (Some(1789463700), None),
+            (None, Some(1789467300)),
+            (Some(9223372036854775807u64), Some(9223372036854775807u64)),
+        ] {
+            let output = tempfile::tempdir().unwrap();
+            let mut args = vec![
+                "generate-zone-genesis".to_owned(),
+                "--output".to_owned(),
+                output.path().display().to_string(),
+                "--chain-id".to_owned(),
+                "134509785776129".to_owned(),
+                "--admin".to_owned(),
+                "0x1000000000000000000000000000000000000001".to_owned(),
+            ];
+            for (flag, timestamp) in [("--t12-time", t12), ("--t13-time", t13)] {
+                if let Some(timestamp) = timestamp {
+                    args.extend([flag.to_owned(), timestamp.to_string()]);
+                }
+            }
+            GenerateZoneGenesis::try_parse_from(args)
+                .unwrap()
+                .run()
+                .await
+                .unwrap();
+            let genesis = serde_json::from_slice::<Genesis>(
+                &std::fs::read(output.path().join("genesis.json")).unwrap(),
+            )
+            .unwrap();
+            let config = serde_json::to_value(&genesis.config).unwrap();
+            assert_eq!(
+                config.get("t12Time"),
+                t12.map(serde_json::Value::from).as_ref()
+            );
+            assert_eq!(
+                config.get("t13Time"),
+                t13.map(serde_json::Value::from).as_ref()
+            );
+            assert_eq!(genesis.config.chain_id, 134509785776129);
+            assert!(!genesis.alloc.is_empty());
+        }
+    }
 }

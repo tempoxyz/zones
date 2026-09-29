@@ -23,6 +23,10 @@ struct L1BlockTrackerState {
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
     finalized_target: Option<FinalizedTarget>,
+    /// Newest applied Portal pause observation: the finalized block and the pause state there.
+    portal_pause: Option<(NumHash, bool)>,
+    /// Newest finalized L1 header timestamp observed outside the bounded ingestion queue.
+    finalized_l1_timestamp: Option<u64>,
 }
 
 /// Highest finalized L1 height announced by the subscriber and whether catch-up has verified that
@@ -138,6 +142,11 @@ const RECENT_PORTAL_EVIDENCE_BLOCKS: u64 = 256;
 /// Zone consumer. Queue-backed subscribers therefore retain observations until block production
 /// or follower import calls [`L1BlockTracker::prune_through`].
 ///
+/// The tracker also holds the finalized Portal pause state that gates leader block production.
+/// While paused the leader consumes nothing, so its ingestion stops at the lookahead bound; the
+/// finalized Portal state poller, not this pipeline, then observes `resume()` or expiry.
+/// Followers ignore the pause and import whatever the leader produces.
+///
 /// This tracker deliberately assumes observed L1 blocks do not reorg: conflicting or
 /// non-contiguous observations are errors.
 #[derive(Debug, Clone)]
@@ -157,6 +166,71 @@ impl Default for L1BlockTracker {
 }
 
 impl L1BlockTracker {
+    /// Return whether finalized Portal state currently pauses Zone block production.
+    pub fn portal_paused(&self) -> bool {
+        self.state
+            .read()
+            .portal_pause
+            .is_some_and(|(_, paused)| paused)
+    }
+
+    /// Return the finalized block of the newest applied Portal pause observation.
+    pub fn portal_pause_block(&self) -> Option<NumHash> {
+        self.state.read().portal_pause.map(|(block, _)| block)
+    }
+
+    /// Apply the Portal pause state at an exact finalized L1 block.
+    ///
+    /// Observations older than the newest applied one are ignored, so the L1 subscriber replaying
+    /// events behind the finalized state poller cannot regress the gate. Returns whether the
+    /// effective pause state changed.
+    pub fn observe_portal_pause(&self, block: NumHash, paused: bool) -> eyre::Result<bool> {
+        let mut state = self.state.write();
+        let previous = state.portal_pause;
+        if let Some((current, current_paused)) = previous {
+            if block.number < current.number {
+                return Ok(false);
+            }
+            if block.number == current.number {
+                eyre::ensure!(
+                    block.hash == current.hash,
+                    "conflicting finalized L1 hashes for Portal pause state at block {}: {} != {}",
+                    block.number,
+                    current.hash,
+                    block.hash
+                );
+                eyre::ensure!(
+                    paused == current_paused,
+                    "contradictory Portal pause state at finalized block {}",
+                    block.number
+                );
+                return Ok(false);
+            }
+        }
+        state.portal_pause = Some((block, paused));
+        Ok(previous.is_some_and(|(_, current_paused)| current_paused) != paused)
+    }
+
+    /// Record the timestamp of a finalized L1 header observed independently of ingestion.
+    ///
+    /// The Zone engine uses this to learn that L1 activated a hardfork even when the lookahead is
+    /// full of older headers, so the queued pre-fork prefix can be checkpointed to free capacity.
+    /// Older observations are ignored.
+    pub fn observe_finalized_l1_timestamp(&self, timestamp: u64) {
+        let mut state = self.state.write();
+        if state
+            .finalized_l1_timestamp
+            .is_none_or(|current| timestamp > current)
+        {
+            state.finalized_l1_timestamp = Some(timestamp);
+        }
+    }
+
+    /// Return the newest finalized L1 header timestamp observed outside the ingestion queue.
+    pub fn finalized_l1_timestamp(&self) -> Option<u64> {
+        self.state.read().finalized_l1_timestamp
+    }
+
     /// Record the highest finalized L1 height the subscriber has been asked to ingest.
     ///
     /// This is published before backfill starts so the Zone engine does not mistake a partially
@@ -291,7 +365,7 @@ impl L1BlockTracker {
                             block.number,
                             block.hash,
                             observation.hash
-                        )
+                        );
                     }
                     None if state
                         .pruned_through
@@ -300,7 +374,7 @@ impl L1BlockTracker {
                         eyre::bail!(
                             "L1 block {} was already consumed and pruned from the tracker",
                             block.number
-                        )
+                        );
                     }
                     None if state
                         .latest
@@ -310,7 +384,7 @@ impl L1BlockTracker {
                             "L1 block {} is missing below the latest observed height {}",
                             block.number,
                             state.latest.expect("checked above").number
-                        )
+                        );
                     }
                     None => {}
                 }
@@ -853,6 +927,16 @@ where
                             "encryption key rotation application",
                         ))?;
                 }
+            }
+            // Publish a pause _before_ the block becomes consumable, so the engine cannot
+            // consume the pause block itself.
+            if let Some(paused) = events.portal_pause {
+                self.block_tracker
+                    .observe_portal_pause(anchor, paused)
+                    .map_err(L1SubscriberError::fatal_from_err(
+                        block_number,
+                        "portal pause application",
+                    ))?;
             }
             let appended = self
                 .deposit_queue
