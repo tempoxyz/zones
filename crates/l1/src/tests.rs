@@ -126,14 +126,12 @@ fn set_tempo_checkpoint(provider: &MockEthProvider, checkpoint: NumHash) {
         crate::abi::TEMPO_STATE_ADDRESS,
         ExtendedAccount::new(0, U256::ZERO).extend_storage([
             (
-                B256::from(
-                    crate::precompiles::tempo_state::slots::TEMPO_BLOCK_NUMBER.to_be_bytes(),
-                ),
+                crate::precompiles::tempo_state::slots::TEMPO_BLOCK_NUMBER.into(),
                 U256::from(checkpoint.number),
             ),
             (
-                B256::from(crate::precompiles::tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes()),
-                U256::from_be_slice(checkpoint.hash.as_slice()),
+                crate::precompiles::tempo_state::slots::TEMPO_BLOCK_HASH.into(),
+                checkpoint.hash.into(),
             ),
         ]),
     );
