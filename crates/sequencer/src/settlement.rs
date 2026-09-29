@@ -613,7 +613,7 @@ impl BatchSubmitter {
         };
         let digest = domain.settlement_digest(&message);
         let signature = signer.sign_hash_sync(&digest)?;
-        Ok(Bytes::copy_from_slice(&signature.as_bytes()))
+        Ok(signature.as_bytes().into())
     }
 
     /// Read all mutable portal state needed for one submission at a single L1 block.
