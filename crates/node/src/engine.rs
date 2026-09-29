@@ -62,8 +62,6 @@ use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 use zone_sequencer::ProofCollectorHandle;
 
-use crate::consensus::zone_hardfork_ready;
-
 /// Local block production permit backed by the effective leadership schedule.
 ///
 /// Full blocks require the leader assigned to their imported Tempo header. Although checkpoint-only
@@ -425,6 +423,7 @@ impl ZoneEngine {
 
         let header = payload.block().sealed_header().clone();
         let block_number = header.number();
+        validate_block_timestamp(header.timestamp_millis(), SystemTime::now())?;
         let res = self.to_engine.new_payload(payload.into()).await?;
 
         if !res.is_valid() {
@@ -641,6 +640,28 @@ fn zone_timestamp_millis(
     l1_timestamp_millis
         .max(wall_clock_timestamp_millis)
         .max(parent_timestamp_millis)
+}
+
+/// Keep clock admission outside Tempo's deterministic execution validation. Reject before
+/// `newPayload` so production and peer backfill can retry without an engine invalid-cache entry.
+pub(crate) fn validate_block_timestamp(timestamp_millis: u64, now: SystemTime) -> eyre::Result<()> {
+    let now_millis = now.duration_since(UNIX_EPOCH)?.as_millis();
+    eyre::ensure!(
+        u128::from(timestamp_millis) <= now_millis + 100,
+        "block timestamp {timestamp_millis} exceeds local clock {now_millis} by more than 100 ms"
+    );
+    Ok(())
+}
+
+/// Match the producer's T13+ readiness rule on peer import. Finalized L1 may be newer than
+/// the embedded anchor while checkpoint catch-up consumes a pre-fork prefix.
+pub(crate) fn zone_hardfork_ready(
+    chain_spec: &ZoneChainSpec,
+    zone_timestamp: u64,
+    finalized_l1_timestamp: u64,
+) -> bool {
+    let zone_hardfork = chain_spec.tempo_hardfork_at(zone_timestamp);
+    !zone_hardfork.is_t13() || zone_hardfork <= chain_spec.tempo_hardfork_at(finalized_l1_timestamp)
 }
 
 #[cfg(test)]
@@ -1194,5 +1215,35 @@ mod tests {
             uninitialized.check(0),
             Some(EngineExit::Fenced { tempo_anchor: 0 })
         );
+    }
+
+    #[test]
+    fn future_clock_allowance_is_inclusive_and_retryable() {
+        let now = UNIX_EPOCH + Duration::from_millis(10_000);
+        for timestamp in [9_999, 10_000, 10_100] {
+            validate_block_timestamp(timestamp, now).unwrap();
+        }
+        assert_eq!(
+            validate_block_timestamp(10_101, now)
+                .unwrap_err()
+                .to_string(),
+            "block timestamp 10101 exceeds local clock 10000 by more than 100 ms"
+        );
+        validate_block_timestamp(10_101, now + Duration::from_millis(1)).unwrap();
+        assert!(validate_block_timestamp(u64::MAX, now).is_err());
+        assert!(validate_block_timestamp(0, UNIX_EPOCH - Duration::from_millis(1)).is_err());
+    }
+
+    #[test]
+    fn hardfork_readiness_waits_for_finalized_l1() {
+        for fork in [TempoHardfork::T13, TempoHardfork::T14] {
+            let mut genesis = t13_spec(0).genesis().clone();
+            set_tempo_fork(&mut genesis, fork, 100);
+            let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+            assert!(zone_hardfork_ready(&spec, 99, 99));
+            assert!(!zone_hardfork_ready(&spec, 100, 99));
+            assert!(zone_hardfork_ready(&spec, 100, 100));
+            assert!(zone_hardfork_ready(&spec, 99, 100));
+        }
     }
 }

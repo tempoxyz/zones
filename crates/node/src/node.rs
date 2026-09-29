@@ -5,7 +5,6 @@
 
 use crate::{
     ZoneEngine,
-    consensus::ZoneConsensus,
     follower::PeerTipRegistry,
     replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
@@ -66,7 +65,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
-use tempo_evm::TempoInvalidTransaction;
+use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -1937,10 +1936,10 @@ impl<Node> ConsensusBuilder<Node> for ZoneConsensusBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
-    type Consensus = ZoneConsensus;
+    type Consensus = TempoConsensus<ZoneChainSpec>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(ZoneConsensus::new(ctx.chain_spec()))
+        Ok(TempoConsensus::new(ctx.chain_spec()).with_allow_equal_timestamps(true))
     }
 }
 

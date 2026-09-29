@@ -8,7 +8,6 @@ use eyre as _;
 
 #[cfg(feature = "cli")]
 pub mod cli;
-pub mod consensus;
 pub mod dev;
 pub mod engine;
 mod follower;

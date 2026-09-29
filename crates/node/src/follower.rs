@@ -13,7 +13,7 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
 use std::{
     collections::{BTreeMap, HashMap},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::dispatch::abi_decoder_config_for_spec;
@@ -36,7 +36,7 @@ use zone_prover::VerifierMode;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
 use crate::{
-    consensus::zone_hardfork_ready,
+    engine::{validate_block_timestamp, zone_hardfork_ready},
     replication::{PeerBlock, decode_peer_block},
     settlement_attestation::{AttestationContext, build_settlement_attestation},
 };
@@ -673,6 +673,7 @@ where
         }
 
         // 4. All txns in the block execute properly
+        validate_block_timestamp(block.header().timestamp_millis(), SystemTime::now())?;
         let payload = ZonePayloadTypes::block_to_payload(block, None);
         let status = self.context.engine.new_payload(payload).await?;
         if !status.is_valid() {
@@ -1058,13 +1059,21 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
+    use alloy_consensus::Sealable as _;
     use alloy_eips::NumHash;
     use alloy_primitives::{Address, B256};
+    use alloy_provider::{ProviderBuilder, mock::Asserter};
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use reth_provider::test_utils::MockEthProvider;
+    use tempo_alloy::TempoNetwork;
+    use tempo_primitives::TempoPrimitives;
     use tokio_util::sync;
+    use zone_chainspec::ZoneChainSpec;
     use zone_l1::{DepositQueue, EnabledToken, L1BlockDeposits, L1BlockTracker, L1PortalEvents};
     use zone_p2p::{BackfillCommand, LeadershipSchedule, LeadershipState};
+    use zone_sequencer::{BatchAnchorConfig, attestation::AttestationDomain};
 
     use super::*;
 
@@ -1729,6 +1738,108 @@ mod tests {
                 let error = validate_live_block_sender(&schedule, Some(sender), anchor, 7)
                     .expect_err("only the effective first-header leader may broadcast");
                 assert!(error.to_string().contains(&expected.to_string()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn future_live_and_backfill_blocks_never_reach_engine() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let parent = TempoHeader::default();
+        provider.add_header(parent.hash_slow(), parent.clone());
+        let mut l1_header = TempoHeader::default();
+        l1_header.inner.number = 1;
+        let prepared = zone_l1::PreparedL1Block {
+            header: SealedHeader::seal_slow(l1_header.clone()),
+            queued_deposits: vec![],
+            decryptions: vec![],
+            enabled_tokens: vec![],
+            follows_checkpoint_blocks: false,
+        };
+        let deposit_queue = DepositQueue::new();
+        deposit_queue.enqueue(l1_header, L1PortalEvents::default());
+        let l1_block_tracker = L1BlockTracker::default();
+        l1_block_tracker
+            .record_with_portal_events(prepared.header.num_hash(), L1PortalEvents::default())
+            .unwrap();
+        let leader = PrivateKey::from_seed(1).public_key();
+        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
+        let follower = FollowerBlockSync::new(
+            FollowerBlockSyncContext {
+                provider,
+                engine: ConsensusEngineHandle::new(engine_tx),
+                l1_block_tracker,
+                deposit_queue,
+                attestation: AttestationContext::new(
+                    AttestationDomain {
+                        l1_chain_id: 1337,
+                        portal_address: Address::ZERO,
+                        zone_id: 1,
+                    },
+                    None,
+                    None,
+                    HashMap::new(),
+                    ProviderBuilder::new_with_network::<TempoNetwork>()
+                        .connect_mocked_client(Asserter::new())
+                        .erased(),
+                    Arc::new(ZoneChainSpec {
+                        inner: tempo_chainspec::spec::DEV.clone(),
+                    }),
+                    BatchAnchorConfig::default(),
+                ),
+                schedule: LeadershipSchedule::seeded(LeadershipState::new(1, leader.clone(), 0)),
+                peer_tips: PeerTipRegistry::default(),
+                proof_collector: None,
+            },
+            BlockSyncP2p {
+                events: mpsc::channel(1).1,
+                commands: mpsc::channel(1).0,
+                backfill_responses: mpsc::channel(1).1,
+                backfill_commands: mpsc::channel(1).0,
+            },
+            sync::CancellationToken::new(),
+        );
+        let mut block = Block::default();
+        block.header.inner.number = 1;
+        block.header.inner.parent_hash = parent.hash_slow();
+        block.body.transactions =
+            vec![zone_payload::build_advance_tempo_tx(&prepared, 1337).into_inner()];
+
+        for live_sender in [Some(leader), None] {
+            block.header.inner.timestamp = 4_102_444_800;
+            let pending = |block| PendingPeerBlock {
+                block: PeerBlock {
+                    block,
+                    witness: None,
+                },
+                live_sender: live_sender.clone(),
+            };
+            let error = tokio::time::timeout(
+                Duration::from_secs(1),
+                follower.import_peer_block(pending(block.clone())),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("block timestamp 4102444800000 exceeds local clock ")
+            );
+            assert!(matches!(
+                engine_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            assert_eq!(follower.context.provider.best_block_number().unwrap(), 0);
+            assert!(follower.context.deposit_queue.peek().is_some());
+
+            // The otherwise identical, timely block gets through admission to newPayload.
+            block.header.inner.timestamp = 0;
+            tokio::select! {
+                result = follower.import_peer_block(pending(block.clone())) => {
+                    panic!("timely block did not reach the engine: {result:?}");
+                }
+                message = engine_rx.recv() => assert!(message.is_some()),
             }
         }
     }
