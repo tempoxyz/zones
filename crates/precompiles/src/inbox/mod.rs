@@ -189,7 +189,7 @@ impl ZoneInbox {
                     // Every terminal classification consumes its entry through the common cursor
                     // update below. Fatal errors roll back the complete inbox transition.
                     self.process_forced_exit(l1, &mut outbox, entry, decryption)
-                        .map(|_| ())
+                        .map(forced::observe)
                 }
                 DecodedQueuedDeposit::WithdrawalBounceBack(deposit) => {
                     self.process_withdrawal_bounce_back(&mut outbox, deposit)

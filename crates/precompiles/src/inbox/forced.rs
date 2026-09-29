@@ -5,11 +5,27 @@ use exithatch::ForcedExitReason as Reason;
 use zone_primitives::constants::decode_l1_chain_id;
 
 /// Internal classification only; never persisted or included in settlement.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ForcedExitResult {
     Exited,
     Empty,
     Rejected(Reason),
+}
+
+/// Test builds record every classification so tests can assert it directly instead of
+/// inferring it from side effects. Production builds discard it.
+#[cfg(not(test))]
+pub(super) fn observe(_result: ForcedExitResult) {}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static OBSERVED: core::cell::RefCell<Vec<ForcedExitResult>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn observe(result: ForcedExitResult) {
+    OBSERVED.with(|observed| observed.borrow_mut().push(result));
 }
 
 impl ZoneInbox {
