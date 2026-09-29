@@ -121,8 +121,7 @@ pub(crate) const WITHDRAWAL_TX_GAS: u64 = 10_000_000;
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
 
-pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
-    address!("0xDEc0000000000000000000000000000000000000");
+pub(crate) use tempo_contracts::precompiles::STABLECOIN_DEX_ADDRESS;
 
 pub(crate) fn local_dev_zone_account(zone: &ZoneTestNode) -> eyre::Result<(DynProvider, Address)> {
     let dev_signer = MnemonicBuilder::<English>::default()
