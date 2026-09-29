@@ -474,7 +474,7 @@ fn genesis_state_witness(genesis: &Genesis) -> (B256, Vec<Bytes>, Vec<Bytes>) {
         let code_hash = account
             .code
             .as_ref()
-            .map_or_else(|| keccak256([]), keccak256);
+            .map_or(alloy_consensus::constants::KECCAK_EMPTY, keccak256);
         if let Some(code) = &account.code {
             bytecodes.entry(code_hash).or_insert_with(|| code.clone());
         }

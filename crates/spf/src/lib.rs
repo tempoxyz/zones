@@ -1221,7 +1221,7 @@ mod tests {
             account,
             0,
             U256::ZERO,
-            keccak256([]),
+            alloy_consensus::constants::KECCAK_EMPTY,
             Vec::new(),
             Some((slot, value)),
         );
