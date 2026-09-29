@@ -49,13 +49,10 @@ pub fn l1_anchored_genesis(
     let storage = tempo_state_account
         .storage
         .get_or_insert_with(Default::default);
+    storage.insert(tempo_state::slots::TEMPO_BLOCK_HASH.into(), l1_genesis_hash);
     storage.insert(
-        B256::from(tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes()),
-        l1_genesis_hash,
-    );
-    storage.insert(
-        B256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
-        B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
+        tempo_state::slots::TEMPO_BLOCK_NUMBER.into(),
+        U256::from(l1_header.inner.number).into(),
     );
 
     // Patch 2: canonical default fee token.
@@ -67,7 +64,7 @@ pub fn l1_anchored_genesis(
         .storage
         .get_or_insert_with(Default::default)
         .insert(
-            B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN.to_be_bytes()),
+            zone_fee_manager::slots::DEFAULT_FEE_TOKEN.into(),
             B256::left_padding_from(default_fee_token.as_slice()),
         );
 
@@ -100,8 +97,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            fee_manager_storage
-                [&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN.to_be_bytes())],
+            fee_manager_storage[&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN)],
             B256::left_padding_from(PATH_USD_ADDRESS.as_slice()),
         );
     }
@@ -120,7 +116,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            storage[&B256::from(tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes())],
+            storage[&B256::from(tempo_state::slots::TEMPO_BLOCK_HASH)],
             l1_header.hash_slow(),
         );
 
@@ -129,8 +125,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            fee_manager_storage
-                [&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN.to_be_bytes())],
+            fee_manager_storage[&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN)],
             B256::left_padding_from(default_fee_token.as_slice()),
         );
     }
