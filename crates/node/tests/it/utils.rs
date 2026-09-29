@@ -2133,10 +2133,7 @@ impl L1TestNode {
         eyre::ensure!(receipt.status(), "createZone failed");
 
         let zone_created = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ZoneFactory::ZoneCreated>()
             .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
 
         Ok(zone_created.portal)
@@ -2227,7 +2224,6 @@ impl L1TestNode {
         symbol: &str,
         salt: B256,
     ) -> eyre::Result<Address> {
-        use alloy_sol_types::SolEvent;
         use tempo_contracts::precompiles::ITIP20Factory;
         use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS};
 
@@ -2249,10 +2245,7 @@ impl L1TestNode {
         eyre::ensure!(receipt.status(), "createToken failed");
 
         let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ITIP20Factory::TokenCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ITIP20Factory::TokenCreated>()
             .ok_or_else(|| eyre::eyre!("TokenCreated event not found"))?;
 
         Ok(event.token)
@@ -2590,10 +2583,7 @@ impl L1TestNode {
         eyre::ensure!(receipt.status(), "createPolicy (BLACKLIST) failed");
 
         let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ITIP403Registry::PolicyCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ITIP403Registry::PolicyCreated>()
             .ok_or_else(|| eyre::eyre!("PolicyCreated event not found"))?;
 
         Ok(event.policyId)
@@ -2616,10 +2606,7 @@ impl L1TestNode {
         eyre::ensure!(receipt.status(), "createPolicy (WHITELIST) failed");
 
         let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ITIP403Registry::PolicyCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ITIP403Registry::PolicyCreated>()
             .ok_or_else(|| eyre::eyre!("PolicyCreated event not found"))?;
 
         Ok(event.policyId)
@@ -2716,10 +2703,7 @@ impl L1TestNode {
         eyre::ensure!(receipt.status(), "createCompoundPolicy failed");
 
         let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ITIP403Registry::CompoundPolicyCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ITIP403Registry::CompoundPolicyCreated>()
             .ok_or_else(|| eyre::eyre!("CompoundPolicyCreated event not found"))?;
 
         Ok(event.policyId)

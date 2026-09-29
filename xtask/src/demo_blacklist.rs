@@ -380,14 +380,8 @@ impl DemoBlacklist {
         check(&receipt, "createPolicy(blacklist)")?;
 
         let blacklist_policy_id = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| {
-                TIP403Registry::PolicyCreated::decode_log(&log.inner)
-                    .ok()
-                    .map(|e| e.data.policyId)
-            })
+            .decoded_log::<TIP403Registry::PolicyCreated>()
+            .map(|e| e.policyId)
             .ok_or_else(|| eyre!("no PolicyCreated event"))?;
         println!("  Blacklist policy created: ID={blacklist_policy_id}");
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
