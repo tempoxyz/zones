@@ -48,9 +48,7 @@ use zone_spf::{
 
 use crate::{
     BatchAnchor, BatchData, PreparedBatch, ProverAddresses, ZoneSequencerProvider,
-    metrics::ProverMetrics,
-    proofs::ProofCollectorHandle,
-    settlement::ancestry::AncestryLoader,
+    metrics::ProverMetrics, proofs::ProofCollectorHandle, settlement::ancestry::AncestryLoader,
 };
 
 /// Number of candidates allowed to wait behind the active validation.
@@ -1173,20 +1171,23 @@ async fn resolve_exact_anchor(
         });
     }
 
-    let resolved = ancestry.load(checkpoint_number, anchor.number).await?;
-    ensure!(
-        resolved.base.hash == checkpoint_hash,
-        "canonical Tempo block {checkpoint_number} hash {} does not match checkpoint hash {checkpoint_hash}",
-        resolved.base.hash
-    );
-    ensure!(
-        resolved.anchor.hash == anchor.hash,
-        "submitted Tempo anchor {} hash {} does not match canonical hash {}",
-        anchor.number,
-        anchor.hash,
-        resolved.anchor.hash
-    );
-    Ok(resolved.into())
+    ancestry
+        .load_checked(checkpoint_number, anchor.number, |resolved| {
+            ensure!(
+                resolved.base.hash == checkpoint_hash,
+                "canonical Tempo block {checkpoint_number} hash {} does not match checkpoint hash {checkpoint_hash}",
+                resolved.base.hash
+            );
+            ensure!(
+                resolved.anchor.hash == anchor.hash,
+                "submitted Tempo anchor {} hash {} does not match canonical hash {}",
+                anchor.number,
+                anchor.hash,
+                resolved.anchor.hash
+            );
+            Ok(())
+        })
+        .await.map(|res| res.into())
 }
 
 fn compare_output(output: &BatchOutput, batch: &BatchData, expected_prev_hash: B256) -> Result<()> {
@@ -1294,7 +1295,7 @@ fn witness_size(witness: &BatchWitness) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settlement::ancestry::test_utils::mock_l1_header;
+    use crate::settlement::ancestry::test_utils::{mock_l1_chain, mock_l1_header};
     use alloy_provider::{Provider as _, ProviderBuilder};
     use alloy_transport::mock::Asserter;
     use zone_rpc::types::ZoneExecutionWitness;
@@ -1575,6 +1576,47 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn exact_ancestry_checks_endpoints_before_caching() {
+        let chain = mock_l1_chain(10, 12);
+        let (base_hash, anchor_hash) = (chain[0].1, chain[2].1);
+        for (checkpoint_hash, submitted_hash, message) in [
+            (B256::repeat_byte(0x42), anchor_hash, "checkpoint hash"),
+            (base_hash, B256::repeat_byte(0x43), "canonical hash"),
+        ] {
+            let asserter = Asserter::new();
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_mocked_client(asserter.clone())
+                .erased();
+            let ancestry = AncestryLoader::new(provider);
+            for (header, _) in &chain {
+                asserter.push_success(header);
+            }
+
+            let mut proof_anchor = ShadowProofAnchor {
+                number: 12,
+                hash: submitted_hash,
+            };
+            let error = resolve_exact_anchor(&ancestry, 10, checkpoint_hash, proof_anchor)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert!(ancestry.is_empty(), "rejected headers must not be cached");
+
+            // A valid retry must fetch the range again, not reuse rejected headers.
+            proof_anchor.hash = anchor_hash;
+            for (header, _) in &chain {
+                asserter.push_success(header);
+            }
+            let anchor = resolve_exact_anchor(&ancestry, 10, base_hash, proof_anchor)
+                .await
+                .unwrap();
+            assert_eq!(anchor.block_number(10), 12);
+            assert_eq!(anchor.block_hash(), anchor_hash);
+            assert!(asserter.read_q().is_empty());
+        }
     }
 
     #[test]

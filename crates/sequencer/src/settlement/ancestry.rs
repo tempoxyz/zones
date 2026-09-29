@@ -73,6 +73,14 @@ impl AncestryLoader {
     /// Load the canonical block header chain `from..=to`, fetching only the uncached ones.
     /// Validates numbering and parent-hash links before admitting headers to the cache.
     pub(crate) async fn load(&self, from: u64, to: u64) -> Result<Ancestry> {
+        self.load_checked(from, to, |_| Ok(())).await
+    }
+
+    /// Load a chain, requiring the caller's identity checks before admitting fetched headers.
+    pub(crate) async fn load_checked<F>(&self, from: u64, to: u64, check: F) -> Result<Ancestry>
+    where
+        F: FnOnce(&Ancestry) -> Result<()>,
+    {
         // Snapshot the cache without changing its LRU order. Network requests
         // and validation happen after the read lock is released.
         let (cached, missing) = {
@@ -95,8 +103,9 @@ impl AncestryLoader {
             .try_collect::<Vec<_>>()
             .await?;
 
-        // Resolution owns ordering and validation. Do not mutate the cache unless it succeeds.
+        // Neither a broken chain nor a caller-rejected identity may enter the cache.
         let (ancestry, fetched) = resolve(from, to, cached, fetched)?;
+        check(&ancestry)?;
         let fetched_count = fetched.len();
 
         // Another load may have filled an entry while the requests were in flight.
