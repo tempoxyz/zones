@@ -2919,7 +2919,7 @@ async fn build_l1_anchored_genesis_at_block(
     if !portal_address.is_zero()
         && !l1_provider
             .get_code_at(portal_address)
-            .block_id(BlockId::number(block_number))
+            .number(block_number)
             .await?
             .is_empty()
     {

@@ -6,7 +6,7 @@ use std::{
 };
 
 use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
-use alloy_eips::{BlockHashOrNumber, BlockId, eip2718::Encodable2718 as _};
+use alloy_eips::{BlockHashOrNumber, eip2718::Encodable2718 as _};
 use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -1128,7 +1128,7 @@ async fn withdrawal_batch_index_at(
 ) -> Result<u64> {
     let index = zone
         .get_storage_at(ZONE_OUTBOX_ADDRESS, outbox::slots::WITHDRAWAL_BATCH_INDEX)
-        .block_id(BlockId::number(block_number))
+        .number(block_number)
         .await?;
     Ok(index.as_limbs()[0])
 }

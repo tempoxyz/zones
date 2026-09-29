@@ -90,6 +90,7 @@ async fn call_verifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_eips::BlockId;
 
     #[test]
     fn parses_verify_without_a_wallet() {

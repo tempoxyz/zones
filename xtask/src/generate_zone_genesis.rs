@@ -380,11 +380,10 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
     let anchor_block = creation_block.checked_sub(1).ok_or_else(|| {
         eyre!("portal {portal} exists at genesis, so no pre-creation anchor is available")
     })?;
-    let anchor_block_id = BlockId::number(anchor_block);
     ensure!(
         provider
             .get_code_at(portal)
-            .block_id(anchor_block_id)
+            .number(anchor_block)
             .await
             .wrap_err_with(|| {
                 format!("failed to fetch portal code at Tempo anchor block {anchor_block}")
@@ -395,7 +394,7 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
     ensure!(
         !provider
             .get_code_at(portal)
-            .block_id(BlockId::number(creation_block))
+            .number(creation_block)
             .await
             .wrap_err_with(|| {
                 format!("failed to fetch portal code at creation block {creation_block}")
