@@ -115,12 +115,17 @@ mod tests {
             .erased();
         let mut success = [0u8; 32];
         success[31] = 1;
+        let mut noncanonical = success;
+        noncanonical[0] = 1;
         for (bytes, valid) in [
             (Bytes::from(success.to_vec()), true),
             (Bytes::from(vec![0; 32]), false),
             (Bytes::new(), false),
             (Bytes::from(vec![1]), false),
             (Bytes::from(vec![2; 32]), false),
+            (Bytes::from(noncanonical.to_vec()), false),
+            (Bytes::from(success[1..].to_vec()), false),
+            (Bytes::from([success.as_slice(), &[0]].concat()), false),
         ] {
             asserter.push_success(&bytes);
             assert_eq!(
