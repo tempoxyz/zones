@@ -206,6 +206,7 @@ pub fn parse_auth_header(header_value: &str) -> Result<AuthorizationToken, AuthE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::b256;
 
     const ZONE_ID: u32 = 42;
     const CHAIN_ID: u64 = 1_337;
@@ -237,9 +238,7 @@ mod tests {
         );
         assert_eq!(
             digest,
-            "0xf827387a933f40dfedece81ba4933feaef89e98a269f52f4f54dda2f1dac4171"
-                .parse::<B256>()
-                .unwrap()
+            b256!("0xf827387a933f40dfedece81ba4933feaef89e98a269f52f4f54dda2f1dac4171")
         );
 
         let mut blob = vec![0xabu8; 65];
