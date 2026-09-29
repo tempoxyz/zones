@@ -48,9 +48,9 @@ pub fn prove_encryption_key_possession(
         x,
         y_parity,
         address,
-        pop_v: signature.v() as u8 + 27,
-        pop_r: B256::from(signature.r().to_be_bytes::<32>()),
-        pop_s: B256::from(signature.s().to_be_bytes::<32>()),
+        pop_v: signature.v_byte(),
+        pop_r: signature.r().into(),
+        pop_s: signature.s().into(),
     })
 }
 
