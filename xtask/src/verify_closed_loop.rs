@@ -34,11 +34,6 @@ alloy::sol! {
     }
 
     #[sol(rpc)]
-    interface PortalTokenView {
-        function areDepositsActive(address token) external view returns (bool);
-    }
-
-    #[sol(rpc)]
     interface GnosisSafeView {
         function getThreshold() external view returns (uint256);
     }
@@ -164,7 +159,6 @@ impl VerifyClosedLoop {
         }
         println!();
 
-        let portal_tokens = PortalTokenView::new(zone.portal, &provider);
         let vault = EarnVaultView::new(earn_vault, &provider);
         let mut checks = Checks::default();
 
@@ -277,7 +271,7 @@ impl VerifyClosedLoop {
         for token in expected_tokens {
             checks.expect(
                 format!("deposits for token {token} are active"),
-                portal_tokens
+                portal
                     .areDepositsActive(token)
                     .block(snapshot_block_id)
                     .call()

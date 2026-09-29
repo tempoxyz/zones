@@ -185,13 +185,6 @@ alloy_sol_types::sol! {
         function place(address token, uint128 amount, bool isBid, int16 tick) external returns (uint128 orderId);
         function quoteSwapExactAmountIn(address tokenIn, address tokenOut, uint128 amountIn) external view returns (uint128 amountOut);
     }
-
-    #[sol(rpc)]
-    contract TestZonePortalAdmin {
-        function pauseDeposits(address token) external;
-        function resumeDeposits(address token) external;
-        function areDepositsActive(address token) external view returns (bool);
-    }
 }
 
 /// Read a Foundry artifact from `crates/contracts/out` and return its deployment bytecode.
@@ -2422,7 +2415,7 @@ impl L1TestNode {
         token: Address,
     ) -> eyre::Result<()> {
         let provider = self.admin_provider();
-        let portal = TestZonePortalAdmin::new(portal_address, &provider);
+        let portal = ZonePortal::new(portal_address, &provider);
         let receipt = portal
             .pauseDeposits(token)
             .send()

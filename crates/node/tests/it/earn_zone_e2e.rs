@@ -140,12 +140,6 @@ alloy_sol_types::sol! {
     }
 
     #[sol(rpc)]
-    contract EarnZonePortalView {
-        function messenger() external view returns (address);
-        function zoneId() external view returns (uint32);
-    }
-
-    #[sol(rpc)]
     contract EarnShare {
         function approve(address spender, uint256 amount) external returns (bool);
         function balanceOf(address account) external view returns (uint256);
@@ -313,7 +307,7 @@ impl EarnZoneFixture {
         let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal).await?;
         zone.wait_for_l2_tempo_finalized(0, E2E_TIMEOUT).await?;
 
-        let messenger = EarnZonePortalView::new(portal, l1.provider())
+        let messenger = ZonePortal::new(portal, l1.provider())
             .messenger()
             .call()
             .await?;
@@ -464,7 +458,7 @@ impl EarnZoneFixture {
                 "setting TokenAuthority transaction limit failed"
             );
         }
-        let zone_id = EarnZonePortalView::new(portal, l1.provider())
+        let zone_id = ZonePortal::new(portal, l1.provider())
             .zoneId()
             .call()
             .await?;

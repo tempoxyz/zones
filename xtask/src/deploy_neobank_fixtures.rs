@@ -25,11 +25,6 @@ use crate::zone_utils::check;
 
 alloy::sol! {
     #[sol(rpc)]
-    interface ZonePortalMessengerView {
-        function messenger() external view returns (address);
-    }
-
-    #[sol(rpc)]
     contract FixtureEarnFactory {
         struct FixedFeeRecipient {
             address account;
@@ -258,7 +253,7 @@ impl DeployNeobankFixtures {
             .wrap_err("failed connecting portal admin to Tempo L1")?;
 
         let portal = ZonePortal::new(self.portal, &deployer_provider);
-        let messenger = ZonePortalMessengerView::new(self.portal, &deployer_provider)
+        let messenger = portal
             .messenger()
             .call()
             .await
