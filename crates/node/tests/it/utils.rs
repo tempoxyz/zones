@@ -683,6 +683,7 @@ type RpcApiFuture =
 type RpcApiFactory = dyn Fn(zone_node::rpc::RedactedRpcConfig) -> RpcApiFuture + Send + Sync;
 
 pub(crate) struct ZoneTestNode {
+    pub(crate) engine: reth_node_api::ConsensusEngineHandle<zone_payload::ZonePayloadTypes>,
     http_url: url::Url,
     l1_provider: DynProvider<TempoNetwork>,
     portal_address: Address,
@@ -1542,6 +1543,7 @@ impl ZoneTestNode {
             l1_state_cache,
             l1_block_tracker,
             rpc_api_factory,
+            engine: node_handle.node.add_ons_handle.beacon_engine_handle.clone(),
             node_handle: Box::new(node_handle),
             engine_stop,
             leadership,

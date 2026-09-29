@@ -207,14 +207,16 @@ mod tests {
 
     #[test]
     fn hardfork_readiness_waits_for_finalized_l1() {
-        let mut genesis = crate::genesis::genesis_template().unwrap();
-        genesis.config.chain_id = zone_chain_id(1337, 1).unwrap();
-        set_tempo_fork(&mut genesis, TempoHardfork::T13, 100);
-        let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
-        assert!(zone_hardfork_ready(&spec, 99, 99));
-        assert!(!zone_hardfork_ready(&spec, 100, 99));
-        assert!(zone_hardfork_ready(&spec, 100, 100));
-        // A delayed Zone block may be behind finalized L1.
-        assert!(zone_hardfork_ready(&spec, 99, 100));
+        for fork in [TempoHardfork::T13, TempoHardfork::T14] {
+            let mut genesis = crate::genesis::genesis_template().unwrap();
+            genesis.config.chain_id = zone_chain_id(1337, 1).unwrap();
+            set_tempo_fork(&mut genesis, fork, 100);
+            let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+            assert!(zone_hardfork_ready(&spec, 99, 99));
+            assert!(!zone_hardfork_ready(&spec, 100, 99));
+            assert!(zone_hardfork_ready(&spec, 100, 100));
+            // A delayed Zone block may be behind finalized L1.
+            assert!(zone_hardfork_ready(&spec, 99, 100));
+        }
     }
 }

@@ -625,6 +625,12 @@ where
             .timestamp()
             .max(
                 self.context
+                    .deposit_queue
+                    .latest_header()
+                    .map_or(0, |header| header.timestamp()),
+            )
+            .max(
+                self.context
                     .l1_block_tracker
                     .finalized_l1_timestamp()
                     .unwrap_or_default(),
