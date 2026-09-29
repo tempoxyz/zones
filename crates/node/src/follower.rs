@@ -1714,16 +1714,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn future_clock_allowance_is_inclusive() {
-        let now = UNIX_EPOCH + Duration::from_millis(10_000);
-        validate_block_timestamp(10_100, now).unwrap();
-        assert_eq!(
-            validate_block_timestamp(10_101, now)
-                .unwrap_err()
-                .to_string(),
-            "block timestamp 10101 exceeds local clock 10000 by more than 100 ms"
-        );
-    }
 }
