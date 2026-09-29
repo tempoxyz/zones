@@ -16,6 +16,12 @@ alloy-sol-types.workspace = true
 tempo-zone-contracts.workspace = true
 tempo-primitives.workspace = true
 
+# test-utils
+k256 = { workspace = true, optional = true }
+p256 = { workspace = true, optional = true }
+proptest = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+
 [features]
 default = ["std"]
 std = [
@@ -24,9 +30,11 @@ std = [
     "tempo-zone-contracts/std",
     "tempo-primitives/std",
 ]
+test-utils = ["std", "dep:k256", "dep:p256", "dep:proptest", "dep:sha2"]
 
 [dev-dependencies]
 k256.workspace = true
 sha2.workspace = true
 p256.workspace = true
+proptest.workspace = true
 serde_json.workspace = true

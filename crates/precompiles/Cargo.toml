@@ -49,7 +49,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 const-hex.workspace = true
+exithatch = { workspace = true, features = ["test-utils"] }
 eyre.workspace = true
+proptest.workspace = true
 serde.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 
