@@ -103,8 +103,8 @@ fn decryption_for(encrypted: &tempo_zone_contracts::DepositPayload) -> Decryptio
     }
 }
 
-/// Encrypt `plaintext` as admitted request `id`, queued at global inbox position `number`.
-fn request(h: &mut Harness, id: u64, number: u64, plaintext: &[u8]) -> eyre::Result<Entry> {
+/// Encrypt `plaintext` as admitted request `id`.
+fn request(h: &mut Harness, id: u64, plaintext: &[u8]) -> eyre::Result<Entry> {
     let (_, x, parity) = zone_key();
     let encrypted = ecies::encrypt_payload(
         &x,
@@ -125,11 +125,7 @@ fn request(h: &mut Harness, id: u64, number: u64, plaintext: &[u8]) -> eyre::Res
         portal.encryption_keys[0].x.write(x)?;
         portal.encryption_keys[0].y_parity.write(parity)?;
         portal.token_configs[PATH_USD_ADDRESS].enabled.write(true)?;
-        let mut forced = ForcedExitPortalStorage::new(PORTAL);
-        forced.forced_exit_requests[id]
-            .token
-            .write(PATH_USD_ADDRESS)?;
-        forced.forced_exit_requests[id].deposit_number.write(number)
+        Ok(())
     })?;
     let decryption = decryption_for(&encrypted);
     let entry = ForcedExit {
@@ -403,12 +399,7 @@ fn funded_requests(
         };
         fund_account(h, a.account, U256::ONE)?;
         accounts.push(a.account);
-        entries.push(request(
-            h,
-            id,
-            id,
-            &exithatch::encode_payload(&a, &signature),
-        )?);
+        entries.push(request(h, id, &exithatch::encode_payload(&a, &signature))?);
     }
     Ok((accounts, entries))
 }
@@ -430,7 +421,7 @@ fn forced_exit_accepts_earlier_admission_but_rejects_future_height() -> eyre::Re
     for admission_block in [0, 2] {
         let mut h = active_harness()?;
         fund(&mut h, 42)?;
-        let mut entry = request(&mut h, 1, 1, &payload(&auth(1)))?;
+        let mut entry = request(&mut h, 1, &payload(&auth(1)))?;
         // The transition imports block 1. Earlier admission models deferred portal work.
         set_entry(&mut entry, |e| e.requestedAtBlock = admission_block);
         let before = snapshot(&mut h)?;
@@ -452,8 +443,8 @@ fn l1_token_pause_rejects_admitted_requests_without_blocking_inbox() -> eyre::Re
     for paused in [true, false] {
         let mut h = active_harness()?;
         fund(&mut h, 42)?;
-        let first = request(&mut h, 1, 1, &payload(&auth(1)))?;
-        let second = request(&mut h, 2, 2, &payload(&auth(2)))?;
+        let first = request(&mut h, 1, &payload(&auth(1)))?;
+        let second = request(&mut h, 2, &payload(&auth(2)))?;
         // Admission occurred while unpaused; model the final state after a same-block
         // pause (or pause followed by unpause). The Zone-local token remains unpaused.
         let mut pause_slot = tempo_precompiles::storage::Slot::<bool>::new(
@@ -496,7 +487,7 @@ fn forced_full_balance_replay_and_empty_finalize_with_exact_commitment() -> eyre
     let entries = [7, 7, 8]
         .into_iter()
         .zip(1..)
-        .map(|(nonce, id)| request(&mut h, id, id, &payload(&auth(nonce))))
+        .map(|(nonce, id)| request(&mut h, id, &payload(&auth(nonce))))
         .collect::<eyre::Result<Vec<_>>>()?;
     let executed = execute(&mut h, entries)?;
     assert_eq!(
@@ -605,7 +596,7 @@ fn rejected_requests_are_classified_and_never_stall_the_inbox() -> eyre::Result<
             }
             _ => {}
         }
-        let mut bad = request(&mut h, 1, 1, &plaintext)?;
+        let mut bad = request(&mut h, 1, &plaintext)?;
         if matches!(case, CorruptTag) {
             set_entry(&mut bad, |e| e.encrypted.tag[0] ^= 1);
         }
@@ -616,7 +607,7 @@ fn rejected_requests_are_classified_and_never_stall_the_inbox() -> eyre::Result<
                 portal.role[BOB].write(u8::from(tempo_zone_contracts::ZonePortal::Role::Account))
             })?;
         }
-        let good = request(&mut h, 2, 2, &payload(&auth(2)))?;
+        let good = request(&mut h, 2, &payload(&auth(2)))?;
 
         let executed = execute(&mut h, vec![bad, good])?;
         let reason = match case {
@@ -664,8 +655,8 @@ fn rejected_requests_are_classified_and_never_stall_the_inbox() -> eyre::Result<
 fn later_bad_proof_rolls_back_earlier_exit_without_an_external_checkpoint() -> eyre::Result<()> {
     let mut h = active_harness()?;
     fund(&mut h, 50)?;
-    let first = request(&mut h, 1, 1, &payload(&auth(1)))?;
-    let mut second = request(&mut h, 2, 2, &payload(&auth(2)))?;
+    let first = request(&mut h, 1, &payload(&auth(1)))?;
+    let mut second = request(&mut h, 2, &payload(&auth(2)))?;
     second.1.as_mut().unwrap().cpProof.c = B256::ZERO;
     let before = snapshot(&mut h)?;
     assert!(execute(&mut h, vec![first, second])?.output.is_revert());
@@ -701,7 +692,7 @@ fn forced_balance_boundaries_and_classification_order() -> eyre::Result<()> {
         } else {
             fund_account(&mut h, ROOT, amount)?;
         }
-        let entry = request(&mut h, 1, 1, &payload(&auth(1)))?;
+        let entry = request(&mut h, 1, &payload(&auth(1)))?;
         h.l1.with_storage(1, || {
             ZonePortalStorage::new(PORTAL).token_configs[PATH_USD_ADDRESS]
                 .enabled
@@ -782,7 +773,7 @@ fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
 fn forced_exit_keeps_nonce_consumed_through_pending_credit_recovery() -> eyre::Result<()> {
     let mut h = active_harness()?;
     fund(&mut h, 17)?;
-    let entry = request(&mut h, 1, 1, &payload(&auth(1)))?;
+    let entry = request(&mut h, 1, &payload(&auth(1)))?;
     assert_eq!(
         execute(&mut h, vec![entry])?.results,
         [ForcedExitResult::Exited]
@@ -833,16 +824,11 @@ fn forced_exit_keeps_nonce_consumed_through_pending_credit_recovery() -> eyre::R
 #[test]
 fn forced_authorization_nonce_is_shared_across_tokens() -> eyre::Result<()> {
     let mut h = active_harness()?;
-    let first = request(&mut h, 1, 1, &payload(&auth(1)))?;
+    let first = request(&mut h, 1, &payload(&auth(1)))?;
     let mut other_auth = auth(1);
     other_auth.token = address!("20c0000000000000000000000000000000000002");
-    let mut second = request(&mut h, 2, 2, &payload(&other_auth))?;
+    let mut second = request(&mut h, 2, &payload(&other_auth))?;
     set_entry(&mut second, |e| e.token = other_auth.token);
-    h.l1.with_storage(1, || {
-        ForcedExitPortalStorage::new(PORTAL).forced_exit_requests[2]
-            .token
-            .write(other_auth.token)
-    })?;
     let executed = execute(&mut h, vec![first, second])?;
     assert_eq!(
         executed.results,
@@ -915,7 +901,7 @@ fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
             } else {
                 payload(&auth(1))
             };
-            let entry = request(&mut h, 1, 1, &plaintext)?;
+            let entry = request(&mut h, 1, &plaintext)?;
             set_spec(&mut h, spec);
             let before = snapshot(&mut h)?;
             let executed = execute(&mut h, vec![entry.clone()])?;
@@ -936,10 +922,6 @@ fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
             }
             assert!(executed.output.is_revert(), "{case}");
             assert_eq!(snapshot(&mut h)?, before, "{case}");
-            assert!(
-                !h.l1.requested(1, &portal.forced_exit_requests[1].token),
-                "{case}"
-            );
             if !t13 {
                 // The same entry executes as soon as the fork is active.
                 set_spec(&mut h, TempoHardfork::T13);
@@ -950,39 +932,30 @@ fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Request IDs count forced exits only; deposit numbers count every inbox entry. Interleaving
-/// other entry types makes them differ, and the portal metadata binds the global number.
+/// Request IDs count forced exits only, while the inbox cursor counts every entry. Interleaving
+/// other entry types must not affect forced-exit execution.
 #[test]
-fn mixed_batch_binds_request_id_to_global_deposit_number() -> eyre::Result<()> {
-    for use_request_id in [false, true] {
-        let mut h = active_harness()?;
-        h.seed_fallback_recipient(7, ROOT)?;
-        let (first_number, second_number) = if use_request_id { (1, 2) } else { (2, 4) };
-        let entries = vec![
-            deposit(&mut h, ROOT, 900)?,
-            request(&mut h, 1, first_number, &payload(&auth(1)))?,
-            bounce_back(7, 321),
-            request(&mut h, 2, second_number, &payload(&auth(2)))?,
-        ];
-        let before = snapshot(&mut h)?;
-        let executed = execute(&mut h, entries)?;
-        if use_request_id {
-            assert!(executed.output.is_revert());
-            assert_eq!(snapshot(&mut h)?, before);
-            continue;
-        }
-        // The deposit funds the first exit; the bounce-back funds the second.
-        assert_eq!(
-            executed.results,
-            [ForcedExitResult::Exited, ForcedExitResult::Exited]
-        );
-        let pending = h.pending_withdrawals()?;
-        let amounts = pending.iter().map(|p| p.amount).collect::<Vec<_>>();
-        assert_eq!(amounts, [900, 321]);
-        assert_eq!(root_balance(&mut h)?, 0);
-        assert_eq!(h.fallback_recipient(7)?, Address::ZERO);
-        assert!(consumed(&mut h, 1)? && consumed(&mut h, 2)?);
-    }
+fn mixed_batch_executes_forced_exits_in_queue_order() -> eyre::Result<()> {
+    let mut h = active_harness()?;
+    h.seed_fallback_recipient(7, ROOT)?;
+    let entries = vec![
+        deposit(&mut h, ROOT, 900)?,
+        request(&mut h, 1, &payload(&auth(1)))?,
+        bounce_back(7, 321),
+        request(&mut h, 2, &payload(&auth(2)))?,
+    ];
+    let executed = execute(&mut h, entries)?;
+    // The deposit funds the first exit; the bounce-back funds the second.
+    assert_eq!(
+        executed.results,
+        [ForcedExitResult::Exited, ForcedExitResult::Exited]
+    );
+    let pending = h.pending_withdrawals()?;
+    let amounts = pending.iter().map(|p| p.amount).collect::<Vec<_>>();
+    assert_eq!(amounts, [900, 321]);
+    assert_eq!(root_balance(&mut h)?, 0);
+    assert_eq!(h.fallback_recipient(7)?, Address::ZERO);
+    assert!(consumed(&mut h, 1)? && consumed(&mut h, 2)?);
     Ok(())
 }
 
@@ -990,7 +963,7 @@ fn mixed_batch_binds_request_id_to_global_deposit_number() -> eyre::Result<()> {
 fn replay_is_rejected_across_batches_and_after_bounce_back() -> eyre::Result<()> {
     let mut h = active_harness()?;
     fund(&mut h, 42)?;
-    let first = request(&mut h, 1, 1, &payload(&auth(1)))?;
+    let first = request(&mut h, 1, &payload(&auth(1)))?;
     assert_eq!(
         execute(&mut h, vec![first])?.results,
         [ForcedExitResult::Exited]
@@ -1002,8 +975,8 @@ fn replay_is_rejected_across_batches_and_after_bounce_back() -> eyre::Result<()>
     activate(&h, 2, 1)?;
     let entries = vec![
         bounce_back(fallback_nonce, 42),
-        request(&mut h, 2, 3, &payload(&auth(1)))?,
-        request(&mut h, 3, 4, &payload(&auth(2)))?,
+        request(&mut h, 2, &payload(&auth(1)))?,
+        request(&mut h, 3, &payload(&auth(2)))?,
     ];
     let executed = execute(&mut h, entries)?;
     assert_eq!(
@@ -1038,8 +1011,8 @@ fn malleated_root_signature_cannot_exit_twice() -> eyre::Result<()> {
         let malleated = exithatch::encode_payload(&a, &malleated);
         assert_ne!(keccak256(&malleated), keccak256(payload(&a)));
         let entries = vec![
-            request(&mut h, 1, 1, &malleated)?,
-            request(&mut h, 2, 2, &payload(&a))?,
+            request(&mut h, 1, &malleated)?,
+            request(&mut h, 2, &payload(&a))?,
         ];
         let executed = execute(&mut h, entries)?;
         assert_eq!(
@@ -1091,8 +1064,8 @@ fn bad_plaintext_is_isolated(mutation: PlaintextMutation) -> eyre::Result<()> {
     let mut h = active_harness()?;
     fund(&mut h, 42)?;
     let entries = vec![
-        request(&mut h, 1, 1, &bad)?,
-        request(&mut h, 2, 2, &payload(&auth(2)))?,
+        request(&mut h, 1, &bad)?,
+        request(&mut h, 2, &payload(&auth(2)))?,
     ];
     let executed = execute(&mut h, entries)?;
     assert!(
@@ -1170,7 +1143,7 @@ fn outer_mutation() -> impl Strategy<Value = OuterMutation> {
 fn outer_mutation_reverts(mutation: OuterMutation) -> eyre::Result<()> {
     let mut h = active_harness()?;
     fund(&mut h, 42)?;
-    let original = vec![request(&mut h, 1, 1, &payload(&auth(1)))?];
+    let original = vec![request(&mut h, 1, &payload(&auth(1)))?];
     let head = queue_hash(&original, B256::ZERO);
     let mut entries = original.clone();
     let (queued, decryption) = &mut entries[0];
