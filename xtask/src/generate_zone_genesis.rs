@@ -282,6 +282,16 @@ impl GenerateZoneGenesis {
             ..Default::default()
         };
 
+        // Custom chains load this schedule without inheriting DEV defaults. Write the
+        // baseline forks explicitly: activating T12/T13 does not activate earlier forks.
+        for &fork in TempoHardfork::VARIANTS {
+            if fork != TempoHardfork::Genesis && fork < TempoHardfork::T12 {
+                chain_config
+                    .extra_fields
+                    .insert_value(format!("{}Time", fork.to_string().to_lowercase()), 0u64)?;
+            }
+        }
+
         for (name, timestamp) in [("t12Time", self.t12_time), ("t13Time", self.t13_time)] {
             if let Some(timestamp) = timestamp {
                 chain_config
@@ -733,12 +743,15 @@ fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 mod tests {
     use super::*;
     use clap::Parser;
+    use tempo_chainspec::TempoHardforks;
+    use zone_chainspec::ZoneChainSpec;
 
     #[tokio::test]
     async fn genesis_preserves_explicit_fork_timestamps() {
         for (t12, t13) in [
             (None, None),
             (Some(0), Some(0)),
+            (Some(0), Some(9223372036854775807u64)),
             (Some(1789463700), None),
             (None, Some(1789467300)),
             (Some(9223372036854775807u64), Some(9223372036854775807u64)),
@@ -778,6 +791,34 @@ mod tests {
             );
             assert_eq!(genesis.config.chain_id, 134509785776129);
             assert!(!genesis.alloc.is_empty());
+
+            let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+            // Check each fork independently; the highest active fork alone can hide
+            // missing earlier activations, including T4's system-transaction rules.
+            for &fork in TempoHardfork::VARIANTS {
+                if fork < TempoHardfork::T12 {
+                    assert!(spec.tempo_fork_activation(fork).active_at_timestamp(0));
+                }
+            }
+            for (fork, activation) in [(TempoHardfork::T12, t12), (TempoHardfork::T13, t13)] {
+                for timestamp in [0, 1789463699, 1789463700, 1789467300, u64::MAX] {
+                    assert_eq!(
+                        spec.tempo_fork_activation(fork)
+                            .active_at_timestamp(timestamp),
+                        activation.is_some_and(|activation| timestamp >= activation),
+                        "{fork} at {timestamp}"
+                    );
+                }
+            }
+            for &fork in TempoHardfork::VARIANTS {
+                if fork > TempoHardfork::T13 {
+                    assert!(
+                        !spec
+                            .tempo_fork_activation(fork)
+                            .active_at_timestamp(u64::MAX)
+                    );
+                }
+            }
         }
     }
 }

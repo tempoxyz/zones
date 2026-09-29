@@ -64,3 +64,4 @@ k256.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+zone-chainspec.workspace = true
