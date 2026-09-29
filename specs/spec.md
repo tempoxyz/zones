@@ -907,7 +907,7 @@ Admission allocates a monotonically increasing `requestId` and global `depositNu
 
 The shared inbox state transition processes forced requests in their exact position among deposits and bounce-backs. Preparation retains historical keys and supplies one decryption witness even when the ciphertext will fail authentication or canonical decoding. A host-provided rejection flag cannot decide the result.
 
-Execution authenticates the outer queue entry and its admission metadata, including the global deposit position and admission block, and verifies the Chaum-Pedersen proof against the indexed historical key. Missing keys or witnesses, an invalid proof, or inconsistent admission metadata abort the transition; they cannot become terminal rejection. With a valid proof, processing follows this precedence:
+Execution authenticates the outer queue entry, including its request ID, token, and admission block/time, through the deposit queue hash chain, which must match the portal's `currentDepositQueueHash` at the imported anchor; the entry's global deposit position follows from its place in that chain. Execution also requires that the admission block does not exceed the imported anchor (checkpoint-only imports may defer an entry to a later anchor) and verifies the Chaum-Pedersen proof against the indexed historical key. Missing keys or witnesses, an invalid proof, or an admission block beyond the anchor abort the transition; they cannot become terminal rejection. With a valid proof, processing follows this precedence:
 
 | Condition | Internal result | Consume fresh authorization nonce? |
 |---|---|---|

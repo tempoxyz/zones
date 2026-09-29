@@ -936,28 +936,26 @@ fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
 /// other entry types must not affect forced-exit execution.
 #[test]
 fn mixed_batch_executes_forced_exits_in_queue_order() -> eyre::Result<()> {
-    {
-        let mut h = active_harness()?;
-        h.seed_fallback_recipient(7, ROOT)?;
-        let entries = vec![
-            deposit(&mut h, ROOT, 900)?,
-            request(&mut h, 1, &payload(&auth(1)))?,
-            bounce_back(7, 321),
-            request(&mut h, 2, &payload(&auth(2)))?,
-        ];
-        let executed = execute(&mut h, entries)?;
-        // The deposit funds the first exit; the bounce-back funds the second.
-        assert_eq!(
-            executed.results,
-            [ForcedExitResult::Exited, ForcedExitResult::Exited]
-        );
-        let pending = h.pending_withdrawals()?;
-        let amounts = pending.iter().map(|p| p.amount).collect::<Vec<_>>();
-        assert_eq!(amounts, [900, 321]);
-        assert_eq!(root_balance(&mut h)?, 0);
-        assert_eq!(h.fallback_recipient(7)?, Address::ZERO);
-        assert!(consumed(&mut h, 1)? && consumed(&mut h, 2)?);
-    }
+    let mut h = active_harness()?;
+    h.seed_fallback_recipient(7, ROOT)?;
+    let entries = vec![
+        deposit(&mut h, ROOT, 900)?,
+        request(&mut h, 1, &payload(&auth(1)))?,
+        bounce_back(7, 321),
+        request(&mut h, 2, &payload(&auth(2)))?,
+    ];
+    let executed = execute(&mut h, entries)?;
+    // The deposit funds the first exit; the bounce-back funds the second.
+    assert_eq!(
+        executed.results,
+        [ForcedExitResult::Exited, ForcedExitResult::Exited]
+    );
+    let pending = h.pending_withdrawals()?;
+    let amounts = pending.iter().map(|p| p.amount).collect::<Vec<_>>();
+    assert_eq!(amounts, [900, 321]);
+    assert_eq!(root_balance(&mut h)?, 0);
+    assert_eq!(h.fallback_recipient(7)?, Address::ZERO);
+    assert!(consumed(&mut h, 1)? && consumed(&mut h, 2)?);
     Ok(())
 }
 

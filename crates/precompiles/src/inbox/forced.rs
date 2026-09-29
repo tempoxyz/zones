@@ -37,6 +37,7 @@ impl ZoneInbox {
         decryption: DecryptionData,
     ) -> ZoneResult<ForcedExitResult> {
         // 1. The hash chain authenticates the entry; only reject requests from a future anchor.
+        // Checkpoint-only imports can defer this entry to a later execution anchor.
         if entry.requestedAtBlock > TempoState::new().tempo_block_number()? {
             return Err(ZonePrecompileError::MalformedCalldata);
         }
