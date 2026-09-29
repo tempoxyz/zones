@@ -10,11 +10,10 @@ on:
         type: string
         required: true
       tempo-hardfork:
-        description: Tempo L1 hardfork active in both benchmark phases.
-        type: choice
+        description: Tempo L1 hardfork for both phases (for example, t14).
+        type: string
         required: true
         default: t13
-        options: [t13, t14]
       region:
         description: Existing AWS benchmark region.
         type: choice
