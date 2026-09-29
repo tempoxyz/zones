@@ -4383,13 +4383,7 @@ fn build_auth_token(
     let (fields, digest) = build_token_fields(zone_id, chain_id, now, expires_at);
     let sig = signer.sign_hash_sync(&digest).expect("signing failed");
 
-    let mut blob = Vec::with_capacity(65 + fields.len());
-    blob.extend_from_slice(&sig.r().to_be_bytes::<32>());
-    blob.extend_from_slice(&sig.s().to_be_bytes::<32>());
-    blob.push(sig.v() as u8);
-    blob.extend_from_slice(&fields);
-
-    alloy_primitives::hex::encode(&blob)
+    alloy_primitives::hex::encode([sig.as_rsy().as_slice(), &fields].concat())
 }
 
 fn build_auth_token_with_signature(
