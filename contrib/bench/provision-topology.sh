@@ -927,6 +927,27 @@ provision_up() {
     local zone_genesis="$zone_dir/genesis.json"
     require_file "$zone_json"
     require_file "$zone_genesis"
+    # create-zone omits newer fork activations, so chain ID 1337 can inherit
+    # DEV's schedule instead of the benchmark L1's. Match the snapshot's
+    # complete fork schedule before starting the Zone.
+    local l1_fork_schedule zone_genesis_with_l1_forks
+    l1_fork_schedule="$(jq -ce '
+        .config | with_entries(select(.key | test("(Block|Time)$"))) | select(length > 0)
+    ' "$patched_genesis")" || die "Tempo L1 genesis has no hardfork schedule"
+    zone_genesis_with_l1_forks="$(mktemp "$zone_genesis.forks.XXXXXX")"
+    jq -e --argjson forks "$l1_fork_schedule" '
+        if (.config | type) != "object" then
+            error("Zone genesis has no chain config")
+          else
+            .config += $forks
+          end
+    ' "$zone_genesis" >"$zone_genesis_with_l1_forks" \
+        || die "could not apply the Tempo L1 hardfork schedule to Zone genesis"
+    mv -- "$zone_genesis_with_l1_forks" "$zone_genesis"
+    jq -e --argjson forks "$l1_fork_schedule" '
+        .config as $zone | all($forks | keys[]; $zone[.] == $forks[.])
+    ' "$zone_genesis" >/dev/null \
+        || die "Zone and Tempo L1 genesis hardfork schedules differ"
     local portal zone_id zone_chain_id anchor_block
     portal="$(jq -er '.portal' "$zone_json")"
     zone_id="$(jq -er '.zoneId' "$zone_json")"
