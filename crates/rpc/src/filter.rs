@@ -63,9 +63,8 @@ const CALLER_SCOPED_FILTER_ERROR: &str =
 ///   the receipt
 pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
     let topics = log.topics();
-    let topic0 = match topics.first() {
-        Some(t) => t,
-        None => return false,
+    let Some(topic0) = log.topic0() else {
+        return false;
     };
 
     let caller_word = B256::left_padding_from(caller.as_slice());
