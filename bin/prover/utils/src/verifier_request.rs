@@ -1,6 +1,10 @@
-//! Inspectable arguments and JSON-RPC requests for the native Nitro verifier.
+//! Inspectable arguments and eth_call parameters for the native Nitro verifier.
 
+use alloy_eips::BlockId;
+use alloy_network::Ethereum;
 use alloy_primitives::{Address, Bytes};
+use alloy_provider::EthCallParams;
+use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
 use eyre::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -46,7 +50,13 @@ sol! {
     ) external view returns (bool);
 }
 
-pub(super) fn build(witness: &Value, response: &Value) -> Result<Value> {
+pub(super) struct VerifierRequest {
+    pub chain_id: u64,
+    pub arguments: verifyCall,
+    pub params: EthCallParams<Ethereum>,
+}
+
+pub(super) fn build(witness: &Value, response: &Value) -> Result<VerifierRequest> {
     let inputs = &witness["publicInputs"];
     let output = &response["output"];
     let chain_id: u64 = serde_json::from_value(inputs["parentChainId"].clone())
@@ -77,21 +87,21 @@ pub(super) fn build(witness: &Value, response: &Value) -> Result<Value> {
         }
     }
     let data = Bytes::from(call.abi_encode());
-    Ok(json!({
-        "chainId": chain_id,
-        "arguments": call,
-        "rpc": {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_call",
-            "params": [{
-                "from": portal,
-                "to": ZONE_VERIFIER_ADDRESS,
-                "data": data,
-                "gas": "0x1c9c380",
-            }, "latest"],
+    let tx = TransactionRequest {
+        from: Some(portal),
+        to: Some(ZONE_VERIFIER_ADDRESS.into()),
+        input: TransactionInput {
+            input: None,
+            data: Some(data),
         },
-    }))
+        gas: Some(30_000_000),
+        ..Default::default()
+    };
+    Ok(VerifierRequest {
+        chain_id,
+        arguments: call,
+        params: EthCallParams::new(tx).with_block(BlockId::latest()),
+    })
 }
 
 #[cfg(test)]
@@ -126,24 +136,24 @@ mod tests {
     fn builds_inspectable_arguments_and_matching_calldata() {
         let (witness, response) = fixture();
         let request = build(&witness, &response).unwrap();
-        assert_eq!(request["chainId"], 31319);
-        assert_eq!(request["arguments"].as_object().unwrap().len(), 12);
-        let tx = &request["rpc"]["params"][0];
+        let arguments = serde_json::to_value(&request.arguments).unwrap();
+        assert_eq!(request.chain_id, 31319);
+        assert_eq!(arguments.as_object().unwrap().len(), 12);
+        let params = serde_json::to_value(&request.params).unwrap();
+        let data: Bytes = serde_json::from_value(params[0]["data"].clone()).unwrap();
         assert_eq!(
-            tx["from"],
-            json!(address!("5ad0000000000000000000000000000000000002"))
+            params,
+            json!([{
+                "from": address!("5ad0000000000000000000000000000000000002"),
+                "to": ZONE_VERIFIER_ADDRESS,
+                "data": data,
+                "gas": "0x1c9c380",
+            }, "latest"])
         );
-        assert_eq!(tx["to"], json!(ZONE_VERIFIER_ADDRESS));
-        assert_eq!(request["rpc"]["method"], "eth_call");
-        assert_eq!(request["rpc"]["params"][1], "latest");
-        let data: Bytes = serde_json::from_value(tx["data"].clone()).unwrap();
         // IZoneVerifier.verify includes nextZoneHeight after expectedWithdrawalBatchIndex.
         assert_eq!(&data[..4], &[0xeb, 0xb2, 0xdd, 0xc9]);
         let decoded = verifyCall::abi_decode(&data).unwrap();
-        assert_eq!(
-            serde_json::to_value(&decoded).unwrap(),
-            request["arguments"]
-        );
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), arguments);
         assert_eq!(decoded.zoneId, 2);
         assert_eq!(decoded.tempoBlockNumber, 3);
         assert_eq!(decoded.anchorBlockNumber, 4);
@@ -176,7 +186,8 @@ mod tests {
         witness["publicInputs"]["portal"] = json!(Address::ZERO);
         assert!(
             build(&witness, &response)
-                .unwrap_err()
+                .err()
+                .unwrap()
                 .to_string()
                 .contains("portal")
         );

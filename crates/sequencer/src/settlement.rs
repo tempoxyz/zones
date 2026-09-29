@@ -613,11 +613,7 @@ impl BatchSubmitter {
         };
         let digest = domain.settlement_digest(&message);
         let signature = signer.sign_hash_sync(&digest)?;
-        let mut encoded = Vec::with_capacity(65);
-        encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
-        encoded.extend_from_slice(&signature.s().to_be_bytes::<32>());
-        encoded.push(signature.v() as u8 + 27);
-        Ok(encoded.into())
+        Ok(signature.as_bytes().into())
     }
 
     /// Read all mutable portal state needed for one submission at a single L1 block.

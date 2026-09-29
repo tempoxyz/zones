@@ -1,4 +1,6 @@
 use super::*;
+use alloy_network::Ethereum;
+use alloy_provider::EthCallParams;
 use serde_json::Value;
 
 #[derive(Debug, clap::Args)]
@@ -40,17 +42,17 @@ pub(super) async fn run(args: VerifyArgs) -> Result<()> {
 
     let started = start_phase("encode verifier call");
     let request = verifier_request::build(&witness, &response)?;
-    info!(zone_id = %request["arguments"]["zoneId"], batch_index = %request["arguments"]["expectedWithdrawalBatchIndex"], from = %request["rpc"]["params"][0]["from"], to = %request["rpc"]["params"][0]["to"], "encoded native verifier call");
-    debug!(arguments = %request["arguments"], "verifier arguments");
+    info!(zone_id = %request.arguments.zoneId, batch_index = %request.arguments.expectedWithdrawalBatchIndex, from = %serde_json::json!(request.params.data().from), to = %serde_json::json!(request.params.data().to), "encoded native verifier call");
+    debug!(arguments = %serde_json::json!(request.arguments), "verifier arguments");
     timings.record("encode verifier call", started, ());
 
     let started = start_phase("connect to L1");
     let provider = connect(&args.rpc_url, "L1 verifier").await?;
     let chain_id = provider.get_chain_id().await.context("read L1 chain ID")?;
-    if request["chainId"].as_u64() != Some(chain_id) {
+    if request.chain_id != chain_id {
         bail!(
             "L1 RPC chain ID {chain_id} does not match witness parent chain ID {}",
-            request["chainId"]
+            request.chain_id
         );
     }
     info!(chain_id, "connected to witness parent chain");
@@ -62,14 +64,17 @@ pub(super) async fn run(args: VerifyArgs) -> Result<()> {
         block = "latest",
         "calling native verifier with eth_call"
     );
-    call_verifier(&provider, request["rpc"]["params"].clone()).await?;
+    call_verifier(&provider, request.params).await?;
     timings.record("verifier eth_call", started, ());
     println!("Proof verified: true");
     timings.print(total_started.elapsed());
     Ok(())
 }
 
-async fn call_verifier(provider: &DynProvider<TempoNetwork>, params: Value) -> Result<()> {
+async fn call_verifier(
+    provider: &DynProvider<TempoNetwork>,
+    params: EthCallParams<Ethereum>,
+) -> Result<()> {
     let result: Bytes = provider
         .raw_request("eth_call".into(), params)
         .await
@@ -115,18 +120,26 @@ mod tests {
             .erased();
         let mut success = [0u8; 32];
         success[31] = 1;
+        let mut noncanonical = success;
+        noncanonical[0] = 1;
         for (bytes, valid) in [
             (Bytes::from(success.to_vec()), true),
             (Bytes::from(vec![0; 32]), false),
             (Bytes::new(), false),
             (Bytes::from(vec![1]), false),
             (Bytes::from(vec![2; 32]), false),
+            (Bytes::from(noncanonical.to_vec()), false),
+            (Bytes::from(success[1..].to_vec()), false),
+            (Bytes::from([success.as_slice(), &[0]].concat()), false),
         ] {
             asserter.push_success(&bytes);
             assert_eq!(
-                call_verifier(&provider, serde_json::json!([{}, "latest"]))
-                    .await
-                    .is_ok(),
+                call_verifier(
+                    &provider,
+                    EthCallParams::new(Default::default()).with_block(BlockId::latest())
+                )
+                .await
+                .is_ok(),
                 valid
             );
         }
