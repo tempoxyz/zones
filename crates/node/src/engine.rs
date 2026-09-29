@@ -62,6 +62,8 @@ use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 use zone_sequencer::ProofCollectorHandle;
 
+use crate::consensus::zone_hardfork_ready;
+
 /// Local block production permit backed by the effective leadership schedule.
 ///
 /// Full blocks require the leader assigned to their imported Tempo header. Although checkpoint-only
@@ -586,11 +588,9 @@ fn tempo_import_decision(
     let zone_hardfork = chain_spec.tempo_hardfork_at(next_timestamp_millis / 1000);
     // Also consult finalized L1 observed outside the queue: after a long pause the lookahead can be
     // full of pre-fork headers, and the activation header cannot arrive until some are consumed.
-    let l1_tip_hardfork = chain_spec.tempo_hardfork_at(
-        latest_l1_header
-            .timestamp()
-            .max(finalized_l1_timestamp.unwrap_or_default()),
-    );
+    let l1_tip_timestamp = latest_l1_header
+        .timestamp()
+        .max(finalized_l1_timestamp.unwrap_or_default());
 
     if !zone_hardfork.is_t13() {
         return TempoImportDecision::ImportFull;
@@ -598,7 +598,7 @@ fn tempo_import_decision(
     // Zone execution must not activate a hardfork before L1. Wait whenever the prospective Zone
     // block is ahead of the latest queued L1 header, but allow L1 to be ahead while the Zone
     // imports the remaining pre-fork prefix under its currently active rules.
-    if zone_hardfork > l1_tip_hardfork {
+    if !zone_hardfork_ready(chain_spec, next_timestamp_millis / 1000, l1_tip_timestamp) {
         return TempoImportDecision::WaitForHardforkMatch;
     }
 

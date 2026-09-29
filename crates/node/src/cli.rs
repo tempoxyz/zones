@@ -10,7 +10,6 @@ use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
 use tempo_alloy::TempoNetwork;
-use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
@@ -20,7 +19,8 @@ use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
     ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
-    ZoneShadowProverAddOnsConfig, dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    ZoneShadowProverAddOnsConfig, consensus::ZoneConsensus, dev::DevCommand,
+    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
@@ -112,12 +112,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
     let components = move |spec: Arc<ZoneChainSpec>| {
         let evm_config = cli_evm_config(spec.clone(), l1_rpc_url.clone());
-        (
-            evm_config,
-            TempoConsensus::new(spec)
-                .with_allow_equal_timestamps(true)
-                .with_allowed_future_block_time_millis(100),
-        )
+        (evm_config, ZoneConsensus::new(spec))
     };
 
     cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {

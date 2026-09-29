@@ -36,6 +36,7 @@ use zone_prover::VerifierMode;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
 use crate::{
+    consensus::zone_hardfork_ready,
     replication::{PeerBlock, decode_peer_block},
     settlement_attestation::{AttestationContext, build_settlement_attestation},
 };
@@ -614,6 +615,28 @@ where
             leader_anchor,
             block_number,
         )?;
+
+        // Apply the producer's readiness rule to live and backfilled imports too. An observed
+        // finalized tip may be newer than the embedded anchor during checkpoint catch-up.
+        // Reject before submitting to the engine so L1 catching up can make a retry admissible.
+        let l1_timestamp = headers
+            .last()
+            .expect("validated nonempty range")
+            .timestamp()
+            .max(
+                self.context
+                    .l1_block_tracker
+                    .finalized_l1_timestamp()
+                    .unwrap_or_default(),
+            );
+        eyre::ensure!(
+            zone_hardfork_ready(
+                &self.context.attestation.chain_spec,
+                block.timestamp(),
+                l1_timestamp
+            ),
+            "peer block {block_number} activates a Zone hardfork before finalized L1"
+        );
 
         if let DecodedTempoImport::Full {
             deposits,

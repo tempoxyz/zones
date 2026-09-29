@@ -36,6 +36,7 @@ zone-checker = { workspace = true, optional = true }
 # reth
 reth-chain-state.workspace = true
 reth-chainspec.workspace = true
+reth-consensus.workspace = true
 reth-eth-wire-types.workspace = true
 reth-ethereum = { workspace = true, features = [
   "node",
@@ -65,6 +66,7 @@ reth-trie-common.workspace = true
 alloy-chains.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
+alloy-evm.workspace = true
 alloy-genesis.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
@@ -112,7 +114,6 @@ alloy = { workspace = true, features = [
   "rpc-types",
 ] }
 alloy-contract.workspace = true
-alloy-evm.workspace = true
 alloy-signer.workspace = true
 base64.workspace = true
 const-hex.workspace = true
