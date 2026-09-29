@@ -151,30 +151,46 @@ impl GenerateZoneGenesis {
         deploy_permit2(&mut evm)?;
 
         // Required for fee token transfer checks.
+        println!("Initializing TIP403 registry");
         with_genesis_storage(&mut evm, || TIP403Registry::new().initialize())?;
-        println!("Initialized TIP403Registry");
+
+        println!("Creating pathUSD fee token at {PATH_USD_ADDRESS}");
         create_path_usd_token(&mut evm)?;
-        initialize_fee_manager(&mut evm, self.default_fee_token)?;
+
+        let default_fee_token = self.default_fee_token;
+        println!("Initializing fee manager with default fee token {default_fee_token}");
+        with_genesis_storage(&mut evm, || {
+            ZoneFeeManager::new()
+                .initialize(default_fee_token)
+                .expect("Could not init fee manager")
+        });
+
+        println!("Initializing stablecoin exchange");
         with_genesis_storage(&mut evm, || StablecoinDEX::new().initialize())?;
-        println!("Initialized StablecoinDEX");
+
+        println!("Initializing nonce manager");
         with_genesis_storage(&mut evm, || NonceManager::new().initialize())?;
-        println!("Initialized NonceManager");
+
+        println!("Initializing account keychain");
         with_genesis_storage(&mut evm, || AccountKeychain::new().initialize())?;
-        println!("Initialized AccountKeychain");
+
+        println!("Initializing TIP-1028 ReceivePolicyGuard");
         with_genesis_storage(&mut evm, || ReceivePolicyGuard::new().initialize())?;
-        println!("Initialized ReceivePolicyGuard");
+
         // TIP-1060 bookkeeping writes StorageCredits from the EVM handler even when no
         // transaction calls it. Keeping the account non-empty prevents EIP-161 from dropping
         // the sequential transition while the sparse-trie state hook observes its storage.
+        println!("Initializing TIP-1060 StorageCredits");
         with_genesis_storage(&mut evm, || StorageCredits::new().initialize())?;
-        println!("Initialized StorageCredits");
 
+        println!("Initializing native TempoState at {TEMPO_STATE_ADDRESS}");
         with_genesis_storage(&mut evm, || NativeTempoState::new().initialize(&header_rlp))?;
-        println!("Initialized native TempoState at {TEMPO_STATE_ADDRESS}");
+
+        println!("Initializing native ZoneInbox at {ZONE_INBOX_ADDRESS}");
         with_genesis_storage(&mut evm, || NativeZoneInbox::new().initialize())?;
-        println!("Initialized native ZoneInbox at {ZONE_INBOX_ADDRESS}");
+
+        println!("Initializing native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
         with_genesis_storage(&mut evm, || NativeZoneOutbox::new().initialize())?;
-        println!("Initialized native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
 
         let native_state = evm.ctx_mut().journaled_state.finalize();
         evm.db_mut().commit(native_state);
@@ -218,21 +234,22 @@ impl GenerateZoneGenesis {
         genesis_alloc.entry(Address::ZERO).or_default().nonce = Some(1);
 
         // Deploy standard utility contracts matching L1 genesis.
-        genesis_alloc.insert(
-            MULTICALL3_ADDRESS,
-            predeployed_contract(&Multicall3::DEPLOYED_BYTECODE),
-        );
-        if self.with_createx {
-            genesis_alloc.insert(
+        for (address, code, enabled) in [
+            (MULTICALL3_ADDRESS, &Multicall3::DEPLOYED_BYTECODE, true),
+            (
                 CREATEX_ADDRESS,
-                predeployed_contract(&CreateX::DEPLOYED_BYTECODE),
-            );
-        }
-        if self.with_safe_deployer {
-            genesis_alloc.insert(
+                &CreateX::DEPLOYED_BYTECODE,
+                self.with_createx,
+            ),
+            (
                 SAFE_DEPLOYER_ADDRESS,
-                predeployed_contract(&SafeDeployer::DEPLOYED_BYTECODE),
-            );
+                &SafeDeployer::DEPLOYED_BYTECODE,
+                self.with_safe_deployer,
+            ),
+        ] {
+            if enabled {
+                genesis_alloc.insert(address, predeployed_contract(code));
+            }
         }
 
         let mut chain_config = ethereum_chain_config(self.chain_id);
@@ -458,23 +475,8 @@ fn create_path_usd_token(evm: &mut GenesisEvm) -> eyre::Result<()> {
             },
         )?;
 
-        Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
-    })?;
-
-    println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
-    Ok(())
-}
-
-/// Initialize the Zone fee manager precompile.
-fn initialize_fee_manager(evm: &mut GenesisEvm, default_fee_token: Address) -> eyre::Result<()> {
-    with_genesis_storage(evm, || {
-        let mut fee_manager = ZoneFeeManager::new();
-        fee_manager
-            .initialize(default_fee_token)
-            .expect("Could not init fee manager");
-    });
-    println!("Initialized ZoneFeeManager with default fee token {default_fee_token}");
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]
