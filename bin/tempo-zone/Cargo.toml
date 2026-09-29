@@ -23,6 +23,14 @@ reth-node-core.workspace = true
 # tls
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
+[dev-dependencies]
+clap.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tempo-state-bloat.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+zone-primitives.workspace = true
+
 [[bin]]
 name = "tempo-zone"
 path = "src/main.rs"

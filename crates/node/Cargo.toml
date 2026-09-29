@@ -21,6 +21,7 @@ tempo-transaction-pool.workspace = true
 tempo-alloy.workspace = true
 tempo-contracts.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
+tempo-state-bloat = { workspace = true, optional = true }
 zone-chainspec.workspace = true
 zone-evm.workspace = true
 zone-l1.workspace = true
@@ -60,6 +61,8 @@ reth-tasks.workspace = true
 reth-tracing = { workspace = true, optional = true }
 reth-transaction-pool.workspace = true
 reth-trie-common.workspace = true
+reth-cli-runner = { workspace = true, optional = true }
+reth-rpc-server-types = { workspace = true, optional = true }
 
 # alloy
 alloy-chains.workspace = true
@@ -140,6 +143,9 @@ url = "2"
 default = []
 asm-keccak = ["alloy-primitives/asm-keccak"]
 cli = [
+  "dep:tempo-state-bloat",
+  "dep:reth-cli-runner",
+  "dep:reth-rpc-server-types",
   "dep:clap",
   "dep:reth-ethereum",
   "dep:reth-tracing",
