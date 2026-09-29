@@ -4,11 +4,39 @@ use std::{fs, process::Command};
 
 use clap::Parser;
 use tempo_state_bloat::GenerateStateBloat;
+use zone_node::cli::ZoneCli;
 
 #[derive(Parser)]
 struct Generate {
     #[command(flatten)]
     args: GenerateStateBloat,
+}
+
+#[test]
+fn binary_dump_import_requires_zone_genesis_without_node_arguments() {
+    let mut chain = zone_node::genesis::genesis_template().unwrap();
+    chain.config.chain_id = zone_primitives::constants::zone_chain_id(1337, 1).unwrap();
+    let parsed = ZoneCli::try_parse_from([
+        "tempo-zone",
+        "init-from-binary-dump",
+        "--chain",
+        &serde_json::to_string(&chain).unwrap(),
+        "state-bloat.bin",
+    ])
+    .unwrap();
+    assert!(matches!(parsed, ZoneCli::Node(_)));
+
+    chain.config.chain_id = 1337;
+    assert!(
+        ZoneCli::try_parse_from([
+            "tempo-zone",
+            "init-from-binary-dump",
+            "--chain",
+            &serde_json::to_string(&chain).unwrap(),
+            "state-bloat.bin",
+        ])
+        .is_err()
+    );
 }
 
 #[tokio::test]
