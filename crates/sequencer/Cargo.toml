@@ -51,7 +51,6 @@ alloy-transport.workspace = true
 # misc
 eyre.workspace = true
 futures.workspace = true
-k256.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
 serde.workspace = true

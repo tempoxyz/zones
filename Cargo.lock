@@ -14309,7 +14309,6 @@ dependencies = [
  "eyre",
  "futures",
  "jsonrpsee",
- "k256",
  "metrics",
  "parking_lot",
  "proptest",

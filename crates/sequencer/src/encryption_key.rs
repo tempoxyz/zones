@@ -6,7 +6,6 @@ use alloy_provider::Provider;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolValue;
-use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::ZonePortal;
 
@@ -29,8 +28,7 @@ pub struct EncryptionKeyProof {
 
 /// Derive the compressed secp256k1 public identity for `signer`.
 pub fn encryption_key_identity(signer: &PrivateKeySigner) -> eyre::Result<(B256, u8, Address)> {
-    let secret = k256::SecretKey::from_slice(signer.to_bytes().as_slice())?;
-    let encoded = secret.public_key().to_encoded_point(true);
+    let encoded = signer.credential().verifying_key().to_encoded_point(true);
     let x = B256::from_slice(encoded.x().expect("compressed point has x").as_slice());
     let y_parity = encoded.as_bytes()[0];
     Ok((x, y_parity, signer.address()))
