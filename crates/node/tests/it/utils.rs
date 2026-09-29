@@ -215,12 +215,9 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
 
 fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
     for account in t13_zone_factory_state(owner) {
-        let storage = account.storage.map(|(slot, value)| {
-            BTreeMap::from([(
-                B256::from(slot.to_be_bytes()),
-                B256::from(value.to_be_bytes()),
-            )])
-        });
+        let storage = account
+            .storage
+            .map(|(slot, value)| BTreeMap::from([(slot.into(), value.into())]));
         genesis.alloc.insert(
             account.address,
             GenesisAccount::default()
@@ -268,7 +265,7 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
         .or_default()
         .storage
         .get_or_insert_default()
-        .insert(token_policy_slot, B256::from(packed_policy.to_be_bytes()));
+        .insert(token_policy_slot, packed_policy.into());
 
     Ok(())
 }
@@ -497,12 +494,7 @@ pub(crate) fn seed_raw_tip403_token_policy(
 ) {
     let slot = keccak256((token, tip403_registry_slots::TOKEN_TRANSFER_POLICIES).abi_encode());
     let packed: U256 = U256::from(policy_id) | (U256::ONE << 64);
-    cache.set(
-        TIP403_REGISTRY_ADDRESS,
-        slot,
-        block_number,
-        B256::from(packed.to_be_bytes()),
-    );
+    cache.set(TIP403_REGISTRY_ADDRESS, slot, block_number, packed.into());
 }
 
 /// A TIP-403 policy write for [`seed_raw_tip403_policy`].
@@ -5031,7 +5023,7 @@ impl L1Fixture {
                 recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
             cache.set(
                 TIP403_REGISTRY_ADDRESS,
-                B256::from(receive_policy_slot.to_be_bytes()),
+                receive_policy_slot.into(),
                 0,
                 B256::ZERO,
             );
@@ -5150,7 +5142,7 @@ impl L1Fixture {
         for cache in self.caches.lock().unwrap().iter() {
             cache.lock().set(
                 TIP403_REGISTRY_ADDRESS,
-                B256::from(receive_policy_slot.to_be_bytes()),
+                receive_policy_slot.into(),
                 block_number,
                 B256::ZERO,
             );

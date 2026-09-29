@@ -918,12 +918,8 @@ mod tests {
         child.encode(&mut child_rlp);
 
         let mut db = CacheDB::new(EmptyDB::default());
-        db.insert_account_storage(
-            TEMPO_STATE_ADDRESS,
-            U256::ZERO,
-            U256::from_be_bytes(genesis_hash.0),
-        )
-        .unwrap();
+        db.insert_account_storage(TEMPO_STATE_ADDRESS, U256::ZERO, genesis_hash.into())
+            .unwrap();
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
             .unwrap();
         let mut zone_genesis = DEV.genesis().clone();

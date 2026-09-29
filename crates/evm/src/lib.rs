@@ -526,7 +526,7 @@ mod tests {
             portal,
             portal_storage.token_enablement_hash.slot(),
             CHILD,
-            U256::from_be_bytes(token_enablement_hash.0),
+            token_enablement_hash.into(),
         );
 
         let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
@@ -551,12 +551,8 @@ mod tests {
         child.encode(&mut child_rlp);
 
         let mut db = CacheDB::new(EmptyDB::default());
-        db.insert_account_storage(
-            TEMPO_STATE_ADDRESS,
-            U256::ZERO,
-            U256::from_be_bytes(genesis_hash.0),
-        )
-        .unwrap();
+        db.insert_account_storage(TEMPO_STATE_ADDRESS, U256::ZERO, genesis_hash.into())
+            .unwrap();
         db.insert_account_storage(
             TEMPO_STATE_ADDRESS,
             TEMPO_BLOCK_NUMBER_SLOT,
@@ -594,16 +590,8 @@ mod tests {
 
         let requests = reader.storage_requests();
         let portal = ZonePortalStorage::new(portal);
-        let child_policy_request = (
-            TIP403_REGISTRY_ADDRESS,
-            B256::from(policy_slot.to_be_bytes()),
-            CHILD,
-        );
-        let parent_policy_request = (
-            TIP403_REGISTRY_ADDRESS,
-            B256::from(policy_slot.to_be_bytes()),
-            PARENT,
-        );
+        let child_policy_request = (TIP403_REGISTRY_ADDRESS, B256::from(policy_slot), CHILD);
+        let parent_policy_request = (TIP403_REGISTRY_ADDRESS, B256::from(policy_slot), PARENT);
         assert!(!reader.requested(CHILD, &portal.role[sequencer]));
         assert!(!reader.requested(PARENT, &portal.role[sequencer]));
         assert!(requests.contains(&child_policy_request));

@@ -1429,7 +1429,7 @@ mod tests {
     #[tokio::test]
     async fn refill_withdrawal_cache_does_not_resync_the_portal_anchor() {
         let l1 = Asserter::new();
-        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
+        let portal_hash = B256::with_last_byte(7);
         let zone = mock_zone_provider(portal_hash, 42, B256::repeat_byte(0x33));
 
         l1.push_success(&abi_encode_multicall(vec![
@@ -1471,7 +1471,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_hash_mismatch_invalidates_pipeline() {
         let l1 = Asserter::new();
-        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
+        let portal_hash = B256::with_last_byte(7);
         l1.push_success(&abi_encode_b256(portal_hash));
 
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());

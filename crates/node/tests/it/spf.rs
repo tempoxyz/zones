@@ -227,7 +227,7 @@ async fn spf_replays_migrated_policy_transaction_with_parent_forks() -> eyre::Re
         .storage
         .as_mut()
         .expect("pathUSD genesis storage")
-        .remove(&B256::from(U256::from(7).to_be_bytes::<32>()));
+        .remove(&B256::with_last_byte(7));
 
     let (tempo_state_root, tempo_state_nodes) =
         tempo_state_with_transfer_policy(PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
@@ -403,8 +403,8 @@ fn funded_zone_genesis() -> Genesis {
         .storage
         .get_or_insert_default()
         .insert(
-            B256::from(fee_balance_slot.to_be_bytes::<32>()),
-            B256::from(U256::from(1_000_000_000_u64).to_be_bytes::<32>()),
+            fee_balance_slot.into(),
+            U256::from(1_000_000_000_u64).into(),
         );
     genesis
 }
@@ -426,13 +426,7 @@ fn tempo_state_with_transfer_policy(token: Address, policy_id: u64) -> (B256, Ve
         alloc: [(
             TIP403_REGISTRY_ADDRESS,
             GenesisAccount {
-                storage: Some(
-                    [(
-                        B256::from(policy_slot),
-                        B256::from(packed_policy.to_be_bytes::<32>()),
-                    )]
-                    .into(),
-                ),
+                storage: Some([(policy_slot.into(), packed_policy.into())].into()),
                 ..Default::default()
             },
         )]
