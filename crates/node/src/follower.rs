@@ -1064,7 +1064,7 @@ mod tests {
     use alloy_consensus::Sealable as _;
     use alloy_eips::NumHash;
     use alloy_primitives::{Address, B256};
-    use alloy_provider::{ProviderBuilder, mock::Asserter};
+    use alloy_provider::{Provider as _, ProviderBuilder, mock::Asserter};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_provider::test_utils::MockEthProvider;
     use tempo_alloy::TempoNetwork;
