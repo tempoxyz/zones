@@ -1,10 +1,9 @@
 use alloy::genesis::{Genesis, GenesisAccount};
-use alloy_consensus::Header;
+use alloy_consensus::{Header, Sealable as _};
 use alloy_eips::NumHash;
 use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder, bindings::IMulticall3};
-use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, TransactionRequest};
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
@@ -4952,15 +4951,10 @@ impl L1Fixture {
     pub(crate) fn new() -> Self {
         // TempoState stores tempoBlockHash = keccak256(rlp(default TempoHeader)),
         // so the first injected L1 block must have parent_hash matching this.
-        let genesis_header = TempoHeader::default();
-        let mut rlp_buf = Vec::new();
-        genesis_header.encode(&mut rlp_buf);
-        let genesis_hash = keccak256(&rlp_buf);
-
         Self {
             next_block_number: 1,
             next_timestamp: 1_000_000,
-            last_hash: genesis_hash,
+            last_hash: TempoHeader::default().hash_slow(),
             caches: Mutex::new(Vec::new()),
             enabled_token_registries: Mutex::new(Vec::new()),
         }
@@ -5210,9 +5204,7 @@ impl L1Fixture {
 
         // Advance state: TempoState stores keccak256(rlp(header)) as tempoBlockHash,
         // so the next block's parent_hash must match this value.
-        let mut rlp_buf = Vec::new();
-        header.encode(&mut rlp_buf);
-        self.last_hash = keccak256(&rlp_buf);
+        self.last_hash = header.hash_slow();
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
 

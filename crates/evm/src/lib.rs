@@ -470,8 +470,8 @@ pub struct TempoStorageRead {
 mod tests {
     use super::*;
 
-    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
-    use alloy_rlp::Encodable;
+    use alloy_consensus::Sealable as _;
+    use alloy_primitives::{B256, U256, address, keccak256};
     use alloy_sol_types::{SolCall, SolValue};
     use reth_chainspec::{EthChainSpec, ForkCondition};
     use revm::{
@@ -536,9 +536,7 @@ mod tests {
         reader.insert(TIP403_REGISTRY_ADDRESS, policy_slot, CHILD, child_policy);
 
         let genesis = TempoHeader::default();
-        let mut genesis_rlp = Vec::new();
-        genesis.encode(&mut genesis_rlp);
-        let genesis_hash = keccak256(&genesis_rlp);
+        let genesis_hash = genesis.hash_slow();
         let child = TempoHeader {
             inner: alloy_consensus::Header {
                 parent_hash: genesis_hash,
@@ -547,9 +545,6 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut child_rlp = Vec::new();
-        child.encode(&mut child_rlp);
-
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_storage(
             TEMPO_STATE_ADDRESS,
@@ -570,7 +565,7 @@ mod tests {
         env.block_env.timestamp_millis_part = child.timestamp_millis_part;
         let mut evm = factory.create_evm(db, env);
         let calldata = IZoneInbox::advanceTempoCall {
-            header: Bytes::from(child_rlp),
+            header: alloy_rlp::encode(&child).into(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabledTokens: vec![IZoneInbox::EnabledToken {

@@ -11,7 +11,6 @@ use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::Evm;
 use alloy_primitives::{Bytes, U256};
-use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -802,11 +801,8 @@ fn build_advance_tempo_tx_from_parts(
     enabled_tokens: Vec<abi::EnabledToken>,
     chain_id: u64,
 ) -> Recovered<TempoTxEnvelope> {
-    let mut header_rlp = Vec::new();
-    header.encode(&mut header_rlp);
-
     let calldata = abi::IZoneInbox::advanceTempoCall {
-        header: Bytes::from(header_rlp),
+        header: alloy_rlp::encode(header).into(),
         deposits,
         decryptions,
         enabledTokens: enabled_tokens,
@@ -846,11 +842,7 @@ pub fn build_advance_tempo_headers_tx(
     }
     let headers = headers
         .iter()
-        .map(|header| {
-            let mut encoded = Vec::new();
-            header.header().encode(&mut encoded);
-            Bytes::from(encoded)
-        })
+        .map(|header| alloy_rlp::encode(header.header()).into())
         .collect();
     let calldata = abi::IZoneInbox::advanceTempoHeadersCall { headers }.abi_encode();
     let tx = TxLegacy {

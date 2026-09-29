@@ -219,9 +219,9 @@ mod tests {
         test_env, test_storage_provider,
     };
     use alloc::{vec, vec::Vec};
+    use alloy_consensus::Sealable as _;
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
-    use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_precompiles::storage::StorageCtx;
@@ -243,7 +243,7 @@ mod tests {
         }
 
         fn new_with_context(header: &TempoHeader, mut ctx: TestContext) -> eyre::Result<Self> {
-            let encoded = encode_header(header);
+            let encoded = alloy_rlp::encode(header);
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
                 StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
@@ -325,7 +325,7 @@ mod tests {
             self.call(
                 caller,
                 legacyFinalizeTempoCall {
-                    header: encode_header(header),
+                    header: alloy_rlp::encode(header).into(),
                 }
                 .abi_encode(),
                 is_static,
@@ -338,7 +338,7 @@ mod tests {
             header: &TempoHeader,
             is_static: bool,
         ) -> PrecompileResult {
-            self.finalize_raw(caller, encode_header(header), is_static)
+            self.finalize_raw(caller, alloy_rlp::encode(header).into(), is_static)
         }
 
         fn assert_checkpoint(
@@ -361,12 +361,6 @@ mod tests {
             );
             Ok(())
         }
-    }
-
-    fn encode_header(header: &TempoHeader) -> Bytes {
-        let mut encoded = Vec::new();
-        header.encode(&mut encoded);
-        encoded.into()
     }
 
     fn child_header(parent_hash: B256, number: u64) -> TempoHeader {
@@ -403,27 +397,27 @@ mod tests {
     fn initialize_sets_checkpoint() -> eyre::Result<()> {
         let header = child_header(B256::repeat_byte(0xaa), 42);
         let mut harness = TempoStateHarness::new(&header)?;
-        harness.assert_checkpoint(keccak256(encode_header(&header)), 42)
+        harness.assert_checkpoint(header.hash_slow(), 42)
     }
 
     #[test]
     fn finalize_tempo_updates_checkpoint() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_success());
-        harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
+        harness.assert_checkpoint(child.hash_slow(), 1)
     }
 
     #[test]
     fn finalize_tempo_selectors_switch_at_t13() -> eyre::Result<()> {
         for hardfork in [TempoHardfork::T12, TempoHardfork::T13] {
             let genesis = TempoHeader::default();
-            let genesis_hash = keccak256(encode_header(&genesis));
+            let genesis_hash = genesis.hash_slow();
             let mut harness = TempoStateHarness::new_with_hardfork(&genesis, hardfork)?;
             let child = child_header(genesis_hash, 1);
             harness.set_block_timestamp(&child);
@@ -442,7 +436,7 @@ mod tests {
                 harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?
             };
             assert!(active.is_success());
-            harness.assert_checkpoint(keccak256(encode_header(&child)), 1)?;
+            harness.assert_checkpoint(child.hash_slow(), 1)?;
         }
         Ok(())
     }
@@ -450,22 +444,22 @@ mod tests {
     #[test]
     fn legacy_finalize_tempo_works_before_t13() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new_with_hardfork(&genesis, TempoHardfork::T12)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
 
         let output = harness.finalize_legacy(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_success());
-        harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
+        harness.assert_checkpoint(child.hash_slow(), 1)
     }
 
     #[test]
     fn finalize_tempo_accepts_consecutive_header_range() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut first = child_header(genesis_hash, 1);
-        let first_hash = keccak256(encode_header(&first));
+        let first_hash = first.hash_slow();
         let second = child_header(first_hash, 2);
         first.inner.timestamp = second.inner.timestamp;
         first.timestamp_millis_part = second.timestamp_millis_part;
@@ -474,16 +468,19 @@ mod tests {
         harness.set_block_timestamp(&second);
         let output = harness.finalize_many(
             ZONE_INBOX_ADDRESS,
-            vec![encode_header(&first), encode_header(&second)],
+            vec![
+                alloy_rlp::encode(&first).into(),
+                alloy_rlp::encode(&second).into(),
+            ],
         )?;
         assert!(output.is_success());
-        harness.assert_checkpoint(keccak256(encode_header(&second)), 2)
+        harness.assert_checkpoint(second.hash_slow(), 2)
     }
 
     #[test]
     fn finalize_tempo_accepts_later_zone_timestamp() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
@@ -491,13 +488,13 @@ mod tests {
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_success());
-        harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
+        harness.assert_checkpoint(child.hash_slow(), 1)
     }
 
     #[test]
     fn finalize_tempo_reverts_on_earlier_zone_timestamp_seconds() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
@@ -516,7 +513,7 @@ mod tests {
     #[test]
     fn finalize_tempo_reverts_on_earlier_zone_timestamp_millis() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
@@ -535,7 +532,7 @@ mod tests {
     #[test]
     fn finalize_tempo_reverts_for_non_inbox_caller() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
 
@@ -562,7 +559,7 @@ mod tests {
     #[test]
     fn finalize_tempo_reverts_on_static_call() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
 
@@ -577,7 +574,7 @@ mod tests {
     #[test]
     fn finalize_tempo_reverts_on_invalid_rlp() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
 
         let output = harness.finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(vec![0xff]), false)?;
@@ -589,9 +586,9 @@ mod tests {
     #[test]
     fn finalize_tempo_reverts_on_trailing_header_bytes() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
-        let mut malformed = encode_header(&child_header(genesis_hash, 1)).to_vec();
+        let mut malformed = alloy_rlp::encode(child_header(genesis_hash, 1));
         malformed.push(0);
 
         let output = harness.finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(malformed), false)?;
@@ -603,7 +600,7 @@ mod tests {
     #[test]
     fn finalize_tempo_reverts_on_invalid_parent_hash() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(B256::ZERO, 1);
         harness.set_block_timestamp(&child);
@@ -620,7 +617,7 @@ mod tests {
     #[test]
     fn finalize_tempo_reverts_on_invalid_block_number() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_hash = keccak256(encode_header(&genesis));
+        let genesis_hash = genesis.hash_slow();
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 2);
         harness.set_block_timestamp(&child);

@@ -318,10 +318,9 @@ mod tests {
         ZoneBlockPhase, ZoneTransactionKind,
     };
 
-    use alloy_consensus::{Header, Signed, TxLegacy};
+    use alloy_consensus::{Header, Sealable as _, Signed, TxLegacy};
     use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor, eth::EthBlockExecutionCtx};
-    use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256, keccak256};
-    use alloy_rlp::Encodable as _;
+    use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256};
     use alloy_sol_types::{SolCall, SolEvent};
     use reth_chainspec::EthChainSpec as _;
     use reth_primitives_traits::Recovered;
@@ -903,9 +902,7 @@ mod tests {
     #[test]
     fn reverted_advance_tempo_does_not_satisfy_block_guard() {
         let genesis = TempoHeader::default();
-        let mut genesis_rlp = Vec::new();
-        genesis.encode(&mut genesis_rlp);
-        let genesis_hash = keccak256(&genesis_rlp);
+        let genesis_hash = genesis.hash_slow();
         let child = TempoHeader {
             inner: Header {
                 parent_hash: genesis_hash,
@@ -914,9 +911,6 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut child_rlp = Vec::new();
-        child.encode(&mut child_rlp);
-
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_storage(
             TEMPO_STATE_ADDRESS,
@@ -950,7 +944,7 @@ mod tests {
         // The header is the valid next checkpoint, but a decryption entry without an encrypted
         // deposit makes the Inbox precompile revert after attempting the checkpoint transition.
         let calldata = IZoneInbox::advanceTempoCall {
-            header: child_rlp.into(),
+            header: alloy_rlp::encode(&child).into(),
             deposits: Vec::new(),
             decryptions: vec![DecryptionData {
                 sharedSecret: B256::ZERO,

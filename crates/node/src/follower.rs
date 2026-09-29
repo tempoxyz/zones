@@ -1079,18 +1079,15 @@ mod tests {
     #[test]
     fn rejects_advance_tempo_sent_to_wrong_contract() {
         use alloy_consensus::{Signed, TxLegacy};
-        use alloy_primitives::{Address, Bytes, U256};
-        use alloy_rlp::Encodable as _;
+        use alloy_primitives::{Address, U256};
         use alloy_sol_types::SolCall as _;
         use reth_primitives_traits::SealedBlock;
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
         };
 
-        let mut header_rlp = Vec::new();
-        TempoHeader::default().encode(&mut header_rlp);
         let calldata = zone_payload::abi::IZoneInbox::advanceTempoCall {
-            header: Bytes::from(header_rlp),
+            header: alloy_rlp::encode(TempoHeader::default()).into(),
             deposits: vec![],
             decryptions: vec![],
             enabledTokens: vec![],

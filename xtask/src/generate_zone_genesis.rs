@@ -5,7 +5,6 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
 };
 use alloy_eips::BlockNumberOrTag;
-use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
 use reth_evm::{
@@ -415,9 +414,7 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
         anchor_header_response.number()
     );
     let response_hash = anchor_header_response.hash;
-    let anchor_header = anchor_header_response.inner.inner;
-    let mut header_rlp = Vec::new();
-    anchor_header.encode(&mut header_rlp);
+    let header_rlp = alloy_rlp::encode(anchor_header_response.inner.inner);
     let anchor_hash = keccak256(&header_rlp);
     ensure!(
         anchor_hash == response_hash,
