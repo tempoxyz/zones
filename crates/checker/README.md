@@ -154,7 +154,7 @@ Activity logs contain only the fields needed by log-backed activity dashboards:
 - `activity_event`: the stable event name from the table below.
 - `activity_id`: `v<schema_version>:<zone_hash>:<activity_source>:<activity_index>`,
   which remains stable if recovery replays the same canonical block under the
-  same schema. The ID retains version `1`, the verified Zone block hash, source
+  same schema. The ID retains version `2`, the verified Zone block hash, source
   (`tempo` or `zone`), and zero-based canonical index within that source.
 - `callback_success`: emitted only for `portal_withdrawal_processed`, allowing
   dashboards to distinguish successful and failed withdrawal callbacks.

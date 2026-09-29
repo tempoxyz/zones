@@ -17,7 +17,7 @@ use crate::{
     persistence::{BlockRef, Snapshot, Status},
 };
 
-const ACTIVITY_SCHEMA_VERSION: u64 = 1;
+const ACTIVITY_SCHEMA_VERSION: u64 = 2;
 
 mod activity_event {
     pub(super) const PORTAL_DEPOSIT_ACCOUNTED: &str = "portal_deposit_accounted";
