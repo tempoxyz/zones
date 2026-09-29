@@ -96,12 +96,12 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     let zone_tempo_hash = B256::from(read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
-        U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
+        tempo_state::slots::TEMPO_BLOCK_HASH,
     )?);
     let zone_tempo_number = read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
-        U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER),
+        tempo_state::slots::TEMPO_BLOCK_NUMBER,
     )?
     .to::<u64>();
     if (zone_tempo_number, zone_tempo_hash) != (witnessed_tempo_number, witnessed_tempo_hash) {
@@ -261,12 +261,12 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     let final_tempo_hash = B256::from(read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
-        U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
+        tempo_state::slots::TEMPO_BLOCK_HASH,
     )?);
     let final_tempo_number = read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
-        U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER),
+        tempo_state::slots::TEMPO_BLOCK_NUMBER,
     )?
     .to::<u64>();
 
