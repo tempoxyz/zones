@@ -110,7 +110,6 @@ use tempo_precompiles::{
 #[cfg(feature = "std")]
 use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
-use zone_hardfork::ZoneHardfork;
 
 /// Registers every precompile that is available to a Zone EVM.
 ///
@@ -122,14 +121,13 @@ use zone_hardfork::ZoneHardfork;
 pub fn extend_zone_precompiles<P>(
     precompiles: &mut PrecompilesMap,
     cfg: &CfgEnv<TempoHardfork>,
-    zone_hardfork: ZoneHardfork,
     l1: L1State<P>,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 ) where
     P: L1StorageReader,
 {
-    let env = ZonePrecompileEnv::new(cfg, zone_hardfork, actions, non_creditable_slots);
+    let env = ZonePrecompileEnv::new(cfg, actions, non_creditable_slots);
 
     precompiles.set_precompile_lookup(move |address: &Address| {
         #[cfg(feature = "std")]

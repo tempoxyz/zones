@@ -12,12 +12,11 @@ workspace = true
 
 [dependencies]
 # zones
-zone-hardfork.workspace = true
+zone-primitives.workspace = true
 
 # tempo
 tempo-chainspec = { workspace = true, features = ["reth"] }
 tempo-primitives.workspace = true
-zone-primitives.workspace = true
 
 # reth
 reth-chainspec.workspace = true
