@@ -1,13 +1,11 @@
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, B256, Bytes, U256, keccak256},
+    primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
-    signers::{Signer, local::PrivateKeySigner},
+    signers::local::PrivateKeySigner,
     sol,
-    sol_types::SolValue,
 };
 use eyre::{WrapErr as _, eyre};
-use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
 use std::{path::PathBuf, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
@@ -18,6 +16,7 @@ use tempo_zone_contracts::{
     DepositPayload, IZoneOutbox, SwapAndDepositRouterCallback, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use zone_precompiles::ecies::encrypt_deposit;
+use zone_sequencer::{encryption_key_identity, register_encryption_key};
 
 use crate::zone_utils::{
     ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
@@ -701,7 +700,8 @@ async fn ensure_sequencer_encryption_key<P: Provider<TempoNetwork>>(
     portal_address: Address,
     sequencer_private_key: &str,
 ) -> eyre::Result<(ZonePortal::sequencerEncryptionKeyReturn, U256)> {
-    let (expected_x, expected_y_parity) = derive_encryption_public_key(sequencer_private_key)
+    let (expected_x, expected_y_parity, _) = parse_private_key(sequencer_private_key)
+        .and_then(|signer| encryption_key_identity(&signer))
         .wrap_err("failed to derive the sequencer encryption public key from SEQUENCER_KEY")?;
     let key_count = portal
         .encryptionKeyCount()
@@ -749,40 +749,10 @@ async fn register_sequencer_encryption_key<P: Provider<TempoNetwork>>(
     portal_address: Address,
     sequencer_private_key: &str,
 ) -> eyre::Result<()> {
-    let (x, y_parity) = derive_encryption_public_key(sequencer_private_key)
-        .wrap_err("failed to derive the sequencer encryption public key")?;
     let signer = parse_private_key(sequencer_private_key)?;
-    let message = keccak256((portal_address, x, U256::from(y_parity)).abi_encode());
-    let sig = signer
-        .sign_hash(&message)
+    let tx_hash = register_encryption_key(portal.provider(), portal_address, &signer)
         .await
-        .wrap_err("failed to sign the encryption key proof-of-possession")?;
-    let pop_v = sig.v() as u8 + 27;
-    let pop_r = B256::from(sig.r().to_be_bytes::<32>());
-    let pop_s = B256::from(sig.s().to_be_bytes::<32>());
-
-    let receipt = portal
-        .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
-        .send_sync()
-        .await
-        .wrap_err("failed to send setSequencerEncryptionKey")?;
-    check(&receipt, "setSequencerEncryptionKey")?;
-    println!(
-        "  Sequencer encryption key registered on L1  [tx: {}]",
-        receipt.transaction_hash
-    );
+        .wrap_err("failed to register the sequencer encryption key")?;
+    println!("  Sequencer encryption key registered on L1  [tx: {tx_hash}]");
     Ok(())
-}
-
-fn derive_encryption_public_key(sequencer_private_key: &str) -> eyre::Result<(B256, u8)> {
-    let key_str = sequencer_private_key
-        .strip_prefix("0x")
-        .unwrap_or(sequencer_private_key);
-    let enc_key = k256::SecretKey::from_slice(&const_hex::decode(key_str)?)?;
-    let scalar: Scalar = *enc_key.to_nonzero_scalar();
-    let pub_point = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
-    let encoded = pub_point.to_encoded_point(true);
-    let x = B256::from_slice(encoded.x().unwrap().as_slice());
-    let y_parity = encoded.as_bytes()[0];
-    Ok((x, y_parity))
 }

@@ -2461,42 +2461,15 @@ impl L1TestNode {
         encryption_key: &k256::SecretKey,
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<()> {
-        use alloy_signer::SignerSync;
-        use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
-        use tempo_zone_contracts::ZonePortal;
-
-        // Derive public key coordinates
-        let scalar: Scalar = *encryption_key.to_nonzero_scalar();
-        let pub_point = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
-        let encoded = pub_point.to_encoded_point(true);
-        let x = B256::from_slice(encoded.x().unwrap().as_slice());
-        let y_parity: u8 = encoded.as_bytes()[0]; // 0x02 or 0x03
-
-        // Build POP message matching Solidity: keccak256(abi.encode(address(this), x, yParity))
-        // yParity is uint8 in Solidity, which abi.encode pads to 32 bytes — use U256
-        let message = keccak256((portal_address, x, U256::from(y_parity)).abi_encode());
-
         // Sign with the encryption key (not the sequencer's Ethereum key)
         let enc_key_bytes = B256::from_slice(&encryption_key.to_bytes());
         let pop_signer = alloy_signer_local::PrivateKeySigner::from_bytes(&enc_key_bytes)?;
-        let sig = pop_signer.sign_hash_sync(&message)?;
 
-        // ecrecover expects v = 27 or 28
-        let pop_v = sig.v() as u8 + 27;
-        let pop_r = B256::from(sig.r().to_be_bytes::<32>());
-        let pop_s = B256::from(sig.s().to_be_bytes::<32>());
-
-        let sequencer_provider = ProviderBuilder::new()
-            .wallet(sequencer_signer)
+        let sequencer_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .wallet(EthereumWallet::from(sequencer_signer))
             .connect_http(self.http_url.clone());
-        let portal = ZonePortal::new(portal_address, &sequencer_provider);
-        let receipt = portal
-            .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
-            .send()
-            .await?
-            .get_receipt()
+        zone_sequencer::register_encryption_key(&sequencer_provider, portal_address, &pop_signer)
             .await?;
-        eyre::ensure!(receipt.status(), "setSequencerEncryptionKey failed");
         Ok(())
     }
 
