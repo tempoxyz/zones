@@ -30,9 +30,24 @@ before updating a status, following the existing non-atomic read/write pattern.
 
 The workflow code revision is pinned separately from its ClusterWorkflowTemplates;
 both must match for a reproducible trial. The temporary Tempo base includes the
-quiet-build guard. Successful CI workflows and their archived artifacts expire after seven days.
-Failed or errored CI workflows, PVCs, and artifacts are retained for 30 days for recovery.
+quiet-build guard. Successful CI workflows and their archived artifacts expire
+after seven days. Failed or errored CI workflows, PVCs, and artifacts are retained
+for 30 days for recovery.
 Unresolved cleanup must be handled within that window; it is not indefinite storage.
 Candidate dependency selection, image/genesis retention, repeated-run
 runtime measurements, and submission-timeout handling remain rollout prerequisites
 before making the suite required.
+
+Observed preview timings (September 29, 2026):
+
+| Work | Observed wall time |
+| --- | --- |
+| Fresh candidate/prover and PCR-patched L1 preparation | 23m22s |
+| Distinct old + candidate prover and PCR-patched L1 preparation | 27m38s–33m41s |
+| Warm-fixture settlement/fallback/recovery, provisioning and cleanup | 14m01s–15m19s |
+| Individual settlement / fallback / short recovery | 11s–55s / 3m37s–4m33s / 1m58s–2m01s |
+
+These are a few successful preview runs, not percentile guarantees or a queue
+latency budget. Fork runs also wait for their scheduled activation. Keep the
+experimental check nonrequired until repeated candidate trials establish a
+suitable merge-queue budget. Build/cache optimization is deferred.
