@@ -42,7 +42,7 @@ use tempo_chainspec::{
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
 };
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, IStablecoinDEX, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
@@ -176,15 +176,6 @@ fn enabled_deposits_active_token_config() -> B256 {
     value[30] = 1; // TokenConfig.depositsActive
     value[31] = 1; // TokenConfig.enabled
     B256::new(value)
-}
-
-alloy_sol_types::sol! {
-    #[sol(rpc)]
-    contract TestStablecoinDEX {
-        function createPair(address base) external returns (bytes32 key);
-        function place(address token, uint128 amount, bool isBid, int16 tick) external returns (uint128 orderId);
-        function quoteSwapExactAmountIn(address tokenIn, address tokenOut, uint128 amountIn) external view returns (uint128 amountOut);
-    }
 }
 
 /// Read a Foundry artifact from `crates/contracts/out` and return its deployment bytecode.
@@ -1932,7 +1923,7 @@ impl L1TestNode {
     /// Create a StablecoinDEX pair for a base token.
     pub(crate) async fn create_dex_pair(&self, base_token: Address) -> eyre::Result<()> {
         let provider = self.dev_provider();
-        let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
+        let dex = IStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
         let receipt = dex
             .createPair(base_token)
             .send()
@@ -1965,7 +1956,7 @@ impl L1TestNode {
             .get_receipt()
             .await?;
 
-        let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
+        let dex = IStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
         let receipt = dex
             .place(base_token, amount, true, tick)
             .send()
@@ -1996,7 +1987,7 @@ impl L1TestNode {
             .get_receipt()
             .await?;
 
-        let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
+        let dex = IStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
         let receipt = dex
             .place(base_token, amount, false, tick)
             .send()
@@ -2018,7 +2009,7 @@ impl L1TestNode {
         amount_in: u128,
     ) -> eyre::Result<u128> {
         let provider = self.provider();
-        let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
+        let dex = IStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
         Ok(dex
             .quoteSwapExactAmountIn(token_in, token_out, amount_in)
             .call()

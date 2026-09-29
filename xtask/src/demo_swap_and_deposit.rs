@@ -3,13 +3,13 @@ use alloy::{
     primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
-    sol,
 };
 use eyre::{WrapErr as _, eyre};
 use std::{path::PathBuf, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
-    IRolesAuth, ITIP20 as TIP20Token, ITIP20Factory as TIP20Factory,
+    IRolesAuth, IStablecoinDEX as StablecoinDEX, ITIP20 as TIP20Token,
+    ITIP20Factory as TIP20Factory,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
 use tempo_zone_contracts::{
@@ -29,15 +29,6 @@ const DEX_LIQUIDITY_MULTIPLIER: u128 = 3;
 const NONCE_CONFLICT_RETRIES: u32 = 5;
 const PATHUSD_HEADROOM: u128 = 10_000_000;
 const WITHDRAWAL_TX_GAS: u64 = 1_000_000;
-
-sol! {
-    #[sol(rpc)]
-    contract StablecoinDEX {
-        function createPair(address base) external returns (bytes32 key);
-        function place(address token, uint128 amount, bool isBid, int16 tick) external returns (uint128 orderId);
-        function quoteSwapExactAmountIn(address tokenIn, address tokenOut, uint128 amountIn) external view returns (uint128 amountOut);
-    }
-}
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct DemoSwapAndDeposit {
