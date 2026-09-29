@@ -263,20 +263,6 @@ fn spawn_prover<P: ZoneSequencerProvider>(
 
     tokio::spawn(async move {
         while let Some(job) = receiver.recv().await {
-            // A leader generation that stepped down no longer waits for its proof.
-            if job
-                .response
-                .as_ref()
-                .is_some_and(oneshot::Sender::is_closed)
-            {
-                debug!(
-                    target: "zone::sequencer::prover",
-                    zone_from = job.from,
-                    zone_to = job.to,
-                    "Skipping settlement proof nobody awaits"
-                );
-                continue;
-            }
             metrics
                 .queue_duration_seconds
                 .record(job.enqueued_at.elapsed().as_secs_f64());
