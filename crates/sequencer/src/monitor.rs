@@ -114,9 +114,8 @@ impl ZoneMonitorSharedState {
 /// Prepared batches are submitted in order. A submission failure rebuilds the monitor and its
 /// preparation pipeline from the portal-confirmed checkpoint.
 ///
-/// Canonical consistency is strict: a non-zero portal anchor must resolve to a canonical local
-/// block, and a reorg terminates the current monitor instance so it can be rebuilt from the portal
-/// anchor. This deliberately fails closed instead of silently replaying from genesis.
+/// At startup, a non-zero portal anchor must resolve to a canonical local block. Startup fails
+/// closed if that anchor is unavailable or inconsistent instead of silently replaying from genesis.
 pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     config: ZoneMonitorConfig,
     /// Metrics for zone observation and L1 batch submission.
