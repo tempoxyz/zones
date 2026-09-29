@@ -153,12 +153,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
                 actual: block.number,
             });
         }
-        if block.timestamp < previous_header.timestamp() {
-            return Err(Error::BlockTimestampRegression {
-                previous: previous_header.timestamp(),
-                actual: block.timestamp,
-            });
-        }
+        validate_zone_block_timestamp(block, block_index, &previous_header)?;
 
         validate_system_inputs(block, block_index)?;
         let is_last = block_index + 1 == witness.zone_blocks.len();
@@ -336,6 +331,36 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             withdrawal_batch_index,
         },
     })
+}
+
+/// Validates witness-controlled timestamp fields before they select fork rules or enter the EVM.
+fn validate_zone_block_timestamp(
+    block: &ZoneBlock,
+    block_index: usize,
+    parent: &TempoHeader,
+) -> Result<(), Error> {
+    if block.timestamp_millis_part >= 1000 {
+        return Err(Error::InvalidTimestampMillisPart {
+            block_index,
+            actual: block.timestamp_millis_part,
+        });
+    }
+
+    let actual = block
+        .timestamp
+        .checked_mul(1000)
+        .and_then(|timestamp| timestamp.checked_add(block.timestamp_millis_part))
+        .ok_or(Error::BlockTimestampOverflow { block_index })?;
+    let previous = parent
+        .timestamp()
+        .checked_mul(1000)
+        .and_then(|timestamp| timestamp.checked_add(parent.timestamp_millis_part))
+        .ok_or(Error::ParentTimestampOverflow { block_index })?;
+    if actual < previous {
+        return Err(Error::BlockTimestampRegression { previous, actual });
+    }
+
+    Ok(())
 }
 
 fn read_zone_storage(
@@ -541,8 +566,17 @@ pub enum Error {
     /// Zone block numbering cannot advance past `u64::MAX`.
     #[error("zone block number overflow")]
     BlockNumberOverflow,
-    /// A Zone block timestamp regressed from its predecessor.
-    #[error("zone block timestamp regressed: previous {previous}, got {actual}")]
+    /// A witness supplied a value outside the millisecond component's canonical domain.
+    #[error("zone block {block_index} has invalid timestamp millisecond component {actual}")]
+    InvalidTimestampMillisPart { block_index: usize, actual: u64 },
+    /// A witness-controlled Zone timestamp could not be represented in milliseconds.
+    #[error("zone block {block_index} timestamp overflows milliseconds")]
+    BlockTimestampOverflow { block_index: usize },
+    /// A parent Zone timestamp could not be represented in milliseconds.
+    #[error("parent of zone block {block_index} has a timestamp that overflows milliseconds")]
+    ParentTimestampOverflow { block_index: usize },
+    /// A Zone block's full millisecond timestamp regressed from its predecessor.
+    #[error("zone block millisecond timestamp regressed: previous {previous}, got {actual}")]
     BlockTimestampRegression { previous: u64, actual: u64 },
     /// Tempo-dependent inputs appeared without a Tempo header import.
     #[error("zone block {block_index} has Tempo inputs without a Tempo header")]
@@ -767,6 +801,20 @@ mod tests {
         TempoImport::CheckpointOnly { headers_rlp }
     }
 
+    fn empty_zone_block(timestamp: u64, timestamp_millis_part: u64) -> ZoneBlock {
+        ZoneBlock {
+            number: 1,
+            parent_hash: B256::ZERO,
+            timestamp,
+            timestamp_millis_part,
+            beneficiary: Address::ZERO,
+            tempo_import: checkpoint_import(vec![Bytes::from([0x01])]),
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        }
+    }
+
     fn witnessed_account_state(
         address: Address,
         nonce: u64,
@@ -827,6 +875,47 @@ mod tests {
         assert_eq!(
             prove_zone_batch(&test_config(), witness),
             Err(Error::EmptyZoneBatch)
+        );
+    }
+
+    #[test]
+    fn validates_complete_millisecond_timestamps_before_execution() {
+        let parent = TempoHeader {
+            inner: Header {
+                timestamp: 100,
+                ..Default::default()
+            },
+            timestamp_millis_part: 500,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(100, 1000), 3, &parent),
+            Err(Error::InvalidTimestampMillisPart {
+                block_index: 3,
+                actual: 1000,
+            })
+        );
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(100, 499), 3, &parent),
+            Err(Error::BlockTimestampRegression {
+                previous: 100_500,
+                actual: 100_499,
+            })
+        );
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(u64::MAX, 0), 3, &parent),
+            Err(Error::BlockTimestampOverflow { block_index: 3 })
+        );
+
+        // Zone consensus permits equal full-millisecond timestamps.
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(100, 500), 3, &parent),
+            Ok(())
+        );
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(100, 501), 3, &parent),
+            Ok(())
         );
     }
 
