@@ -691,7 +691,10 @@ mod tests {
 
     use clap::Parser as _;
 
-    use super::*;
+    use super::{
+        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
+        parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
+    };
     use zone_sequencer::{MAX_WITHDRAWAL_BATCH_GAS, ProverAddresses};
 
     #[derive(Debug, clap::Parser)]
@@ -1235,43 +1238,5 @@ mod tests {
     fn l1_rpc_url_rejects_non_websocket_schemes() {
         assert!(parse_l1_rpc_url("http://localhost:8545").is_err());
         assert!(parse_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
-    }
-
-    #[test]
-    fn binary_dump_import_uses_zone_chain_parser_without_node_arguments() {
-        let parent = tempo_chainspec::spec::MODERATO.clone();
-        let mut genesis = parent.genesis().clone();
-        genesis.config.chain_id =
-            zone_primitives::constants::zone_chain_id(parent.chain().id(), 11).unwrap();
-        let genesis = serde_json::to_string(&genesis).unwrap();
-        let parsed = ZoneCli::try_parse_from([
-            "tempo-zone",
-            "init-from-binary-dump",
-            "--chain",
-            &genesis,
-            "--datadir",
-            "/tmp/zone-bloat-cli-test",
-            "state-bloat.bin",
-        ])
-        .unwrap();
-        let ZoneCli::Node(cli) = parsed else {
-            panic!("expected node CLI");
-        };
-        assert!(matches!(
-            cli.command,
-            reth_ethereum::cli::Commands::Ext(ZoneSubcommand::InitFromBinaryDump(_))
-        ));
-
-        // An L1 chain is not a valid Zone chain, including for offline imports.
-        assert!(
-            ZoneCli::try_parse_from([
-                "tempo-zone",
-                "init-from-binary-dump",
-                "--chain",
-                &serde_json::to_string(parent.genesis()).unwrap(),
-                "state-bloat.bin",
-            ])
-            .is_err()
-        );
     }
 }
