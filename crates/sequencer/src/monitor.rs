@@ -1359,7 +1359,7 @@ mod tests {
         l1.push_success(&mock_l1_header(1_000));
         let proof = SettlementProof {
             bundle: ProofBundle {
-                verifier_config: NITRO_VERIFIER_CONFIG_V1.to_vec().into(),
+                verifier_config: NITRO_VERIFIER_CONFIG_V1.into(),
                 proof: vec![1].into(),
             },
             hardfork: TempoHardfork::T12,
