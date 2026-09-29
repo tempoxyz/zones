@@ -113,13 +113,8 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
 
-    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    pub(crate) t12_time: Option<u64>,
-
-    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    pub(crate) t13_time: Option<u64>,
+    #[command(flatten)]
+    pub(crate) forks: crate::genesis_forks::GenesisForkArgs,
 }
 
 impl GenerateZoneGenesis {
@@ -282,13 +277,7 @@ impl GenerateZoneGenesis {
             ..Default::default()
         };
 
-        for (name, timestamp) in [("t12Time", self.t12_time), ("t13Time", self.t13_time)] {
-            if let Some(timestamp) = timestamp {
-                chain_config
-                    .extra_fields
-                    .insert_value(name.into(), timestamp)?;
-            }
-        }
+        self.forks.apply_to(&mut chain_config)?;
 
         let mut genesis = Genesis::default()
             .with_gas_limit(self.gas_limit)
@@ -733,15 +722,18 @@ fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 mod tests {
     use super::*;
     use clap::Parser;
+    use tempo_chainspec::TempoHardforks;
+    use zone_chainspec::ZoneChainSpec;
 
     #[tokio::test]
     async fn genesis_preserves_explicit_fork_timestamps() {
-        for (t12, t13) in [
-            (None, None),
-            (Some(0), Some(0)),
-            (Some(1789463700), None),
-            (None, Some(1789467300)),
-            (Some(9223372036854775807u64), Some(9223372036854775807u64)),
+        for (t12, t13, t14) in [
+            (None, None, None),
+            (Some(0), Some(0), Some(0)),
+            (Some(0), Some(u64::MAX), Some(u64::MAX)),
+            (Some(1789463700), None, None),
+            (None, Some(1789467300), None),
+            (Some(u64::MAX), Some(u64::MAX), Some(u64::MAX)),
         ] {
             let output = tempfile::tempdir().unwrap();
             let mut args = vec![
@@ -753,7 +745,11 @@ mod tests {
                 "--admin".to_owned(),
                 "0x1000000000000000000000000000000000000001".to_owned(),
             ];
-            for (flag, timestamp) in [("--t12-time", t12), ("--t13-time", t13)] {
+            for (flag, timestamp) in [
+                ("--t12-time", t12),
+                ("--t13-time", t13),
+                ("--t14-time", t14),
+            ] {
                 if let Some(timestamp) = timestamp {
                     args.extend([flag.to_owned(), timestamp.to_string()]);
                 }
@@ -768,16 +764,68 @@ mod tests {
             )
             .unwrap();
             let config = serde_json::to_value(&genesis.config).unwrap();
-            assert_eq!(
-                config.get("t12Time"),
-                t12.map(serde_json::Value::from).as_ref()
-            );
-            assert_eq!(
-                config.get("t13Time"),
-                t13.map(serde_json::Value::from).as_ref()
-            );
             assert_eq!(genesis.config.chain_id, 134509785776129);
             assert!(!genesis.alloc.is_empty());
+
+            let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+            // Check each fork: the highest active fork can hide missing earlier ones.
+            for &fork in TempoHardfork::VARIANTS {
+                if fork == TempoHardfork::Genesis {
+                    continue;
+                }
+                let activation = match fork {
+                    TempoHardfork::T12 => t12.unwrap_or(0),
+                    TempoHardfork::T13 => t13.unwrap_or(0),
+                    TempoHardfork::T14 => t14.unwrap_or(0),
+                    _ => 0,
+                };
+                let field = format!("{}Time", fork.to_string().to_lowercase());
+                assert_eq!(config[&field], serde_json::json!(activation));
+                for timestamp in [0, activation.saturating_sub(1), activation, u64::MAX] {
+                    assert_eq!(
+                        spec.tempo_fork_activation(fork)
+                            .active_at_timestamp(timestamp),
+                        timestamp >= activation,
+                        "{fork} at {timestamp}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_tempo_fork_has_an_independent_timestamp_override() {
+        for &overridden in TempoHardfork::VARIANTS {
+            if overridden == TempoHardfork::Genesis {
+                continue;
+            }
+            let flag = format!("--{}-time", overridden.to_string().to_lowercase());
+            let command = GenerateZoneGenesis::try_parse_from([
+                "generate-zone-genesis",
+                "--output",
+                "/tmp/zone",
+                "--chain-id",
+                "134509785776129",
+                "--admin",
+                "0x1000000000000000000000000000000000000001",
+                &flag,
+                "12345",
+            ])
+            .unwrap();
+            let mut genesis = Genesis::default();
+            genesis.config.chain_id = command.chain_id;
+            command.forks.apply_to(&mut genesis.config).unwrap();
+            let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+            for &fork in TempoHardfork::VARIANTS {
+                for timestamp in [0, 12344, 12345] {
+                    assert_eq!(
+                        spec.tempo_fork_activation(fork)
+                            .active_at_timestamp(timestamp),
+                        fork != overridden || timestamp >= 12345,
+                        "{fork} at {timestamp} with {overridden} overridden"
+                    );
+                }
+            }
         }
     }
 }

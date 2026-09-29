@@ -23,6 +23,7 @@ use zone_primitives::constants::zone_chain_id;
 
 use crate::{
     generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
+    genesis_forks::GenesisForkArgs,
     zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only},
 };
 
@@ -98,13 +99,8 @@ pub(crate) struct CreateZone {
     #[arg(long, default_value_t = 30_000_000)]
     gas_limit: u64,
 
-    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    t12_time: Option<u64>,
-
-    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    t13_time: Option<u64>,
+    #[command(flatten)]
+    forks: GenesisForkArgs,
 }
 
 /// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
@@ -315,8 +311,7 @@ impl CreateZone {
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
-            t12_time: self.t12_time,
-            t13_time: self.t13_time,
+            forks: self.forks,
         };
         genesis_cmd.run().await?;
 
@@ -402,8 +397,7 @@ mod tests {
             private_key: String::new(),
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
-            t12_time: None,
-            t13_time: None,
+            forks: GenesisForkArgs::default(),
         };
 
         let params = command.factory_params();
@@ -427,9 +421,18 @@ mod tests {
             "0",
             "--t13-time",
             "9223372036854775807",
+            "--t14-time",
+            "18446744073709551615",
         ])
         .unwrap();
-        assert_eq!(command.t12_time, Some(0));
-        assert_eq!(command.t13_time, Some(9223372036854775807));
+        let mut config = alloy::genesis::ChainConfig::default();
+        command.forks.apply_to(&mut config).unwrap();
+        assert_eq!(config.extra_fields["t4Time"], serde_json::json!(0));
+        assert_eq!(config.extra_fields["t12Time"], serde_json::json!(0));
+        assert_eq!(
+            config.extra_fields["t13Time"],
+            serde_json::json!(9223372036854775807u64)
+        );
+        assert_eq!(config.extra_fields["t14Time"], serde_json::json!(u64::MAX));
     }
 }
