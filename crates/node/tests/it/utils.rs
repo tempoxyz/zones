@@ -75,7 +75,7 @@ use zone_l1::{
 use zone_node::{ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
-use zone_primitives::constants::{ZONE_INBOX_ADDRESS, zone_chain_id as derive_zone_chain_id};
+use zone_primitives::constants::{ZONE_INBOX_ADDRESS, zone_chain_id};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -91,7 +91,7 @@ pub(crate) use network::{P2pChaosNetwork, TcpChaosProxy};
 static NEXT_ZONE_ID: AtomicU64 = AtomicU64::new(71_000);
 
 fn next_unique_chain_id() -> u64 {
-    derive_zone_chain_id(1_337, NEXT_ZONE_ID.fetch_add(1, Ordering::Relaxed) as u32)
+    zone_chain_id(1_337, NEXT_ZONE_ID.fetch_add(1, Ordering::Relaxed) as u32)
         .expect("test zone ID fits in u32")
 }
 
@@ -1081,7 +1081,7 @@ impl ZoneTestNode {
             .zoneId()
             .call()
             .await?;
-        let chain_id = derive_zone_chain_id(1_337, zone_id)?;
+        let chain_id = zone_chain_id(1_337, zone_id)?;
         genesis.config.chain_id = chain_id;
         set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         let spec = Arc::new(ZoneChainSpec::from_genesis(genesis.clone())?);
@@ -1340,7 +1340,7 @@ impl ZoneTestNode {
                 .zoneId()
                 .call()
                 .await?;
-            (derive_zone_chain_id(parent_chain_id, zone_id)?, zone_id)
+            (zone_chain_id(parent_chain_id, zone_id)?, zone_id)
         };
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
@@ -4783,16 +4783,6 @@ impl RedactedRpcTestCtx {
     }
 }
 
-async fn zone_chain_id(zone: &ZoneTestNode) -> eyre::Result<u64> {
-    use alloy_provider::Provider;
-
-    let chain_id: alloy_primitives::U64 = zone
-        .provider()
-        .raw_request("eth_chainId".into(), ())
-        .await?;
-    Ok(chain_id.to())
-}
-
 async fn start_redacted_rpc_url(
     zone: &ZoneTestNode,
     config: zone_node::rpc::RedactedRpcConfig,
@@ -4844,7 +4834,7 @@ pub(crate) async fn start_zone_with_redacted_rpc() -> eyre::Result<RedactedRpcTe
         20,
     );
 
-    let chain_id = zone_chain_id(&zone).await?;
+    let chain_id = zone.provider().get_chain_id().await?;
 
     let config = zone_node::rpc::RedactedRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
@@ -4886,7 +4876,7 @@ async fn start_zone_with_redacted_rpc_l1_inner() -> eyre::Result<RedactedRpcL1Te
 
     zone.wait_for_l2_tempo_finalized(0, DEFAULT_TIMEOUT).await?;
 
-    let chain_id = zone_chain_id(&zone).await?;
+    let chain_id = zone.provider().get_chain_id().await?;
 
     let config = zone_node::rpc::RedactedRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
