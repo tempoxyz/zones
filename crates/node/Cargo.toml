@@ -63,6 +63,10 @@ reth-transaction-pool.workspace = true
 reth-trie-common.workspace = true
 reth-cli-runner = { workspace = true, optional = true }
 reth-rpc-server-types = { workspace = true, optional = true }
+reth-cli-commands = { workspace = true, optional = true }
+reth-db-api = { workspace = true, optional = true }
+reth-trie = { workspace = true, optional = true }
+reth-trie-db = { workspace = true, optional = true }
 
 # alloy
 alloy-chains.workspace = true
@@ -96,12 +100,14 @@ tokio.workspace = true
 tracing.workspace = true
 url = { version = "2", optional = true }
 zeroize = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [build-dependencies]
 vergen.workspace = true
 vergen-git2.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 zone-chainspec = { workspace = true, features = ["test-utils"] }
 zone-node = { path = ".", features = ["test-utils"] }
 
@@ -143,6 +149,11 @@ url = "2"
 default = []
 asm-keccak = ["alloy-primitives/asm-keccak"]
 cli = [
+  "dep:reth-cli-commands",
+  "dep:reth-db-api",
+  "dep:reth-trie",
+  "dep:reth-trie-db",
+  "dep:sha2",
   "dep:tempo-state-bloat",
   "dep:reth-cli-runner",
   "dep:reth-rpc-server-types",

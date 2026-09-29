@@ -23,29 +23,45 @@ These flags configure Zone genesis only; they do not change the parent L1 schedu
 
 ## Offline Zone state bloat
 
-Generate a dump and import it into a stopped, freshly initialized Zone database:
+Generate a dump and initialize a **nonexistent** Zone database:
 
 ```bash
-cargo xtask generate-state-bloat --size 1024 --token 0 --out zone-state-bloat.bin
-cargo run --bin tempo-zone -- init --chain zone-genesis.json --datadir zone-data
+cargo xtask generate-state-bloat --size 1 --token 0 --out zone-state-bloat.bin \
+  --mnemonic 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
 cargo run --bin tempo-zone -- init-from-binary-dump \
-  --chain zone-genesis.json --datadir zone-data zone-state-bloat.bin
+  --chain zone-genesis.json --datadir zone-data zone-state-bloat.bin \
+  --output-genesis bloated-genesis.json --manifest zone-state-bloat.json
+# All later init/node commands must use the generated specification:
+cargo run --bin tempo-zone -- init --chain bloated-genesis.json --datadir zone-data
 ```
 
+The example uses a public test-only mnemonic distinct from the default dev
+mnemonic. Choose accounts not already funded in your genesis; the benchmark
+workflow generates its own private mnemonic.
+
 `--size` is the target dump size in MiB, not the resulting database size. Token
-`0` is pathUSD, which the Zone genesis generator initializes. Only select tokens
-already present in that genesis; the importer rejects missing accounts. These
-commands directly reuse Tempo's generator and importer. The importer runs with
-`ZoneChainSpecParser` and `ZoneNode`, preserving Zone chain validation and database
-types, and rejects databases that have advanced beyond block 0.
+`0` is pathUSD, the only supported token. The generator and strict dump reader
+come from Tempo. The Zone initializer merges storage into the genesis allocation
+**before** normal Reth initialization commits the header, trie, and history. It
+rejects missing token accounts, duplicate slots, conflicts with nonzero genesis
+storage, malformed dumps, and every existing datadir (including block zero).
+Output files are never overwritten. The saved chain specification must be used
+on restart; using the original genesis is rejected by normal genesis validation.
+
+The manifest includes dump SHA-256, entry count, database file bytes, import time,
+configuration digest, genesis hash, and committed/database state roots. A full
+hashed-state traversal verifies the root independently of cached trie nodes, and
+the stores are reopened before publishing the success manifest. Failed initialization
+may leave a partial datadir/output genesis; use a new disposable path when retrying.
 
 This is synthetic benchmark state: generated balances have no corresponding L1
 escrow. Use disposable local databases and keep the generated accounts separate
 from accounts used for bridge correctness checks.
 
-The importer updates storage and trie nodes but does **not** rewrite the genesis
-header to commit the new state root. Before proving the first batch, the benchmark
-harness must reconcile the genesis header and chain specification with the
-imported state. This command support alone does not enable bloated-state Nitro
-benchmarks; workflow inputs, genesis reconciliation, and an end-to-end settlement
-test remain separate work.
+The initial in-memory allocation importer is limited to 16 MiB dumps plus chunk
+headers. This is a conservative smoke-test guard, **not** a validated Nitro capacity
+limit. Larger state needs measured resource limits and potentially a streaming
+genesis builder. For the Nitro workflow, select `full-journey-pathusd-fees`,
+`zone-state-bloat-mib=1`, `state-bloat-mib=0`, and T14. This labelled variant pays
+Zone transaction fees from the seeded PathUSD balances; its bridged asset remains
+DLUSD. Do not withdraw synthetic PathUSD against real escrow.

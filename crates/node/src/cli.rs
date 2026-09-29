@@ -13,7 +13,6 @@ use reth_rpc_server_types::DefaultRpcModuleValidator;
 use reth_tracing::tracing::{info, warn};
 use tempo_alloy::TempoNetwork;
 use tempo_evm::consensus::TempoConsensus;
-use tempo_state_bloat::InitFromBinaryDump;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
@@ -24,6 +23,7 @@ use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 use crate::{
     ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    state_bloat::InitZoneFromBinaryDump,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
@@ -54,10 +54,8 @@ pub type ZoneNodeCli =
 /// Additional offline commands supported by the Zone node.
 #[derive(Debug, clap::Subcommand)]
 pub enum ZoneSubcommand {
-    /// Load TIP20 storage from a Tempo binary dump into a fresh block-0 database.
-    ///
-    /// Updates storage and trie nodes without rewriting the genesis header.
-    InitFromBinaryDump(Box<InitFromBinaryDump<ZoneChainSpecParser>>),
+    /// Initialize a fresh database with PathUSD bloat committed in Zone genesis.
+    InitFromBinaryDump(Box<InitZoneFromBinaryDump>),
 }
 
 impl ExtendedCommand for ZoneSubcommand {
@@ -65,7 +63,7 @@ impl ExtendedCommand for ZoneSubcommand {
         match self {
             Self::InitFromBinaryDump(command) => {
                 let runtime = runner.runtime();
-                runner.run_blocking_until_ctrl_c(command.execute::<ZoneNode>(runtime))?;
+                runner.run_blocking_until_ctrl_c(command.execute(runtime))?;
                 Ok(())
             }
         }
