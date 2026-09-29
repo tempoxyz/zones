@@ -1,9 +1,6 @@
 //! Shared STF execution for encrypted forced exits. No decrypted fields are logged.
 use super::*;
-use crate::{
-    forced_exit_storage::ForcedExitPortalStorage,
-    outbox::{ForcedWithdrawalError, ForcedWithdrawalRequest},
-};
+use crate::outbox::{ForcedWithdrawalError, ForcedWithdrawalRequest};
 use exithatch::ForcedExitReason as Reason;
 use zone_primitives::constants::decode_l1_chain_id;
 
@@ -21,17 +18,10 @@ impl ZoneInbox {
         l1: &L1State<P>,
         outbox: &mut ZoneOutbox,
         entry: ForcedExit,
-        deposit_number: u64,
         decryption: DecryptionData,
     ) -> ZoneResult<ForcedExitResult> {
-        // 1. Bind the authenticated outer entry and its global inbox position to admission.
-        let portal = ForcedExitPortalStorage::new(l1.portal());
-        let metadata = &portal.forced_exit_requests[entry.requestId];
-        // Checkpoint-only imports can defer this entry to a later execution anchor.
-        if l1.read_l1(&metadata.token)? != entry.token
-            || l1.read_l1(&metadata.deposit_number)? != deposit_number
-            || entry.requestedAtBlock > TempoState::new().tempo_block_number()?
-        {
+        // 1. The hash chain authenticates the entry; only reject requests from a future anchor.
+        if entry.requestedAtBlock > TempoState::new().tempo_block_number()? {
             return Err(ZonePrecompileError::MalformedCalldata);
         }
         let key = read_encryption_key(l1, entry.keyIndex)?;

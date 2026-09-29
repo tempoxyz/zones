@@ -50,7 +50,6 @@ fn signed_payload(auth: &ForcedExitAuthorization) -> Vec<u8> {
 fn request(
     h: &mut Harness,
     id: u64,
-    number: u64,
     plaintext: &[u8],
 ) -> eyre::Result<(QueuedDeposit, DecryptionData)> {
     h.ctx.cfg.chain_id = zone_primitives::constants::zone_chain_id(PARENT_CHAIN, 1).unwrap();
@@ -80,11 +79,7 @@ fn request(
         portal.encryption_keys[0].x.write(x)?;
         portal.encryption_keys[0].y_parity.write(parity)?;
         portal.token_configs[PATH_USD_ADDRESS].enabled.write(true)?;
-        let mut forced = ForcedExitPortalStorage::new(PORTAL);
-        forced.forced_exit_requests[id]
-            .token
-            .write(PATH_USD_ADDRESS)?;
-        forced.forced_exit_requests[id].deposit_number.write(number)
+        Ok(())
     })?;
     let entry = ForcedExit {
         requestId: id,
@@ -149,7 +144,7 @@ fn forced_exit_accepts_earlier_admission_but_rejects_future_height() -> eyre::Re
     for admission_block in [0, 2] {
         let mut h = active_harness()?;
         fund(&mut h, U256::from(42))?;
-        let (mut queued, proof) = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
+        let (mut queued, proof) = request(&mut h, 1, &signed_payload(&auth(1)))?;
         let mut entry = ForcedExit::abi_decode(&queued.depositData)?;
         // The harness imports block 1. Earlier admission models deferred portal work.
         entry.requestedAtBlock = admission_block;
@@ -175,8 +170,8 @@ fn l1_token_pause_rejects_admitted_requests_without_blocking_inbox() -> eyre::Re
     for paused in [true, false] {
         let mut h = active_harness()?;
         fund(&mut h, U256::from(42))?;
-        let first = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
-        let second = request(&mut h, 2, 2, &signed_payload(&auth(2)))?;
+        let first = request(&mut h, 1, &signed_payload(&auth(1)))?;
+        let second = request(&mut h, 2, &signed_payload(&auth(2)))?;
         // Admission occurred while unpaused; model the final state after a same-block
         // pause (or pause followed by unpause). The Zone-local token remains unpaused.
         let mut pause_slot = tempo_precompiles::storage::Slot::<bool>::new(
@@ -212,14 +207,7 @@ fn forced_full_balance_replay_and_empty_finalize_with_exact_commitment() -> eyre
     let requests = [7, 7, 8]
         .into_iter()
         .enumerate()
-        .map(|(i, n)| {
-            request(
-                &mut h,
-                i as u64 + 1,
-                i as u64 + 1,
-                &signed_payload(&auth(n)),
-            )
-        })
+        .map(|(i, n)| request(&mut h, i as u64 + 1, &signed_payload(&auth(n))))
         .collect::<eyre::Result<Vec<_>>>()?;
     let result = execute(&mut h, requests)?;
     assert!(result.is_success(), "{result:?}");
@@ -290,7 +278,7 @@ fn forced_failure_categories_preserve_nonce_and_principal_boundaries() -> eyre::
         if case == 7 {
             plaintext = exithatch::encode_payload(&a, &[3; 65]);
         }
-        let mut req = request(&mut h, 1, 1, &plaintext)?;
+        let mut req = request(&mut h, 1, &plaintext)?;
         if case == 0 {
             let mut entry = ForcedExit::abi_decode(&req.0.depositData)?;
             entry.encrypted.tag[0] ^= 1;
@@ -315,8 +303,8 @@ fn forced_failure_categories_preserve_nonce_and_principal_boundaries() -> eyre::
 fn later_bad_proof_rolls_back_earlier_exit_without_an_external_checkpoint() -> eyre::Result<()> {
     let mut h = active_harness()?;
     fund(&mut h, U256::from(50))?;
-    let first = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
-    let mut second = request(&mut h, 2, 2, &signed_payload(&auth(2)))?;
+    let first = request(&mut h, 1, &signed_payload(&auth(1)))?;
+    let mut second = request(&mut h, 2, &signed_payload(&auth(2)))?;
     second.1.cpProof.c = B256::ZERO;
     let result = execute(&mut h, vec![first, second])?;
     assert!(result.is_revert());
@@ -352,7 +340,7 @@ fn forced_balance_boundaries_and_exhausted_ordinary_capacity() -> eyre::Result<(
         } else {
             fund(&mut h, amount)?;
         }
-        let req = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
+        let req = request(&mut h, 1, &signed_payload(&auth(1)))?;
         assert!(execute(&mut h, vec![req])?.is_success());
         assert!(consumed(&mut h, 1)?);
         if amount > U256::from(u128::MAX) {
@@ -366,7 +354,7 @@ fn forced_balance_boundaries_and_exhausted_ordinary_capacity() -> eyre::Result<(
     }
     let mut h = active_harness()?;
     fund(&mut h, U256::from(5))?;
-    let req = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
+    let req = request(&mut h, 1, &signed_payload(&auth(1)))?;
     let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || {
         let mut outbox = ZoneOutbox::new();
@@ -417,7 +405,6 @@ fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
         drop(storage);
         requests.push(request(
             &mut h,
-            id as u64,
             id as u64,
             &exithatch::encode_payload(&a, &signature),
         )?);
@@ -471,7 +458,7 @@ fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
 fn forced_exit_keeps_nonce_consumed_through_pending_credit_recovery() -> eyre::Result<()> {
     let mut h = active_harness()?;
     fund(&mut h, U256::from(17))?;
-    let req = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
+    let req = request(&mut h, 1, &signed_payload(&auth(1)))?;
     assert!(execute(&mut h, vec![req])?.is_success());
     let nonce = h.pending_withdrawals()?[0].fallbackNonce;
     let mut encoded_nonce = [0; 20];
@@ -528,18 +515,13 @@ fn forced_exit_keeps_nonce_consumed_through_pending_credit_recovery() -> eyre::R
 #[test]
 fn forced_authorization_nonce_is_shared_across_tokens() -> eyre::Result<()> {
     let mut h = active_harness()?;
-    let first = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
+    let first = request(&mut h, 1, &signed_payload(&auth(1)))?;
     let mut other_auth = auth(1);
     other_auth.token = address!("20c0000000000000000000000000000000000002");
-    let mut second = request(&mut h, 2, 2, &signed_payload(&other_auth))?;
+    let mut second = request(&mut h, 2, &signed_payload(&other_auth))?;
     let mut entry = ForcedExit::abi_decode(&second.0.depositData)?;
     entry.token = other_auth.token;
     second.0.depositData = entry.abi_encode().into();
-    h.l1.with_storage(1, || {
-        ForcedExitPortalStorage::new(PORTAL).forced_exit_requests[2]
-            .token
-            .write(other_auth.token)
-    })?;
     assert!(execute(&mut h, vec![first, second])?.is_success());
     assert!(consumed(&mut h, 1)?);
     assert!(h.pending_withdrawals()?.is_empty());
@@ -576,7 +558,6 @@ fn admitted_forced_workload_preserves_ordinary_capacity() -> eyre::Result<()> {
             }
             requests.push(request(
                 &mut h,
-                id,
                 id,
                 &exithatch::encode_payload(&a, &signature),
             )?);
@@ -639,8 +620,8 @@ fn zero_authorization_fields_reject_without_blocking_next_request() -> eyre::Res
         } else {
             invalid.recipient = Address::ZERO;
         }
-        let first = request(&mut h, 1, 1, &signed_payload(&invalid))?;
-        let second = request(&mut h, 2, 2, &signed_payload(&auth(2)))?;
+        let first = request(&mut h, 1, &signed_payload(&invalid))?;
+        let second = request(&mut h, 2, &signed_payload(&auth(2)))?;
         assert!(execute(&mut h, vec![first, second])?.is_success());
         assert!(!consumed(&mut h, 1)?);
         assert!(consumed(&mut h, 2)?);
@@ -665,8 +646,8 @@ fn policy_rejection_consumes_nonce_without_debit_and_processes_next_request() ->
     fund(&mut h, U256::from(42))?;
     let mut rejected = auth(1);
     rejected.recipient = Address::repeat_byte(0x77);
-    let first = request(&mut h, 1, 1, &signed_payload(&rejected))?;
-    let second = request(&mut h, 2, 2, &signed_payload(&auth(2)))?;
+    let first = request(&mut h, 1, &signed_payload(&rejected))?;
+    let second = request(&mut h, 2, &signed_payload(&auth(2)))?;
     h.l1.with_storage(1, || -> tempo_precompiles::Result<()> {
         let mut portal = ZonePortalStorage::new(PORTAL);
         portal.is_access_enforced.write(true)?;
@@ -710,7 +691,7 @@ fn forced_requests_require_t13_even_when_no_withdrawal_would_be_created() -> eyr
         } else {
             signed_payload(&auth(1))
         };
-        let entry = request(&mut h, 1, 1, &payload)?;
+        let entry = request(&mut h, 1, &payload)?;
         set_spec(&mut h, TempoHardfork::T12);
         let logs_before = h.ctx.journaled_state.logs().to_vec();
         assert!(execute(&mut h, vec![entry.clone()])?.is_revert());
@@ -718,8 +699,6 @@ fn forced_requests_require_t13_even_when_no_withdrawal_would_be_created() -> eyr
         assert!(!consumed(&mut h, 1)?);
         assert_eq!(h.balance(PATH_USD_ADDRESS, ROOT)?, U256::from(balance));
         assert!(h.pending_withdrawals()?.is_empty());
-        let metadata = ForcedExitPortalStorage::new(PORTAL);
-        assert!(!h.l1.requested(1, &metadata.forced_exit_requests[1].token));
         let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
             assert_eq!(ZoneInbox::new().processed_deposit_number()?, 0);
@@ -755,7 +734,7 @@ fn forced_requests_use_activation_version_at_execution_anchor() -> eyre::Result<
             } else {
                 signed_payload(&auth(1))
             };
-            let entry = request(&mut h, 1, 1, &payload)?;
+            let entry = request(&mut h, 1, &payload)?;
             let logs_before = h.ctx.journaled_state.logs().to_vec();
             let result = execute(&mut h, vec![entry])?;
             assert!(h.l1.requested(1, &portal.forced_exit_version));
@@ -770,7 +749,6 @@ fn forced_requests_use_activation_version_at_execution_anchor() -> eyre::Result<
                 assert!(!consumed(&mut h, 1)?);
                 assert_eq!(h.balance(PATH_USD_ADDRESS, ROOT)?, U256::from(balance));
                 assert!(h.pending_withdrawals()?.is_empty());
-                assert!(!h.l1.requested(1, &portal.forced_exit_requests[1].token));
                 let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
                 StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
                     assert_eq!(ZoneInbox::new().processed_deposit_number()?, 0);

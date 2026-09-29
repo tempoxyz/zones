@@ -178,7 +178,7 @@ impl ZoneInbox {
         let mut outbox = ZoneOutbox::new();
 
         let previous_number = self.processed_deposit_number.read()?;
-        for (index, queued) in deposits.into_iter().enumerate() {
+        for queued in deposits {
             current_hash = queued.hash_with_tail(current_hash)?;
 
             match queued {
@@ -186,12 +186,9 @@ impl ZoneInbox {
                     let decryption = decryptions
                         .next()
                         .ok_or_else(ZoneInboxError::missing_decryption_data)?;
-                    let number = previous_number
-                        .checked_add(index as u64 + 1)
-                        .ok_or_else(TempoPrecompileError::under_overflow)?;
                     // Every terminal classification consumes its entry through the common cursor
                     // update below. Fatal errors roll back the complete inbox transition.
-                    self.process_forced_exit(l1, &mut outbox, entry, number, decryption)
+                    self.process_forced_exit(l1, &mut outbox, entry, decryption)
                         .map(|_| ())
                 }
                 DecodedQueuedDeposit::WithdrawalBounceBack(deposit) => {
