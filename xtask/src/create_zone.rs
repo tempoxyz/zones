@@ -13,7 +13,7 @@ use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_chainspec::{cli::TempoHardforkArgs, spec::TEMPO_T0_BASE_FEE};
 use tempo_contracts::precompiles::ITIP403Registry;
 use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
 use tempo_zone_contracts::{
@@ -23,7 +23,6 @@ use zone_primitives::constants::zone_chain_id;
 
 use crate::{
     generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
-    genesis_forks::GenesisForkArgs,
     zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only},
 };
 
@@ -100,7 +99,7 @@ pub(crate) struct CreateZone {
     gas_limit: u64,
 
     #[command(flatten)]
-    forks: GenesisForkArgs,
+    forks: TempoHardforkArgs,
 }
 
 /// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
@@ -397,7 +396,7 @@ mod tests {
             private_key: String::new(),
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
-            forks: GenesisForkArgs::default(),
+            forks: TempoHardforkArgs::default(),
         };
 
         let params = command.factory_params();
@@ -426,7 +425,7 @@ mod tests {
         ])
         .unwrap();
         let mut config = alloy::genesis::ChainConfig::default();
-        command.forks.apply_to(&mut config).unwrap();
+        command.forks.write_to(&mut config);
         assert_eq!(config.extra_fields["t4Time"], serde_json::json!(0));
         assert_eq!(config.extra_fields["t12Time"], serde_json::json!(0));
         assert_eq!(

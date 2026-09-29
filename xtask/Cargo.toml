@@ -12,9 +12,9 @@ workspace = true
 
 [dependencies]
 tempo-alloy.workspace = true
-tempo-chainspec.workspace = true
+tempo-chainspec = { workspace = true, features = ["cli"] }
 tempo-contracts.workspace = true
-tempo-evm.workspace = true
+tempo-evm = { workspace = true, features = ["genesis"] }
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-primitives.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
