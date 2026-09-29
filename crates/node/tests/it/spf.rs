@@ -36,11 +36,17 @@ use crate::utils::{
     DEFAULT_TIMEOUT, TIP20_TX_GAS, start_local_zone_with_fixture_and_withdrawal_batch_interval,
 };
 
+#[cfg(feature = "cli")]
+use clap::Parser;
+
 const ZONE_ID: u32 = 1;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn spf_batch_execute() -> eyre::Result<()> {
-    let genesis = funded_zone_genesis();
+    execute_spf_batch(funded_zone_genesis()).await
+}
+
+async fn execute_spf_batch(genesis: Genesis) -> eyre::Result<()> {
     let (zone, mut fixture) =
         start_local_zone_with_fixture_and_withdrawal_batch_interval(ZONE_ID, 2, 2, genesis.clone())
             .await?;
@@ -182,6 +188,69 @@ async fn spf_batch_execute() -> eyre::Result<()> {
     assert_eq!(output.withdrawal_queue_hash, B256::ZERO);
     assert_eq!(output.last_batch_commitment.withdrawal_batch_index, 1);
     Ok(())
+}
+
+/// The generated working set includes the real sender; execution must charge its
+/// seeded balance and SPF must authenticate the result against the bloated root.
+#[cfg(feature = "cli")]
+#[tokio::test(flavor = "multi_thread")]
+async fn spf_batch_execute_bloated_genesis() -> eyre::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let dump = directory.path().join("bloat.bin");
+    StateBloatGenerator::parse_from([
+        "generate",
+        "--size",
+        "1",
+        "--token",
+        "0",
+        "--signable-count",
+        "1",
+        "--balance",
+        "1000000000",
+        "--out",
+        dump.to_str().unwrap(),
+    ])
+    .args
+    .run()
+    .await?;
+    let mut genesis = funded_zone_genesis();
+    let sender = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+    genesis
+        .alloc
+        .get_mut(&PATH_USD_ADDRESS)
+        .unwrap()
+        .storage
+        .as_mut()
+        .unwrap()
+        .remove(&B256::from(
+            sender
+                .mapping_slot(tip20_slots::BALANCES)
+                .to_be_bytes::<32>(),
+        ));
+    zone_node::state_bloat::apply_dump(&mut genesis, std::fs::File::open(dump)?)?;
+    execute_spf_batch(genesis.clone()).await?;
+    // The collected witness also requires the active parent-chain fee-token policy proof.
+    let (tempo_state_root, tempo_state_nodes) =
+        tempo_state_with_transfer_policy(PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
+    let built = build_single_transaction_block(&genesis, Some(tempo_state_root)).await?;
+    let state = ZoneStateWitness {
+        node_pool: built.generated_witness.execution_witness.state.clone(),
+        bytecodes: built.generated_witness.execution_witness.codes.clone(),
+    };
+    let config = spf_config(&genesis);
+    let output = prove_zone_batch(
+        &config,
+        built.batch_witness(&config, state, tempo_state_nodes),
+    )?;
+    assert_eq!(output.block_transition.nextBlockHash, built.zone_hash);
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+#[derive(Parser)]
+struct StateBloatGenerator {
+    #[command(flatten)]
+    args: tempo_state_bloat::GenerateStateBloat,
 }
 
 #[tokio::test(flavor = "multi_thread")]
