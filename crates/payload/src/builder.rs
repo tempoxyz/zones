@@ -872,7 +872,6 @@ pub fn build_advance_tempo_headers_tx(
 mod tests {
     use alloy_consensus::{Header, Signed, TxLegacy};
     use alloy_primitives::{Address, B256, U256, address};
-    use alloy_rlp::Decodable;
     use alloy_sol_types::SolCall;
     use reth_primitives_traits::{Recovered, SealedHeader};
     use reth_tasks::cancel::CancelOnDrop;
@@ -943,9 +942,7 @@ mod tests {
         let call = IZoneInbox::advanceTempoHeadersCall::abi_decode(&signed.tx().input).unwrap();
         assert_eq!(call.headers.len(), 2);
         for (encoded, expected) in call.headers.iter().zip(headers) {
-            let mut encoded = encoded.as_ref();
-            let decoded = TempoHeader::decode(&mut encoded).unwrap();
-            assert!(encoded.is_empty());
+            let decoded: TempoHeader = alloy_rlp::decode_exact(encoded).unwrap();
             assert_eq!(decoded.inner.number, expected.inner.number);
         }
     }

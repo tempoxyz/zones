@@ -17,7 +17,6 @@ use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_primitives::{B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider as _};
-use alloy_rlp::Decodable as _;
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_sol_types::{SolCall as _, SolInterface as _};
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
@@ -988,10 +987,7 @@ fn final_tempo_header(block: &ZoneBlock) -> Result<TempoHeader> {
 }
 
 fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
-    let mut input = encoded;
-    let header = TempoHeader::decode(&mut input).context("decode Tempo header RLP")?;
-    ensure!(input.is_empty(), "Tempo header RLP has trailing bytes");
-    Ok(header)
+    alloy_rlp::decode_exact(encoded).context("decode Tempo header RLP")
 }
 
 async fn zone_witnesses(

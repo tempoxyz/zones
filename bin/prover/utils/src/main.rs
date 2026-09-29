@@ -1142,12 +1142,7 @@ async fn tempo_header(tempo: &DynProvider<TempoNetwork>, number: u64) -> Result<
 }
 
 fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
-    let mut input = encoded;
-    let header = alloy_rlp::Decodable::decode(&mut input).context("decode Tempo header RLP")?;
-    if !input.is_empty() {
-        bail!("Tempo header RLP has trailing bytes");
-    }
-    Ok(header)
+    alloy_rlp::decode_exact(encoded).context("decode Tempo header RLP")
 }
 
 async fn zone_witnesses(
