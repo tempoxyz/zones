@@ -11983,7 +11983,6 @@ dependencies = [
  "const-hex",
  "eyre",
  "futures",
- "k256",
  "rand 0.10.2",
  "reth-evm",
  "rustls",
