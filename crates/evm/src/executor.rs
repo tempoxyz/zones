@@ -680,8 +680,7 @@ mod tests {
             zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
             let chain_spec =
                 std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
-            let factory =
-                ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+            let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
             let mut env: EvmEnv<TempoHardfork, TempoBlockEnv> = EvmEnv::default();
             env.cfg_env.spec = spec;
             let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
