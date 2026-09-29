@@ -23,6 +23,7 @@ use crate::{
 };
 use clap::Parser as _;
 use eyre::Context;
+use tempo_state_bloat::GenerateStateBloat;
 
 mod admin;
 mod benchmark_results;
@@ -77,6 +78,10 @@ async fn main() -> eyre::Result<()> {
             args.run().await.wrap_err("failed to generate zone genesis")
         }
         Action::GenerateP2pKey(args) => args.run().wrap_err("failed to generate P2P key"),
+        Action::GenerateStateBloat(args) => args
+            .run()
+            .await
+            .wrap_err("failed to generate state bloat file"),
         Action::InstallReferenceZoneFactory(args) => args
             .run()
             .wrap_err("failed to install reference ZoneFactory"),
@@ -123,6 +128,7 @@ enum Action {
     DeployRouter(DeployRouter),
     Deposit(Deposit),
     GenerateP2pKey(GenerateP2pKey),
+    GenerateStateBloat(GenerateStateBloat),
     GenerateZoneGenesis(GenerateZoneGenesis),
     InstallReferenceZoneFactory(InstallReferenceZoneFactory),
     PausePortal(PausePortal),

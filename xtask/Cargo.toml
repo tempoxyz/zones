@@ -24,6 +24,7 @@ zone-p2p.workspace = true
 zone-rpc.workspace = true
 zone-sequencer.workspace = true
 tempo-revm.workspace = true
+tempo-state-bloat.workspace = true
 
 alloy = { workspace = true, features = [
   "contract",

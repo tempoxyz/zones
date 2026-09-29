@@ -7,10 +7,13 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
 use reth_chainspec::EthChainSpec as _;
-use reth_ethereum::cli::Cli;
+use reth_cli_runner::CliRunner;
+use reth_ethereum::cli::{Cli, ExtendedCommand};
+use reth_rpc_server_types::DefaultRpcModuleValidator;
 use reth_tracing::tracing::{info, warn};
 use tempo_alloy::TempoNetwork;
 use tempo_evm::consensus::TempoConsensus;
+use tempo_state_bloat::InitFromBinaryDump;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
@@ -40,13 +43,38 @@ const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
 
 /// Tempo Zone CLI entry point.
 pub enum ZoneCli {
-    Node(Box<Cli<ZoneChainSpecParser, ZoneArgs>>),
+    Node(Box<ZoneNodeCli>),
     Dev(Box<DevCommand>),
+}
+
+/// Node CLI with Zone chain parsing and offline state import commands.
+pub type ZoneNodeCli =
+    Cli<ZoneChainSpecParser, ZoneArgs, DefaultRpcModuleValidator, ZoneSubcommand>;
+
+/// Additional offline commands supported by the Zone node.
+#[derive(Debug, clap::Subcommand)]
+pub enum ZoneSubcommand {
+    /// Load TIP20 storage from a Tempo binary dump into a fresh block-0 database.
+    ///
+    /// Updates storage and trie nodes without rewriting the genesis header.
+    InitFromBinaryDump(Box<InitFromBinaryDump<ZoneChainSpecParser>>),
+}
+
+impl ExtendedCommand for ZoneSubcommand {
+    fn execute(self, runner: CliRunner) -> eyre::Result<()> {
+        match self {
+            Self::InitFromBinaryDump(command) => {
+                let runtime = runner.runtime();
+                runner.run_blocking_until_ctrl_c(command.execute::<ZoneNode>(runtime))?;
+                Ok(())
+            }
+        }
+    }
 }
 
 impl ZoneCli {
     fn command() -> clap::Command {
-        Cli::<ZoneChainSpecParser, ZoneArgs>::command()
+        ZoneNodeCli::command()
             .about("Tempo Zone")
             .subcommand(DevCommand::command())
     }
@@ -95,7 +123,7 @@ impl ZoneCli {
 }
 
 /// Main entry point for the `node` command.
-fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
+fn run_node(mut cli: ZoneNodeCli) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
@@ -663,10 +691,7 @@ mod tests {
 
     use clap::Parser as _;
 
-    use super::{
-        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
-        parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
-    };
+    use super::*;
     use zone_sequencer::{MAX_WITHDRAWAL_BATCH_GAS, ProverAddresses};
 
     #[derive(Debug, clap::Parser)]
@@ -1210,5 +1235,43 @@ mod tests {
     fn l1_rpc_url_rejects_non_websocket_schemes() {
         assert!(parse_l1_rpc_url("http://localhost:8545").is_err());
         assert!(parse_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
+    }
+
+    #[test]
+    fn binary_dump_import_uses_zone_chain_parser_without_node_arguments() {
+        let parent = tempo_chainspec::spec::MODERATO.clone();
+        let mut genesis = parent.genesis().clone();
+        genesis.config.chain_id =
+            zone_primitives::constants::zone_chain_id(parent.chain().id(), 11).unwrap();
+        let genesis = serde_json::to_string(&genesis).unwrap();
+        let parsed = ZoneCli::try_parse_from([
+            "tempo-zone",
+            "init-from-binary-dump",
+            "--chain",
+            &genesis,
+            "--datadir",
+            "/tmp/zone-bloat-cli-test",
+            "state-bloat.bin",
+        ])
+        .unwrap();
+        let ZoneCli::Node(cli) = parsed else {
+            panic!("expected node CLI");
+        };
+        assert!(matches!(
+            cli.command,
+            reth_ethereum::cli::Commands::Ext(ZoneSubcommand::InitFromBinaryDump(_))
+        ));
+
+        // An L1 chain is not a valid Zone chain, including for offline imports.
+        assert!(
+            ZoneCli::try_parse_from([
+                "tempo-zone",
+                "init-from-binary-dump",
+                "--chain",
+                &serde_json::to_string(parent.genesis()).unwrap(),
+                "state-bloat.bin",
+            ])
+            .is_err()
+        );
     }
 }
