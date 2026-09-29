@@ -1043,7 +1043,7 @@ mod tests {
     use std::time::Duration;
 
     use alloy_eips::NumHash;
-    use alloy_primitives::B256;
+    use alloy_primitives::{Address, B256};
     use tokio_util::sync;
     use zone_l1::{DepositQueue, EnabledToken, L1BlockDeposits, L1BlockTracker, L1PortalEvents};
     use zone_p2p::{BackfillCommand, LeadershipSchedule, LeadershipState};
