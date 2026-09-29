@@ -46,7 +46,7 @@ use zone_precompiles::{
     ZoneOutbox as NativeZoneOutbox,
 };
 
-use crate::zone_utils::find_zone_deployment_block;
+use crate::{genesis_forks::GenesisForkArgs, zone_utils::find_zone_deployment_block};
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -113,13 +113,8 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
 
-    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    pub(crate) t12_time: Option<u64>,
-
-    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    pub(crate) t13_time: Option<u64>,
+    #[command(flatten)]
+    pub(crate) forks: GenesisForkArgs,
 }
 
 impl GenerateZoneGenesis {
@@ -282,23 +277,7 @@ impl GenerateZoneGenesis {
             ..Default::default()
         };
 
-        // Custom chains load this schedule without inheriting DEV defaults. Write the
-        // baseline forks explicitly: activating T12/T13 does not activate earlier forks.
-        for &fork in TempoHardfork::VARIANTS {
-            if fork != TempoHardfork::Genesis && fork < TempoHardfork::T12 {
-                chain_config
-                    .extra_fields
-                    .insert_value(format!("{}Time", fork.to_string().to_lowercase()), 0u64)?;
-            }
-        }
-
-        for (name, timestamp) in [("t12Time", self.t12_time), ("t13Time", self.t13_time)] {
-            if let Some(timestamp) = timestamp {
-                chain_config
-                    .extra_fields
-                    .insert_value(name.into(), timestamp)?;
-            }
-        }
+        self.forks.apply_to(&mut chain_config)?;
 
         let mut genesis = Genesis::default()
             .with_gas_limit(self.gas_limit)
@@ -818,6 +797,60 @@ mod tests {
                             .active_at_timestamp(u64::MAX)
                     );
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn genesis_uses_explicit_fork_schedule() {
+        let output = tempfile::tempdir().unwrap();
+        let schedule_path = output.path().join("forks.json");
+        std::fs::write(
+            &schedule_path,
+            r#"{"t0Time":0,"t4Time":1234,"t12Time":500,"t14Time":5678}"#,
+        )
+        .unwrap();
+        let command = GenerateZoneGenesis::try_parse_from([
+            "generate-zone-genesis",
+            "--output",
+            output.path().to_str().unwrap(),
+            "--chain-id",
+            "134509785776129",
+            "--admin",
+            "0x1000000000000000000000000000000000000001",
+            "--fork-schedule",
+            schedule_path.to_str().unwrap(),
+            "--t12-time",
+            "0",
+        ])
+        .unwrap();
+        // The parsed schedule is retained, including when create-zone must wait on L1.
+        std::fs::remove_file(schedule_path).unwrap();
+        command.run().await.unwrap();
+
+        let genesis = serde_json::from_slice::<Genesis>(
+            &std::fs::read(output.path().join("genesis.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&genesis.config.extra_fields).unwrap(),
+            serde_json::json!({"t0Time":0,"t4Time":1234,"t12Time":0,"t14Time":5678})
+        );
+        let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+        for &fork in TempoHardfork::VARIANTS {
+            let activation = match fork {
+                TempoHardfork::Genesis | TempoHardfork::T0 | TempoHardfork::T12 => Some(0),
+                TempoHardfork::T4 => Some(1234),
+                TempoHardfork::T14 => Some(5678),
+                _ => None,
+            };
+            for timestamp in [0, 1233, 1234, 5677, 5678, u64::MAX] {
+                assert_eq!(
+                    spec.tempo_fork_activation(fork)
+                        .active_at_timestamp(timestamp),
+                    activation.is_some_and(|activation| timestamp >= activation),
+                    "{fork} at {timestamp}"
+                );
             }
         }
     }
