@@ -268,7 +268,13 @@ impl SignatureMutation {
             Self::Resize(length) => out.resize(*length, 0),
             Self::RecoveryByte(v) if secp256k1 => out[64] = *v,
             Self::HighS => {
-                let s = if secp256k1 { 32..64 } else { 33..65 };
+                let s = if secp256k1 {
+                    32..64
+                } else if out.first() == Some(&2) {
+                    out.len() - 96..out.len() - 64
+                } else {
+                    33..65
+                };
                 let n = if secp256k1 { SECP256K1_N } else { P256_N };
                 let high = n - U256::from_be_slice(&out[s.clone()]);
                 out[s].copy_from_slice(&high.to_be_bytes::<32>());

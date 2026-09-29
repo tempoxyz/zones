@@ -272,6 +272,11 @@ mod tests {
                 mutated[64] += sig[64];
             }
             assert_ne!(&mutated, sig, "{mutation:?} is a no-op");
+            if matches!(mutation, HighS) && sig.first() == Some(&2) {
+                let s = sig.len() - 96..sig.len() - 64;
+                assert_eq!(&mutated[..s.start], &sig[..s.start]);
+                assert_eq!(&mutated[s.end..], &sig[s.end..]);
+            }
             assert_eq!(check(a, &mutated, 99), expected, "{base} {mutation:?}");
         }
     }
