@@ -14,6 +14,10 @@ group "default" {
   targets = ["tempo-zone", "tempo-zone-xtask", "tempo-zone-prover-utils"]
 }
 
+group "prover-eif-inputs" {
+  targets = ["tempo-zone-prover-enclave", "tempo-zone-prover-eif-builder"]
+}
+
 target "docker-metadata" {}
 
 # Base image with all dependencies pre-compiled
