@@ -39,17 +39,27 @@ The example uses a public test-only mnemonic distinct from the default dev
 mnemonic. Choose accounts not already funded in your genesis; the benchmark
 workflow generates its own private mnemonic.
 
-`--size` is the target dump size in MiB, not the resulting database size. Token
-`0` is pathUSD, the only supported token. The generator and strict dump reader
-come from Tempo. The Zone initializer merges storage into the genesis allocation
-**before** normal Reth initialization commits the header, trie, and history. It
-rejects missing token accounts, duplicate slots, conflicts with nonzero genesis
-storage, malformed dumps, and every existing datadir (including block zero).
-Output files are never overwritten. The saved chain specification must be used
-on restart; using the original genesis is rejected by normal genesis validation.
+`--size` is the target dump size in MiB, not the resulting database size; it is
+split across every `--token`. The generator and strict dump reader come from
+Tempo. The Zone initializer merges storage into the genesis allocation **before**
+normal Reth initialization commits the header, trie, and history. It rejects
+non-TIP20 addresses, a genesis without pathUSD code, duplicate slots, conflicts
+with nonzero genesis storage, malformed dumps, and every existing datadir
+(including block zero). Output files are never overwritten. The saved chain
+specification must be used on restart; using the original genesis is rejected by
+normal genesis validation.
 
-The manifest includes dump SHA-256, entry count, database file bytes, import time,
-configuration digest, genesis hash, and committed/database state roots. A full
+Token `0` is pathUSD, which Zone genesis deploys. Other token IDs (for example
+`--token 0 --token 1 --token 2 --token 3`) are seeded as storage-only accounts at
+their `0x20C0…{id}` addresses and stay uninitialized until the portal admin
+enables the matching L1 token (`just enable-token <token>`). The Zone inbox then
+initializes metadata and roles without touching the seeded supply or balances.
+Enable every seeded token and wait for the Zone to process `TokenEnabled` before
+sending traffic that uses it. Genesis code for those tokens is rejected so they
+cannot become usable before the portal enables them.
+
+The manifest includes dump SHA-256, per-token and total entry counts, database
+file bytes, import time, configuration digest, genesis hash, and committed/database state roots. A full
 hashed-state traversal verifies the root independently of cached trie nodes, and
 the stores are reopened before publishing the success manifest. Failed initialization
 may leave a partial datadir/output genesis; use a new disposable path when retrying.

@@ -53,7 +53,7 @@ pub type ZoneNodeCli =
 /// Additional offline commands supported by the Zone node.
 #[derive(Debug, clap::Subcommand)]
 pub enum ZoneSubcommand {
-    /// Initialize a fresh database with PathUSD bloat committed in Zone genesis.
+    /// Initialize a fresh database with TIP20 bloat committed in Zone genesis.
     InitFromBinaryDump(Box<InitZoneFromBinaryDump>),
 }
 
