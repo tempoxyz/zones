@@ -207,6 +207,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rust_bindings_match_solidity_artifacts() {
+        CheckAbi {
+            artifacts: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/contracts/out"),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test]
     fn projection_removes_typed_historical_entries() {
         let base = JsonAbi::parse([
             "function changed(bytes value)",
