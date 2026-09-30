@@ -2,6 +2,9 @@ ARG CHEF_IMAGE=chef
 
 FROM ${CHEF_IMAGE} AS builder
 
+ARG TARGETARCH
+ARG CACHE_FAMILY=node
+
 ARG RUST_PROFILE=profiling
 ARG VERGEN_GIT_SHA
 ARG VERGEN_GIT_SHA_SHORT
@@ -9,9 +12,9 @@ ARG EXTRA_RUSTFLAGS=""
 
 COPY . .
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git \
-    --mount=type=cache,target=$SCCACHE_DIR,sharing=locked,id=sccache \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=zones-${TARGETARCH}-${RUST_PROFILE}-${CACHE_FAMILY}-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=zones-${TARGETARCH}-${RUST_PROFILE}-${CACHE_FAMILY}-git \
+    --mount=type=cache,target=$SCCACHE_DIR,sharing=locked,id=zones-${TARGETARCH}-${RUST_PROFILE}-${CACHE_FAMILY}-sccache \
     RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
     cargo build --locked --profile ${RUST_PROFILE} \
         --bin tempo-zone --features "jemalloc" \
