@@ -71,13 +71,9 @@ impl AncestryLoader {
     }
 
     /// Load the canonical block header chain `from..=to`, fetching only the uncached ones.
-    /// Validates numbering and parent-hash links before admitting headers to the cache.
-    pub(crate) async fn load(&self, from: u64, to: u64) -> Result<Ancestry> {
-        self.load_checked(from, to, |_| Ok(())).await
-    }
-
-    /// Load a chain, requiring the caller's identity checks before admitting fetched headers.
-    pub(crate) async fn load_checked<F>(&self, from: u64, to: u64, check: F) -> Result<Ancestry>
+    /// Validates numbering and parent-hash links, then requires the caller's identity checks
+    /// before admitting fetched headers to the cache.
+    pub(crate) async fn load<F>(&self, from: u64, to: u64, check: F) -> Result<Ancestry>
     where
         F: FnOnce(&Ancestry) -> Result<()>,
     {
@@ -461,7 +457,7 @@ mod tests {
         let chain = mock_l1_chain(10, 10);
         asserter.push_success(&chain[0].0);
 
-        let ancestry = loader.load(10, 10).await.unwrap();
+        let ancestry = loader.load(10, 10, |_| Ok(())).await.unwrap();
         assert_eq!(ancestry.base, BlockNumHash::new(10, chain[0].1));
         assert_eq!(ancestry.anchor, ancestry.base);
         assert!(ancestry.headers.is_empty());
@@ -475,7 +471,7 @@ mod tests {
         asserter.push_success(&chain[1].0);
         asserter.push_success(&chain[1].0);
 
-        let error = loader.load(10, 11).await.unwrap_err();
+        let error = loader.load(10, 11, |_| Ok(())).await.unwrap_err();
         assert!(
             error
                 .to_string()
@@ -494,7 +490,7 @@ mod tests {
         }
         asserter.push_success(&unlinked);
 
-        assert!(loader.load(10, 12).await.is_err());
+        assert!(loader.load(10, 12, |_| Ok(())).await.is_err());
         assert!(loader.is_empty());
     }
 
@@ -507,7 +503,7 @@ mod tests {
         for (header, _) in &chain[..5] {
             asserter.push_success(header);
         }
-        let first = loader.load(10, 14).await.unwrap();
+        let first = loader.load(10, 14, |_| Ok(())).await.unwrap();
         assert_eq!(
             first.headers,
             chain[1..5]
@@ -521,7 +517,7 @@ mod tests {
         // If the implementation repeats any cached RPC call, the mock has no
         // additional response queued and the test fails.
         asserter.push_success(&chain[5].0);
-        let second = loader.load(11, 15).await.unwrap();
+        let second = loader.load(11, 15, |_| Ok(())).await.unwrap();
         assert_eq!(
             second.headers,
             chain[2..6]
@@ -546,11 +542,11 @@ mod tests {
 
         let oldest =
             |loader: &AncestryLoader| loader.cache.read().peek_oldest().map(|(number, _)| *number);
-        loader.load(10, 13).await.unwrap();
+        loader.load(10, 13, |_| Ok(())).await.unwrap();
         assert_eq!(oldest(&loader), Some(10));
 
         // Resolving a fully cached range must not promote or replace every hit.
-        loader.load(10, 12).await.unwrap();
+        loader.load(10, 12, |_| Ok(())).await.unwrap();
         assert_eq!(oldest(&loader), Some(10));
         assert!(asserter.read_q().is_empty());
     }

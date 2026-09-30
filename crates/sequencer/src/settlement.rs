@@ -851,7 +851,33 @@ impl BatchSubmitter {
         }
 
         let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
-        let resolved = self.ancestry.load(tempo_block_number, anchor_block).await?;
+        let expected = self
+            .l1_provider
+            .get_header_by_number(anchor_block.into())
+            .await?
+            .ok_or_eyre(format!("L1 anchor block {anchor_block} not found"))?;
+        let check = |resolved: &ancestry::Ancestry| {
+            eyre::ensure!(
+                resolved.anchor.hash == expected.inner.hash,
+                "L1 anchor {anchor_block} hash {} does not match canonical hash {}",
+                resolved.anchor.hash,
+                expected.inner.hash
+            );
+            Ok(())
+        };
+        let resolved = match self
+            .ancestry
+            .load(tempo_block_number, anchor_block, check)
+            .await
+        {
+            Err(_) => {
+                self.ancestry.clear();
+                self.ancestry
+                    .load(tempo_block_number, anchor_block, check)
+                    .await?
+            }
+            Ok(resolved) => resolved,
+        };
         warn!(
             tempo_block_number,
             current_l1_block,
@@ -2099,7 +2125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ancestry_anchor_commits_the_loaded_anchor() {
+    async fn ancestry_anchor_uses_fresh_l1_hash() {
         let asserter = Asserter::new();
         let submitter = BatchSubmitter::with_anchor_config(
             Address::ZERO,
@@ -2110,8 +2136,8 @@ mod tests {
         let chain = mock_l1_chain(100, 106);
 
         // Gap 10 exceeds the effective window of 6, so the anchor sits at tip - margin.
-        // The last loaded header supplies the anchor hash without a separate lookup.
         asserter.push_success(&110_u64);
+        asserter.push_success(&chain[6].0); // Fresh anchor read before loading ancestry.
         for (header, _) in &chain {
             asserter.push_success(header);
         }
@@ -2121,6 +2147,51 @@ mod tests {
         assert_eq!(anchor.block_hash(), chain[6].1);
         assert_eq!(anchor.ancestry_headers().len(), 6);
         assert!(asserter.read_q().is_empty());
+
+        // A cached range can become stale either at the anchor or when a new
+        // suffix no longer links to it. Both must trigger a cache reset and retry.
+        for new_suffix in [false, true] {
+            let asserter = Asserter::new();
+            let submitter = BatchSubmitter::with_anchor_config(
+                Address::ZERO,
+                mock_l1(asserter.clone()),
+                test_chain_spec(),
+                BatchAnchorConfig::new(10, 4).unwrap(),
+            );
+            let old = mock_l1_chain(100, 106);
+            for (header, _) in &old {
+                asserter.push_success(header);
+            }
+            submitter.ancestry.load(100, 106, |_| Ok(())).await.unwrap();
+
+            let fork_number = 106;
+            let mut fork = old[(fork_number - 100) as usize].0.clone();
+            fork.inner.inner.inner.timestamp += 1;
+            fork.inner.hash = keccak256(alloy_rlp::encode(&fork.inner.inner));
+            let (successor, _) = mock_l1_header(107, fork.inner.hash);
+            let (tip, expected) = if new_suffix {
+                (111_u64, &successor)
+            } else {
+                (110_u64, &fork)
+            };
+            asserter.push_success(&tip);
+            asserter.push_success(expected);
+            if new_suffix {
+                asserter.push_success(expected); // First attempt cannot link the suffix.
+            }
+            for (header, _) in &old[..(fork_number - 100) as usize] {
+                asserter.push_success(header);
+            }
+            asserter.push_success(&fork);
+            if new_suffix {
+                asserter.push_success(expected);
+            }
+
+            let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
+            assert_eq!(anchor.block_hash(), expected.inner.hash);
+            assert_eq!(anchor.block_number(100), tip - 4);
+            assert!(asserter.read_q().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -2382,7 +2453,7 @@ mod tests {
         for (header, _) in mock_l1_chain(97, 98) {
             asserter.push_success(&header);
         }
-        submitter.ancestry.load(97, 98).await.unwrap();
+        submitter.ancestry.load(97, 98, |_| Ok(())).await.unwrap();
         assert!(!submitter.ancestry.is_empty());
 
         let (header, hash) = mock_l1_header(99, B256::ZERO);

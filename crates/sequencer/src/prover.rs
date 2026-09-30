@@ -219,6 +219,7 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
 }
 
 /// Spawn observational validation for finalized RPC-follower submissions.
+/// The L1 RPC must serve headers from each batch checkpoint through its submitted anchor.
 pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
     proofs: Option<ProofCollectorHandle>,
@@ -1172,7 +1173,7 @@ async fn resolve_exact_anchor(
     }
 
     ancestry
-        .load_checked(checkpoint_number, anchor.number, |resolved| {
+        .load(checkpoint_number, anchor.number, |resolved| {
             ensure!(
                 resolved.base.hash == checkpoint_hash,
                 "canonical Tempo block {checkpoint_number} hash {} does not match checkpoint hash {checkpoint_hash}",
