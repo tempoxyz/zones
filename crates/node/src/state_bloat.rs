@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -33,6 +33,9 @@ use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 
 use crate::ZoneNode;
 
+/// Logical 16 MiB plus chunk headers; a provisional smoke-test guard, not a Nitro limit.
+const MAX_DUMP_BYTES: u64 = 16 * 1024 * 1024 + 65536;
+
 /// Initialize a fresh Zone database with PathUSD bloat committed in block zero.
 #[derive(Debug, clap::Parser)]
 pub struct InitZoneFromBinaryDump {
@@ -50,7 +53,7 @@ pub struct InitZoneFromBinaryDump {
 
 impl InitZoneFromBinaryDump {
     /// Merge allocations before Reth writes any header, history, or trie state.
-    pub async fn execute(mut self, runtime: Runtime) -> eyre::Result<()> {
+    pub async fn execute(self, runtime: Runtime) -> eyre::Result<()> {
         let started = Instant::now();
         ensure!(self.env.storage.v2, "Zone state bloat requires storage v2");
         let datadir = self
@@ -77,24 +80,49 @@ impl InitZoneFromBinaryDump {
             self.env.chain.genesis_header().number() == 0,
             "state bloat requires block-zero genesis"
         );
+        let created = [
+            datadir.clone(),
+            self.output_genesis.clone(),
+            self.manifest.clone(),
+        ];
+        let result = self.initialize(started, &datadir, runtime).await;
+        if result.is_err() {
+            // Everything below was created by this command; leave no partial state behind.
+            for path in created {
+                let removed = if path.is_dir() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+                if let Err(error) = removed
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(path = %path.display(), %error, "failed to remove partial state bloat output");
+                }
+            }
+        }
+        result
+    }
+
+    async fn initialize(
+        mut self,
+        started: Instant,
+        datadir: &Path,
+        runtime: Runtime,
+    ) -> eyre::Result<()> {
         let mut genesis = self.env.chain.genesis().clone();
-        let dump_bytes = fs::metadata(&self.state)?.len();
+        // Read the bounded dump once so the manifest hash describes exactly what was imported.
+        let mut dump = Vec::new();
+        File::open(&self.state)?
+            .take(MAX_DUMP_BYTES + 1)
+            .read_to_end(&mut dump)?;
         ensure!(
-            dump_bytes <= 16 * 1024 * 1024 + 65536,
+            dump.len() as u64 <= MAX_DUMP_BYTES,
             "dump exceeds the initial 16 MiB safety limit"
         );
-        let mut file = File::open(&self.state)?;
-        let mut hash = Sha256::new();
-        let mut buffer = [0; 65536];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hash.update(&buffer[..read]);
-        }
-        let dump_sha256 = format!("{:x}", hash.finalize());
-        let entries = apply_dump(&mut genesis, BufReader::new(File::open(&self.state)?))?;
+        let dump_bytes = dump.len() as u64;
+        let dump_sha256 = format!("{:x}", Sha256::digest(&dump));
+        let entries = apply_dump(&mut genesis, dump.as_slice())?;
         self.env.chain = Arc::new(ZoneChainSpec::from_genesis(genesis)?);
         let expected = self.env.chain.genesis_header().state_root();
         // Persist the exact specification that normal node startup must reopen.
@@ -152,7 +180,7 @@ impl InitZoneFromBinaryDump {
         drop(reopened);
         let manifest = json!({
             "schema": 1, "dump_sha256": dump_sha256, "dump_bytes": dump_bytes,
-            "token": PATH_USD_ADDRESS, "entry_count": entries, "database_bytes": directory_bytes(&datadir)?,
+            "token": PATH_USD_ADDRESS, "entry_count": entries, "database_bytes": directory_bytes(datadir)?,
             "genesis_hash": hash, "committed_state_root": expected, "database_state_root": root,
             "reopened": true, "import_seconds": started.elapsed().as_secs_f64(),
             "genesis_config_sha256": format!("{:x}", Sha256::digest(serde_json::to_vec(&self.env.chain.genesis().config)?)),

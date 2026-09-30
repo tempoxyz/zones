@@ -718,18 +718,6 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         ;;
 esac
 
-if [[ -n "${ZONES_BENCH_SETTLEMENT_START_FILE:-}" ]]; then
-    # Fix the setup height before waiting; ongoing empty blocks cannot extend it.
-    setup_tip="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
-    [[ "$setup_tip" =~ ^[0-9]+$ ]] || die "could not read setup Zone height"
-    setup_deadline=$((SECONDS + ${ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS:-600}))
-    while :; do
-        setup_settled="$(read_l1_uint "$L1_PORTAL_ADDRESS" 'zoneHeight()(uint256)')"
-        (( 10#$setup_settled >= 10#$setup_tip )) && break
-        (( SECONDS < setup_deadline )) || die "setup Zone height did not settle before measurement"
-        sleep 1
-    done
-fi
 pathusd_working_set_balance() {
     local total=0 account balance
     while IFS= read -r account; do
@@ -743,24 +731,46 @@ pathusd_working_set_balance() {
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == full-journey-pathusd-fees ]]; then
     pathusd_before="$(pathusd_working_set_balance)"
 fi
-if [[ -n "${ZONES_BENCH_SETTLEMENT_START_FILE:-}" ]]; then
-    mkdir -p "$(dirname -- "$ZONES_BENCH_SETTLEMENT_START_FILE")"
-    settlement_start_index="$(read_l1_uint "$L1_PORTAL_ADDRESS" 'withdrawalBatchIndex()(uint64)')"
-fi
+[[ -z "${ZONES_BENCH_SETTLEMENT_FILE:-}" || -n "${ZONES_BENCH_SETTLEMENT_START_FILE:-}" ]] ||
+    die "ZONES_BENCH_SETTLEMENT_FILE requires ZONES_BENCH_SETTLEMENT_START_FILE"
 # Optional prover-benchmark snapshot, after setup and before measured traffic.
-if [[ -n "${ZONES_BENCH_METRICS_BEFORE_FILE:-}" ]]; then
+snapshot_metrics_before() {
+    [[ -n "${ZONES_BENCH_METRICS_BEFORE_FILE:-}" ]] || return 0
     mkdir -p "$(dirname -- "$ZONES_BENCH_METRICS_BEFORE_FILE")"
     curl --fail --silent --show-error \
         "${ZONES_BENCH_METRICS_URL:-http://127.0.0.1:9201/metrics}" \
         >"$ZONES_BENCH_METRICS_BEFORE_FILE"
     [[ -s "$ZONES_BENCH_METRICS_BEFORE_FILE" ]] ||
         die "Zone metrics were empty before the measured private flow"
+}
+if [[ -n "${ZONES_BENCH_SETTLEMENT_START_FILE:-}" ]]; then
+    # Fix the setup height before waiting; ongoing empty blocks cannot extend it.
+    setup_tip="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
+    [[ "$setup_tip" =~ ^[0-9]+$ ]] || die "could not read setup Zone height"
+    setup_deadline=$((SECONDS + ${ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS:-600}))
+    while :; do
+        setup_settled="$(read_l1_uint "$L1_PORTAL_ADDRESS" 'zoneHeight()(uint256)')"
+        (( 10#$setup_settled >= 10#$setup_tip )) && break
+        (( SECONDS < setup_deadline )) || die "setup Zone height did not settle before measurement"
+        sleep 1
+    done
+    mkdir -p "$(dirname -- "$ZONES_BENCH_SETTLEMENT_START_FILE")"
+    # Take the portal index, metrics, and start time together, retrying if a batch lands between
+    # them, so every batch counted by the settlement delta is also in the metric delta.
+    while :; do
+        settlement_start_index="$(read_l1_uint "$L1_PORTAL_ADDRESS" 'withdrawalBatchIndex()(uint64)')"
+        snapshot_metrics_before
+        settlement_started_at="$(date +%s)"
+        [[ "$(read_l1_uint "$L1_PORTAL_ADDRESS" 'withdrawalBatchIndex()(uint64)')" == "$settlement_start_index" ]] && break
+    done
+else
+    snapshot_metrics_before
 fi
 private_flow_parent_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
 [[ "$private_flow_parent_block" =~ ^[0-9]+$ ]] ||
     die "could not read the Zone head before the measured private flow"
 if [[ -n "${ZONES_BENCH_SETTLEMENT_START_FILE:-}" ]]; then
-    jq -n --argjson batch_index "$settlement_start_index" --argjson timestamp "$(date +%s)" \
+    jq -n --argjson batch_index "$settlement_start_index" --argjson timestamp "$settlement_started_at" \
         --argjson setup_tip "$setup_tip" --argjson setup_settled "$setup_settled" \
         '{batch_index:$batch_index,timestamp:$timestamp,setup_tip:$setup_tip,setup_settled:$setup_settled}' \
         >"$ZONES_BENCH_SETTLEMENT_START_FILE"
