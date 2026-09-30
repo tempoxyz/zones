@@ -15,6 +15,7 @@ on:
           - encrypted-deposit
           - private-withdrawal
           - full-journey
+          - full-journey-pathusd-fees
           - slippage-bounce
           - swapped-lifecycle
           - swapped-redemption
@@ -261,7 +262,7 @@ jobs:
 
           neobank_preset="$INPUT_PRESET"
           case "$neobank_preset" in
-            encrypted-deposit|private-withdrawal|full-journey|slippage-bounce|\
+            encrypted-deposit|private-withdrawal|full-journey|full-journey-pathusd-fees|slippage-bounce|\
             swapped-lifecycle|swapped-redemption) ;;
             *) echo "::error::unsupported neobank preset: $neobank_preset"; exit 1 ;;
           esac
@@ -395,7 +396,7 @@ jobs:
           fi
           required_swap_uses=0
           case "$neobank_preset" in
-            full-journey|swapped-lifecycle) required_swap_uses=$INPUT_MAX_CONCURRENT ;;
+            full-journey|full-journey-pathusd-fees|swapped-lifecycle) required_swap_uses=$INPUT_MAX_CONCURRENT ;;
             private-withdrawal|swapped-redemption)
               setup_journeys_per_account=$(((INPUT_COUNT + INPUT_ACCOUNTS - 1) / INPUT_ACCOUNTS))
               callback_reservation=$((1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT))
@@ -466,6 +467,8 @@ jobs:
     env:
       ZONES_BENCH_PHASE: neobank-e2e
       ZONES_BENCH_NEOBANK_PRESET: ${{ needs.authorize.outputs.neobank-preset }}
+      # Test-only: seed 4 MiB of Zone state for tokens 0-3 with the PathUSD-fee workload.
+      ZONES_BENCH_ZONE_BLOAT_MIB: ${{ needs.authorize.outputs.neobank-preset == 'full-journey-pathusd-fees' && '4' || '0' }}
       ZONES_BENCH_ACCOUNTS: ${{ needs.authorize.outputs.accounts }}
       ZONES_BENCH_COUNT: ${{ needs.authorize.outputs.count }}
       ZONES_BENCH_TPS: ${{ needs.authorize.outputs.tps }}
@@ -667,10 +670,16 @@ jobs:
             echo "::error::runner-local benchmark mnemonic must not be a symbolic link"
             exit 1
           fi
+          # Replace identities written from an unparsable `cast --json` response (for example `null`).
+          if [ -s "$mnemonic_file" ] && ! cast wallet address --mnemonic "$mnemonic_file" >/dev/null 2>&1; then
+            echo "::warning::replacing invalid runner-local benchmark mnemonic"
+            rm -f -- "$mnemonic_file"
+          fi
           if [ ! -s "$mnemonic_file" ]; then
             temporary="$(mktemp "$identity_root/.mnemonic.XXXXXX")"
             chmod 600 "$temporary"
-            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
+            # Foundry wraps JSON output in a {schema_version, success, data} envelope.
+            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -er '.data.mnemonic // .mnemonic')"
             printf '%s\n' "$mnemonic" > "$temporary"
             mv -f -- "$temporary" "$mnemonic_file"
           else
@@ -804,7 +813,21 @@ jobs:
         run: |
           set -euo pipefail
           export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
+          if (( ZONES_BENCH_ZONE_BLOAT_MIB > 0 )); then
+            # The dump derives from the private mnemonic; keep it in runner temp and never upload it.
+            export ZONES_BENCH_ZONE_BLOAT_DUMP="$RUNNER_TEMP/zone-state-bloat.bin"
+            export ZONES_BENCH_ZONE_BLOAT_MANIFEST="$GITHUB_WORKSPACE/target/zones-benchmark/zone-state-bloat.json"
+            mkdir -p "$(dirname "$ZONES_BENCH_ZONE_BLOAT_MANIFEST")"
+            rm -f -- "$ZONES_BENCH_ZONE_BLOAT_DUMP" "$ZONES_BENCH_ZONE_BLOAT_MANIFEST"
+            "$TEMPO_XTASK_BIN" generate-state-bloat --mnemonic-file "$ZONES_BENCH_MNEMONIC_FILE" \
+              --size "$ZONES_BENCH_ZONE_BLOAT_MIB" --token 0 --token 1 --token 2 --token 3 \
+              --signable-count "$((ZONES_BENCH_ACCOUNT_START + ZONES_BENCH_ACCOUNT_CAPACITY))" \
+              --balance 18446744073709551615 --out "$ZONES_BENCH_ZONE_BLOAT_DUMP"
+          fi
           contrib/bench/provision-topology.sh up
+          if (( ZONES_BENCH_ZONE_BLOAT_MIB > 0 )); then
+            jq . "$ZONES_BENCH_ZONE_BLOAT_MANIFEST"
+          fi
           set -a
           # shellcheck source=/dev/null
           source "$ZONES_BENCH_TOPOLOGY_ENV"

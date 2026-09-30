@@ -722,7 +722,7 @@ pathusd_working_set_balance() {
     local total=0 account balance
     while IFS= read -r account; do
         balance="$(cast call "$ZONES_BENCH_PATHUSD" 'balanceOf(address)(uint256)' \
-            "$account" --rpc-url "$ZONE_RPC_URL" | awk '{print $1}')"
+            "$account" --from "$account" --rpc-url "$ZONE_RPC_URL" | awk '{print $1}')"
         [[ "$balance" =~ ^[0-9]+$ ]] || die "invalid PathUSD working-set balance"
         total="$(bigint_eval "$total + $balance")"
     done < <(jq -r '.[]' "$ZONES_BENCH_OUTPUT/accounts.json")
