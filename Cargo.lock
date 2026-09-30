@@ -12075,16 +12075,10 @@ dependencies = [
 name = "tempo-zone"
 version = "0.3.3"
 dependencies = [
- "clap",
  "reth-cli-util",
  "reth-node-core",
  "rustls",
- "serde_json",
- "tempfile",
- "tempo-state-bloat",
- "tokio",
  "zone-node",
- "zone-primitives",
 ]
 
 [[package]]
