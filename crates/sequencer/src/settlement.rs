@@ -24,6 +24,8 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
+pub(crate) mod ancestry;
+
 use std::{
     collections::BTreeMap,
     fmt,
@@ -39,32 +41,28 @@ use crate::{
         ZonePortal,
     },
     attestation::{AttestationDomain, SettlementAttestation, SettlementCertificate},
+    nonce_keys::SUBMIT_BATCH_NONCE_KEY,
     prover::SettlementProof,
     prover_config::active_l1_hardfork,
+    settlement::ancestry::AncestryLoader,
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
-use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use eyre::{OptionExt as _, Result, WrapErr as _};
-use futures::{StreamExt, TryStreamExt};
-use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
-use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_prover::{ProofBundle, VerifierMode};
-
-use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
 #[derive(Debug)]
 pub enum BatchSubmitError {
@@ -115,13 +113,6 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
-
-/// How often a quorum wait rechecks whether another leader has advanced the portal.
-/// Maximum number of encoded L1 headers retained between ancestry submissions.
-///
-/// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
-/// map overhead while covering more than the current Zone E recovery gap.
-const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 
 /// Bounded gas for one `submitBatch` call when gas estimation is unavailable.
 ///
@@ -273,14 +264,11 @@ pub struct BatchSubmitter {
     stable_portal_metadata: OnceLock<StablePortalMetadata>,
     /// Local sequencer key used to produce a 1-of-1 TIP-1091 settlement certificate.
     signer: Option<PrivateKeySigner>,
-    /// Concurrency for pipelined L1 header fetching in ancestry mode.
-    l1_fetch_concurrency: usize,
     /// EIP-2935 history and safety-margin limits used for anchor decisions.
     anchor_config: BatchAnchorConfig,
-    /// Validated, RLP-encoded L1 headers retained across overlapping ancestry
-    /// requests. Settlement batches are submitted in order, so later requests
-    /// can reuse almost the entire preceding range.
-    ancestry_header_cache: RwLock<LruMap<u64, CachedAncestryHeader>>,
+    /// Ancestry headers for out-of-window batches. Settlement batches are submitted
+    /// in order, so later requests reuse almost the entire preceding range.
+    ancestry: AncestryLoader,
 }
 impl BatchSubmitter {
     /// Shared Tempo L1 provider backing portal reads and submissions.
@@ -347,16 +335,13 @@ impl BatchSubmitter {
         let portal = ZonePortal::new(portal_address, l1_provider.clone());
         Self {
             portal_address,
+            ancestry: AncestryLoader::new(l1_provider.clone()),
             l1_provider,
             chain_spec,
             portal,
             stable_portal_metadata: OnceLock::new(),
             signer,
-            l1_fetch_concurrency: 16,
             anchor_config,
-            ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
-                DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
-            ))),
         }
     }
 
@@ -848,7 +833,6 @@ impl BatchSubmitter {
     ///   are collected and validated for future prover integration.
     async fn resolve_batch_anchor(&self, tempo_block_number: u64) -> Result<BatchAnchor> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
-
         if tempo_block_number > current_l1_block {
             return Err(eyre::eyre!(
                 "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 \
@@ -857,15 +841,8 @@ impl BatchSubmitter {
         }
 
         let gap = current_l1_block.saturating_sub(tempo_block_number);
-
         if gap < self.anchor_config.effective_window() {
-            // The cache is only useful during ancestry recovery. Replace it
-            // instead of clearing it so the hash table's allocation is freed.
-            let has_cached_headers = !self.ancestry_header_cache.read().is_empty();
-            if has_cached_headers {
-                *self.ancestry_header_cache.write() =
-                    LruMap::new(ByLength::new(DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY));
-            }
+            self.ancestry.clear();
             let block_hash = self
                 .l1_provider
                 .get_header_by_number(tempo_block_number.into())
@@ -877,32 +854,44 @@ impl BatchSubmitter {
         }
 
         let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
-        let ancestry_headers = self
-            .fetch_ancestry_headers(tempo_block_number, anchor_block)
-            .await?;
-
+        let expected = self
+            .l1_provider
+            .get_header_by_number(anchor_block.into())
+            .await?
+            .ok_or_eyre(format!("L1 anchor block {anchor_block} not found"))?;
+        let check = |resolved: &ancestry::Ancestry| {
+            eyre::ensure!(
+                resolved.anchor.hash == expected.inner.hash,
+                "L1 anchor {anchor_block} hash {} does not match canonical hash {}",
+                resolved.anchor.hash,
+                expected.inner.hash
+            );
+            Ok(())
+        };
+        let resolved = match self
+            .ancestry
+            .load(tempo_block_number, anchor_block, check)
+            .await
+        {
+            Err(_) => {
+                self.ancestry.clear();
+                self.ancestry
+                    .load(tempo_block_number, anchor_block, check)
+                    .await?
+            }
+            Ok(resolved) => resolved,
+        };
         warn!(
             tempo_block_number,
             current_l1_block,
             anchor_block,
             gap,
-            header_count = ancestry_headers.len(),
-            total_bytes = ancestry_headers.iter().map(|h| h.len()).sum::<usize>(),
+            header_count = resolved.headers.len(),
+            total_bytes = resolved.headers.iter().map(|h| h.len()).sum::<usize>(),
             "tempo_block_number outside EIP-2935 effective window, using ancestry mode"
         );
 
-        let block_hash = self
-            .l1_provider
-            .get_header_by_number(anchor_block.into())
-            .await?
-            .ok_or_eyre(format!("L1 anchor block {anchor_block} not found"))?
-            .inner
-            .hash;
-        Ok(BatchAnchor::Ancestry {
-            block_number: anchor_block,
-            block_hash,
-            ancestry_headers,
-        })
+        Ok(resolved.into())
     }
 
     async fn validate_prepared_anchor(
@@ -952,103 +941,6 @@ impl BatchSubmitter {
             )));
         }
         Ok(current_l1_block)
-    }
-
-    /// Fetch and RLP-encode L1 block headers from `from + 1` to `to` (inclusive),
-    /// validating the parent-hash chain and reusing cached overlapping headers.
-    ///
-    /// Returns headers in ascending block-number order. The first header's
-    /// `parent_hash` is validated against the hash of block `from`, ensuring the
-    /// chain is rooted at the expected block.
-    async fn fetch_ancestry_headers(&self, from: u64, to: u64) -> Result<Vec<Bytes>> {
-        use futures::stream;
-
-        if to <= from {
-            return Ok(Vec::new());
-        }
-
-        // Snapshot the cache without changing its LRU order. Network requests
-        // and validation happen after the read lock is released.
-        let (cached, missing) = {
-            let cache = self.ancestry_header_cache.read();
-            let mut cached = Vec::new();
-            let mut missing = Vec::new();
-            for block_number in from..=to {
-                if let Some(header) = cache.peek(&block_number) {
-                    cached.push((block_number, header.clone()));
-                } else {
-                    missing.push(block_number);
-                }
-            }
-            (cached, missing)
-        };
-        let cache_hits = cached.len();
-
-        // Fetch and encode only the cache misses.
-        let fetched = stream::iter(missing.iter().copied())
-            .map(|block_number| {
-                let provider = &self.l1_provider;
-                async move {
-                    let header = provider
-                        .get_header_by_number(block_number.into())
-                        .await?
-                        .ok_or_else(|| {
-                            eyre::eyre!("L1 header not found for block {block_number}")
-                        })?;
-                    let header = header.inner.inner;
-                    let mut encoded = Vec::with_capacity(600);
-                    header.encode(&mut encoded);
-                    let cached_header = CachedAncestryHeader {
-                        parent_hash: header.inner.parent_hash,
-                        hash: alloy_primitives::keccak256(&encoded),
-                        encoded: Bytes::from(encoded),
-                    };
-                    Ok::<_, eyre::Report>((block_number, cached_header))
-                }
-            })
-            .buffer_unordered(self.l1_fetch_concurrency)
-            .try_collect::<Vec<_>>()
-            .await?;
-
-        // Pure resolution owns merging, ordering, completeness, duplicate, and
-        // parent-hash validation. Do not mutate the cache unless it succeeds.
-        let ResolvedAncestry {
-            headers,
-            fetched_headers,
-        } = resolve_ancestry_headers(from, to, cached, fetched)?;
-        let fetched_count = fetched_headers.len();
-
-        // Commit only entries fetched from the snapshot's misses. Another task
-        // may have filled one while the network requests were in flight.
-        let mut cache = self.ancestry_header_cache.write();
-        for (block_number, header) in fetched_headers {
-            if let Some(existing) = cache.peek(&block_number) {
-                if existing.hash != header.hash {
-                    return Err(eyre::eyre!(
-                        "conflicting L1 header at cached block {block_number}: \
-                         cached={}, fetched={}",
-                        existing.hash,
-                        header.hash
-                    ));
-                }
-                continue;
-            }
-            if !cache.insert(block_number, header) {
-                return Err(eyre::eyre!(
-                    "failed to cache L1 header for block {block_number}"
-                ));
-            }
-        }
-
-        info!(
-            from,
-            to,
-            cache_hits,
-            fetched = fetched_count,
-            "resolved ancestry headers"
-        );
-
-        Ok(headers)
     }
 
     /// Read the current `blockHash` from the ZonePortal on L1.
@@ -1353,6 +1245,16 @@ pub enum BatchAnchor {
     },
 }
 
+impl From<ancestry::Ancestry> for BatchAnchor {
+    fn from(ancestry: ancestry::Ancestry) -> Self {
+        Self::Ancestry {
+            block_number: ancestry.anchor.number,
+            block_hash: ancestry.anchor.hash,
+            ancestry_headers: ancestry.headers,
+        }
+    }
+}
+
 impl BatchAnchor {
     /// Returns the L1 block whose hash the portal passes to the verifier.
     pub const fn block_number(&self, tempo_block_number: u64) -> u64 {
@@ -1493,93 +1395,6 @@ struct PortalSubmissionMetadata {
     signer_is_sequencer: bool,
     verifier: Address,
 }
-/// One validated L1 header retained for ancestry proof construction.
-#[derive(Debug, Clone)]
-struct CachedAncestryHeader {
-    parent_hash: B256,
-    hash: B256,
-    encoded: Bytes,
-}
-
-/// A complete, ordered, parent-linked ancestry range.
-///
-/// `headers` excludes the base block at `from`; `fetched_headers` contains only
-/// entries that the caller should commit to the cache after resolution succeeds.
-#[derive(Debug)]
-struct ResolvedAncestry {
-    headers: Vec<Bytes>,
-    fetched_headers: Vec<(u64, CachedAncestryHeader)>,
-}
-
-/// Merge cached and fetched headers into one validated ancestry range.
-fn resolve_ancestry_headers(
-    from: u64,
-    to: u64,
-    cached: Vec<(u64, CachedAncestryHeader)>,
-    fetched: Vec<(u64, CachedAncestryHeader)>,
-) -> Result<ResolvedAncestry> {
-    debug_assert!(from < to, "caller skips empty ancestry ranges");
-
-    let range_len = (to - from + 1) as usize;
-    let fetched_count = fetched.len();
-    let mut merged = vec![None; range_len];
-
-    let mut insert = |block_number, header, was_fetched| -> Result<()> {
-        if !(from..=to).contains(&block_number) {
-            return Err(eyre::eyre!(
-                "received out-of-range L1 header for block {block_number}; expected {from}..={to}"
-            ));
-        }
-        let index = (block_number - from) as usize;
-        if merged[index].replace((header, was_fetched)).is_some() {
-            return Err(eyre::eyre!(
-                "received duplicate L1 header for block {block_number}"
-            ));
-        }
-        Ok(())
-    };
-    for (block_number, header) in cached {
-        insert(block_number, header, false)?;
-    }
-    for (block_number, header) in fetched {
-        insert(block_number, header, true)?;
-    }
-
-    let mut merged = merged.into_iter();
-    let (base, base_was_fetched) = merged
-        .next()
-        .flatten()
-        .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?;
-    let mut parent_hash = base.hash;
-    let mut headers = Vec::with_capacity(range_len - 1);
-    let mut fetched_headers = Vec::with_capacity(fetched_count);
-    if base_was_fetched {
-        fetched_headers.push((from, base));
-    }
-
-    for (block_number, entry) in ((from + 1)..=to).zip(merged) {
-        let (header, was_fetched) =
-            entry.ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
-        if header.parent_hash != parent_hash {
-            return Err(eyre::eyre!(
-                "parent-hash chain broken at block {block_number}: \
-                 expected parent_hash={parent_hash}, got={}",
-                header.parent_hash
-            ));
-        }
-        parent_hash = header.hash;
-        headers.push(header.encoded.clone());
-        if was_fetched {
-            fetched_headers.push((block_number, header));
-        }
-    }
-
-    Ok(ResolvedAncestry {
-        headers,
-        fetched_headers,
-    })
-}
-
 /// Pure function that resolves pre-fetched data into verified withdrawal sets
 /// ready to be stored.
 ///
@@ -1944,25 +1759,23 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        ancestry::test_utils::{
+            encoded_headers, mock_l1, mock_l1_chain, mock_l1_header, push_headers,
+        },
+        *,
+    };
     use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
-    use alloy_consensus::{Header as ConsensusHeader, Sealable as _};
+    use alloy_consensus::Header as ConsensusHeader;
     use alloy_primitives::{B256, address};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_sol_types::SolValue;
     use alloy_transport::mock::Asserter;
-    use proptest::prelude::*;
     use reth_provider::test_utils::MockEthProvider;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{Block, TempoHeader, TempoPrimitives};
     use zone_chainspec::test_utils::set_tempo_fork;
-
-    fn mock_l1(asserter: Asserter) -> DynProvider<TempoNetwork> {
-        ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter)
-            .erased()
-    }
 
     fn test_chain_spec() -> Arc<ZoneChainSpec> {
         Arc::new(ZoneChainSpec {
@@ -2245,194 +2058,6 @@ mod tests {
         (U256::ZERO, values).abi_encode_params().into()
     }
 
-    fn mock_l1_header(number: u64, parent_hash: B256) -> (TempoHeaderResponse, B256) {
-        let header = TempoHeader {
-            inner: ConsensusHeader {
-                number,
-                parent_hash,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let hash = header.hash_slow();
-        (
-            TempoHeaderResponse {
-                inner: RpcHeader {
-                    hash,
-                    inner: header,
-                    total_difficulty: None,
-                    size: None,
-                },
-                timestamp_millis: 0,
-            },
-            hash,
-        )
-    }
-
-    fn synthetic_ancestry(from: u64, payloads: &[Vec<u8>]) -> Vec<(u64, CachedAncestryHeader)> {
-        let mut parent_hash = B256::ZERO;
-        payloads
-            .iter()
-            .enumerate()
-            .map(|(index, payload)| {
-                let block_number = from + u64::try_from(index).unwrap();
-                let mut encoded = Vec::with_capacity(size_of::<u64>() + payload.len());
-                encoded.extend_from_slice(&block_number.to_be_bytes());
-                encoded.extend_from_slice(payload);
-                let encoded = Bytes::from(encoded);
-                let hash = alloy_primitives::keccak256(&encoded);
-                let header = CachedAncestryHeader {
-                    parent_hash,
-                    hash,
-                    encoded,
-                };
-                parent_hash = hash;
-                (block_number, header)
-            })
-            .collect()
-    }
-
-    fn ancestry_case() -> impl Strategy<Value = (u64, Vec<Vec<u8>>, Vec<u64>)> {
-        (0_u64..10_000, 2_usize..33).prop_flat_map(|(from, len)| {
-            (
-                Just(from),
-                proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..64), len),
-                proptest::collection::vec(any::<u64>(), len),
-            )
-        })
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(128))]
-
-        #[test]
-        fn ancestry_resolution_is_independent_of_fetched_order(
-            (from, payloads, order_keys) in ancestry_case(),
-        ) {
-            let chain = synthetic_ancestry(from, &payloads);
-            let to = chain.last().unwrap().0;
-            let expected = resolve_ancestry_headers(from, to, Vec::new(), chain.clone())
-                .unwrap()
-                .headers;
-
-            let mut permuted = chain
-                .into_iter()
-                .zip(order_keys)
-                .collect::<Vec<_>>();
-            permuted.sort_by_key(|(_, key)| *key);
-            let permuted = permuted
-                .into_iter()
-                .map(|(header, _)| header)
-                .collect();
-
-            let actual = resolve_ancestry_headers(from, to, Vec::new(), permuted)
-                .unwrap()
-                .headers;
-            prop_assert_eq!(actual, expected);
-        }
-
-        #[test]
-        fn ancestry_resolution_is_independent_of_cache_partition(
-            (from, payloads, order_keys) in ancestry_case(),
-            cache_mask in any::<u128>(),
-        ) {
-            let chain = synthetic_ancestry(from, &payloads);
-            let to = chain.last().unwrap().0;
-            let cold = resolve_ancestry_headers(from, to, Vec::new(), chain.clone())
-                .unwrap()
-                .headers;
-            let (cached, fetched): (Vec<_>, Vec<_>) = chain
-                .into_iter()
-                .enumerate()
-                .partition(|(index, _)| cache_mask & (1_u128 << index) != 0);
-            let cached = cached.into_iter().map(|(_, header)| header).collect();
-            let mut fetched = fetched
-                .into_iter()
-                .map(|(index, header)| (order_keys[index], header))
-                .collect::<Vec<_>>();
-            fetched.sort_by_key(|(order_key, _)| *order_key);
-            let fetched = fetched
-                .into_iter()
-                .map(|(_, header)| header)
-                .collect::<Vec<_>>();
-            let mut expected_fetched = fetched
-                .iter()
-                .map(|(block_number, header)| (*block_number, header.hash))
-                .collect::<Vec<_>>();
-            expected_fetched.sort_by_key(|(block_number, _)| *block_number);
-
-            let partitioned = resolve_ancestry_headers(from, to, cached, fetched)
-                .unwrap();
-            let actual_fetched = partitioned
-                .fetched_headers
-                .iter()
-                .map(|(block_number, header)| (*block_number, header.hash))
-                .collect::<Vec<_>>();
-            prop_assert_eq!(partitioned.headers, cold);
-            prop_assert_eq!(actual_fetched, expected_fetched);
-        }
-
-        #[test]
-        fn ancestry_resolution_rejects_parent_hash_corruption(
-            (from, payloads, _) in ancestry_case(),
-            corrupt_index in any::<usize>(),
-        ) {
-            let mut chain = synthetic_ancestry(from, &payloads);
-            let to = chain.last().unwrap().0;
-            let corrupt_index = 1 + corrupt_index % (chain.len() - 1);
-            chain[corrupt_index].1.parent_hash[0] ^= 1;
-
-            prop_assert!(resolve_ancestry_headers(from, to, Vec::new(), chain).is_err());
-        }
-
-        #[test]
-        fn ancestry_resolution_rejects_malformed_header_sets(
-            (from, payloads, _) in ancestry_case(),
-            malformed_index in any::<usize>(),
-        ) {
-            let chain = synthetic_ancestry(from, &payloads);
-            let to = chain.last().unwrap().0;
-            let malformed_index = malformed_index % chain.len();
-
-            let mut missing = chain.clone();
-            missing.remove(malformed_index);
-            prop_assert!(
-                resolve_ancestry_headers(from, to, Vec::new(), missing).is_err(),
-                "missing header was accepted"
-            );
-
-            let mut duplicate = chain.clone();
-            duplicate.push(chain[malformed_index].clone());
-            prop_assert!(
-                resolve_ancestry_headers(from, to, Vec::new(), duplicate).is_err(),
-                "duplicate header was accepted"
-            );
-
-            let mut out_of_range = chain.clone();
-            out_of_range.push((to + 1, chain[malformed_index].1.clone()));
-            prop_assert!(
-                resolve_ancestry_headers(from, to, Vec::new(), out_of_range).is_err(),
-                "out-of-range header was accepted"
-            );
-        }
-
-        #[test]
-        fn ancestry_resolution_returns_exact_range_without_base(
-            (from, payloads, _) in ancestry_case(),
-        ) {
-            let chain = synthetic_ancestry(from, &payloads);
-            let to = chain.last().unwrap().0;
-            let expected = chain[1..]
-                .iter()
-                .map(|(_, header)| header.encoded.clone())
-                .collect::<Vec<_>>();
-
-            let resolved = resolve_ancestry_headers(from, to, Vec::new(), chain).unwrap();
-            prop_assert_eq!(resolved.headers.len(), usize::try_from(to - from).unwrap());
-            prop_assert_eq!(resolved.headers, expected);
-        }
-    }
-
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
             token: address!("0x0000000000000000000000000000000000001000"),
@@ -2457,92 +2082,6 @@ mod tests {
         assert!(BatchAnchorConfig::new(0, 0).is_err());
         assert!(BatchAnchorConfig::new(10, 10).is_err());
         assert!(BatchAnchorConfig::new(10, 11).is_err());
-    }
-
-    #[tokio::test]
-    async fn ancestry_header_cache_fetches_only_new_suffix() {
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
-        *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
-
-        let mut parent_hash = B256::ZERO;
-        let mut headers = Vec::new();
-        for number in 10..=15 {
-            let (header, hash) = mock_l1_header(number, parent_hash);
-            headers.push(header);
-            parent_hash = hash;
-        }
-
-        // The initial range fetches its base plus all ancestry headers.
-        for header in &headers[..5] {
-            asserter.push_success(header);
-        }
-        let first = submitter.fetch_ancestry_headers(10, 14).await.unwrap();
-        let expected_first = headers[1..5]
-            .iter()
-            .map(|header| Bytes::from(alloy_rlp::encode(&header.inner.inner)))
-            .collect::<Vec<_>>();
-        assert_eq!(first, expected_first);
-        assert_eq!(submitter.ancestry_header_cache.read().len(), 4);
-
-        // The overlapping range reuses blocks 11..=14 and fetches only block 15.
-        // If the implementation repeats any cached RPC call, the mock has no
-        // additional response queued and the test fails.
-        asserter.push_success(&headers[5]);
-        let second = submitter.fetch_ancestry_headers(11, 15).await.unwrap();
-        let expected_second = headers[2..6]
-            .iter()
-            .map(|header| Bytes::from(alloy_rlp::encode(&header.inner.inner)))
-            .collect::<Vec<_>>();
-        assert_eq!(second, expected_second);
-
-        let cache = submitter.ancestry_header_cache.read();
-        assert!(cache.peek(&11).is_none());
-        for block_number in 12..=15 {
-            assert!(cache.peek(&block_number).is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn ancestry_header_cache_hits_do_not_rewrite_entries() {
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
-        *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
-
-        let mut parent_hash = B256::ZERO;
-        for number in 10..=13 {
-            let (header, hash) = mock_l1_header(number, parent_hash);
-            asserter.push_success(&header);
-            parent_hash = hash;
-        }
-
-        submitter.fetch_ancestry_headers(10, 13).await.unwrap();
-        assert_eq!(
-            submitter
-                .ancestry_header_cache
-                .read()
-                .peek_oldest()
-                .map(|(block_number, _)| *block_number),
-            Some(10)
-        );
-
-        // Resolving a fully cached range must not promote or replace every hit.
-        submitter.fetch_ancestry_headers(10, 12).await.unwrap();
-        assert_eq!(
-            submitter
-                .ancestry_header_cache
-                .read()
-                .peek_oldest()
-                .map(|(block_number, _)| *block_number),
-            Some(10)
-        );
-        assert!(asserter.read_q().is_empty());
     }
 
     #[tokio::test]
@@ -2582,6 +2121,58 @@ mod tests {
                 .contains("tempo_block_number (101) is not yet confirmed on L1 (tip=100)")
         );
         assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ancestry_anchor_uses_fresh_l1_hash() {
+        let asserter = Asserter::new();
+        let submitter = BatchSubmitter::with_anchor_config(
+            Address::ZERO,
+            mock_l1(asserter.clone()),
+            test_chain_spec(),
+            BatchAnchorConfig::new(10, 4).unwrap(),
+        );
+        let chain = mock_l1_chain(100, 106);
+
+        // Gap 10 exceeds the effective window of 6, so the anchor sits at tip - margin.
+        asserter.push_success(&110_u64);
+        asserter.push_success(&chain[6]); // Fresh anchor read before loading ancestry.
+        push_headers(&asserter, &chain);
+        let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
+
+        assert_eq!(anchor.block_number(100), 106);
+        assert_eq!(anchor.block_hash(), chain[6].inner.hash);
+        assert_eq!(anchor.ancestry_headers(), encoded_headers(&chain[1..]));
+        assert!(asserter.read_q().is_empty());
+
+        // A cached range can become stale either at the anchor or when a new
+        // suffix no longer links to it. Both must trigger a cache reset and retry.
+        for new_suffix in [false, true] {
+            submitter.ancestry.clear();
+            push_headers(&asserter, &chain);
+            submitter.ancestry.load(100, 106, |_| Ok(())).await.unwrap();
+
+            let mut fork = chain.clone();
+            fork[6].inner.inner.inner.timestamp += 1;
+            fork[6].inner.hash = keccak256(alloy_rlp::encode(&fork[6].inner.inner));
+            if new_suffix {
+                fork.push(mock_l1_header(107, fork[6].inner.hash).0);
+            }
+            let expected = fork.last().unwrap();
+            let anchor_number = 100 + fork.len() as u64 - 1;
+            asserter.push_success(&(anchor_number + 4));
+            asserter.push_success(expected);
+            if new_suffix {
+                asserter.push_success(expected); // First attempt cannot link the suffix.
+            }
+            push_headers(&asserter, &fork); // Retry must fetch the whole canonical range.
+
+            let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
+            assert_eq!(anchor.block_hash(), expected.inner.hash);
+            assert_eq!(anchor.block_number(100), anchor_number);
+            assert_eq!(anchor.ancestry_headers(), encoded_headers(&fork[1..]));
+            assert!(asserter.read_q().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -2840,17 +2431,9 @@ mod tests {
             .erased();
         let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
 
-        let cached_header = CachedAncestryHeader {
-            parent_hash: B256::ZERO,
-            hash: B256::repeat_byte(0x11),
-            encoded: Bytes::from_static(&[0x01]),
-        };
-        assert!(
-            submitter
-                .ancestry_header_cache
-                .write()
-                .insert(98, cached_header)
-        );
+        push_headers(&asserter, &mock_l1_chain(97, 98));
+        submitter.ancestry.load(97, 98, |_| Ok(())).await.unwrap();
+        assert!(!submitter.ancestry.is_empty());
 
         let (header, hash) = mock_l1_header(99, B256::ZERO);
         asserter.push_success(&100_u64);
@@ -2858,7 +2441,7 @@ mod tests {
         let anchor = submitter.resolve_batch_anchor(99).await.unwrap();
 
         assert_eq!(anchor.block_hash(), hash);
-        assert!(submitter.ancestry_header_cache.read().is_empty());
+        assert!(submitter.ancestry.is_empty());
         assert!(asserter.read_q().is_empty());
     }
 

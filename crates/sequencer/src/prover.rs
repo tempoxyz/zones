@@ -16,8 +16,7 @@ use std::{
 use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_primitives::{B256, Bytes, keccak256};
-use alloy_provider::{DynProvider, Provider as _};
-use alloy_rpc_types_eth::BlockNumberOrTag;
+use alloy_provider::DynProvider;
 use alloy_sol_types::{SolCall as _, SolInterface as _};
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
@@ -48,7 +47,7 @@ use zone_spf::{
 
 use crate::{
     BatchAnchor, BatchData, PreparedBatch, ProverAddresses, ZoneSequencerProvider,
-    metrics::ProverMetrics, proofs::ProofCollectorHandle,
+    metrics::ProverMetrics, proofs::ProofCollectorHandle, settlement::ancestry::AncestryLoader,
 };
 
 /// Number of candidates allowed to wait behind the active validation.
@@ -152,6 +151,7 @@ struct ProverContext<P> {
     config: SettlementProverConfig,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
+    ancestry: AncestryLoader,
 }
 
 struct ZoneInputs {
@@ -220,6 +220,7 @@ pub fn spawn_settlement_prover<P: ZoneSequencerProvider>(
 }
 
 /// Spawn observational validation for finalized RPC-follower submissions.
+/// The L1 RPC must serve headers from each batch checkpoint through its submitted anchor.
 pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
     proofs: Option<ProofCollectorHandle>,
@@ -256,6 +257,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
     let context = ProverContext {
         config,
         zone_provider,
+        ancestry: AncestryLoader::new(l1_provider.clone()),
         l1_provider,
     };
     let metrics = ProverMetrics::default();
@@ -598,7 +600,7 @@ async fn build_witness<P: ZoneSequencerProvider>(
             }
             ProverAnchor::Finalized(anchor) => {
                 resolve_exact_anchor(
-                    &context.l1_provider,
+                    &context.ancestry,
                     final_tempo_header.number(),
                     final_tempo_header.hash_slow(),
                     *anchor,
@@ -1099,14 +1101,6 @@ async fn zone_witnesses(
     ))
 }
 
-async fn tempo_header(provider: &DynProvider<TempoNetwork>, number: u64) -> Result<TempoHeader> {
-    provider
-        .get_block_by_number(BlockNumberOrTag::Number(number))
-        .await?
-        .map(|block| block.header.as_ref().clone())
-        .ok_or_eyre(format!("Tempo block {number} not found"))
-}
-
 fn validate_prepared_anchor(
     anchor: &BatchAnchor,
     checkpoint_number: u64,
@@ -1157,69 +1151,42 @@ fn validate_prepared_anchor(
     Ok(())
 }
 
+/// Rebuild the anchor already committed on L1 by a finalized submission.
 async fn resolve_exact_anchor(
-    provider: &DynProvider<TempoNetwork>,
+    ancestry: &AncestryLoader,
     checkpoint_number: u64,
     checkpoint_hash: B256,
     anchor: ShadowProofAnchor,
 ) -> Result<BatchAnchor> {
-    ensure!(
-        anchor.number >= checkpoint_number,
-        "submitted Tempo anchor {} precedes checkpoint {checkpoint_number}",
-        anchor.number
-    );
     if anchor.number == checkpoint_number {
         ensure!(
             anchor.hash == checkpoint_hash,
             "submitted direct Tempo anchor hash {} does not match checkpoint hash {checkpoint_hash}",
             anchor.hash
         );
+        ancestry.clear();
         return Ok(BatchAnchor::Direct {
             block_hash: anchor.hash,
         });
     }
 
-    resolve_ancestry_anchor(
-        provider,
-        checkpoint_number,
-        checkpoint_hash,
-        anchor.number,
-        Some(anchor.hash),
-    )
-    .await
-}
-
-async fn resolve_ancestry_anchor(
-    provider: &DynProvider<TempoNetwork>,
-    checkpoint_number: u64,
-    checkpoint_hash: B256,
-    anchor_number: u64,
-    expected_anchor_hash: Option<B256>,
-) -> Result<BatchAnchor> {
-    let mut expected_parent = checkpoint_hash;
-    let mut ancestry_headers = Vec::with_capacity((anchor_number - checkpoint_number) as usize);
-    for number in checkpoint_number + 1..=anchor_number {
-        let header = tempo_header(provider, number).await?;
-        ensure!(
-            header.parent_hash() == expected_parent,
-            "Tempo ancestry broke at block {number}: expected parent {expected_parent}, found {}",
-            header.parent_hash()
-        );
-        expected_parent = header.hash_slow();
-        ancestry_headers.push(Bytes::from(alloy_rlp::encode(&header)));
-    }
-    if let Some(expected_anchor_hash) = expected_anchor_hash {
-        ensure!(
-            expected_parent == expected_anchor_hash,
-            "submitted Tempo anchor {} hash {expected_anchor_hash} does not match canonical hash {expected_parent}",
-            anchor_number
-        );
-    }
-    Ok(BatchAnchor::Ancestry {
-        block_number: anchor_number,
-        block_hash: expected_parent,
-        ancestry_headers,
-    })
+    ancestry
+        .load(checkpoint_number, anchor.number, |resolved| {
+            ensure!(
+                resolved.base.hash == checkpoint_hash,
+                "canonical Tempo block {checkpoint_number} hash {} does not match checkpoint hash {checkpoint_hash}",
+                resolved.base.hash
+            );
+            ensure!(
+                resolved.anchor.hash == anchor.hash,
+                "submitted Tempo anchor {} hash {} does not match canonical hash {}",
+                anchor.number,
+                anchor.hash,
+                resolved.anchor.hash
+            );
+            Ok(())
+        })
+        .await.map(|res| res.into())
 }
 
 fn compare_output(output: &BatchOutput, batch: &BatchData, expected_prev_hash: B256) -> Result<()> {
@@ -1327,8 +1294,9 @@ fn witness_size(witness: &BatchWitness) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::Header as ConsensusHeader;
-    use alloy_provider::ProviderBuilder;
+    use crate::settlement::ancestry::test_utils::{
+        mock_l1, mock_l1_chain, mock_l1_header, push_headers,
+    };
     use alloy_transport::mock::Asserter;
     use zone_rpc::types::ZoneExecutionWitness;
     use zone_spf::{
@@ -1420,16 +1388,8 @@ mod tests {
     }
 
     fn ancestry_header(number: u64, parent_hash: B256) -> (Bytes, B256) {
-        let header = TempoHeader {
-            inner: ConsensusHeader {
-                number,
-                parent_hash,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let hash = header.hash_slow();
-        (Bytes::from(alloy_rlp::encode(&header)), hash)
+        let (header, hash) = mock_l1_header(number, parent_hash);
+        (Bytes::from(alloy_rlp::encode(&header.inner.inner)), hash)
     }
 
     #[test]
@@ -1563,59 +1523,68 @@ mod tests {
         }
     }
 
-    fn mocked_l1_provider() -> DynProvider<TempoNetwork> {
-        ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(Asserter::new())
-            .erased()
+    #[tokio::test]
+    async fn exact_anchor_checks_committed_identity_without_tip_lookup() {
+        let checkpoint_hash = B256::repeat_byte(0x42);
+        for (number, hash, message) in [
+            (10, checkpoint_hash, None),
+            (10, B256::repeat_byte(0x43), Some("checkpoint hash")),
+            (9, B256::repeat_byte(0x41), Some("invalid ancestry range")),
+        ] {
+            let result = resolve_exact_anchor(
+                &AncestryLoader::new(mock_l1(Asserter::new())),
+                10,
+                checkpoint_hash,
+                ShadowProofAnchor { number, hash },
+            )
+            .await;
+            match message {
+                Some(message) => {
+                    let error = result.unwrap_err();
+                    assert!(error.to_string().contains(message), "{error}");
+                }
+                None => {
+                    let anchor = result.unwrap();
+                    assert_eq!(anchor.block_number(10), 10);
+                    assert_eq!(anchor.block_hash(), checkpoint_hash);
+                    assert!(anchor.ancestry_headers().is_empty());
+                }
+            }
+        }
     }
 
     #[tokio::test]
-    async fn exact_direct_anchor_uses_committed_hash_without_tip_lookup() {
-        let hash = B256::repeat_byte(0x42);
-        let anchor = resolve_exact_anchor(
-            &mocked_l1_provider(),
-            10,
-            hash,
-            ShadowProofAnchor { number: 10, hash },
-        )
-        .await
-        .unwrap();
+    async fn exact_ancestry_checks_endpoints_before_caching() {
+        let chain = mock_l1_chain(10, 12);
+        let (base_hash, anchor_hash) = (chain[0].inner.hash, chain[2].inner.hash);
+        for (checkpoint_hash, submitted_hash, message) in [
+            (B256::repeat_byte(0x42), anchor_hash, "checkpoint hash"),
+            (base_hash, B256::repeat_byte(0x43), "canonical hash"),
+        ] {
+            let asserter = Asserter::new();
+            let ancestry = AncestryLoader::new(mock_l1(asserter.clone()));
+            push_headers(&asserter, &chain);
 
-        assert_eq!(anchor.block_number(10), 10);
-        assert_eq!(anchor.block_hash(), hash);
-        assert!(anchor.ancestry_headers().is_empty());
-    }
+            let mut proof_anchor = ShadowProofAnchor {
+                number: 12,
+                hash: submitted_hash,
+            };
+            let error = resolve_exact_anchor(&ancestry, 10, checkpoint_hash, proof_anchor)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert!(ancestry.is_empty(), "rejected headers must not be cached");
 
-    #[tokio::test]
-    async fn exact_direct_anchor_rejects_different_committed_hash() {
-        let result = resolve_exact_anchor(
-            &mocked_l1_provider(),
-            10,
-            B256::repeat_byte(0x42),
-            ShadowProofAnchor {
-                number: 10,
-                hash: B256::repeat_byte(0x43),
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn exact_anchor_rejects_number_before_checkpoint() {
-        let result = resolve_exact_anchor(
-            &mocked_l1_provider(),
-            10,
-            B256::repeat_byte(0x42),
-            ShadowProofAnchor {
-                number: 9,
-                hash: B256::repeat_byte(0x41),
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
+            // A valid retry must fetch the range again, not reuse rejected headers.
+            proof_anchor.hash = anchor_hash;
+            push_headers(&asserter, &chain);
+            let anchor = resolve_exact_anchor(&ancestry, 10, base_hash, proof_anchor)
+                .await
+                .unwrap();
+            assert_eq!(anchor.block_number(10), 12);
+            assert_eq!(anchor.block_hash(), anchor_hash);
+            assert!(asserter.read_q().is_empty());
+        }
     }
 
     #[test]
