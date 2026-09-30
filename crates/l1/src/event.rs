@@ -45,7 +45,7 @@ pub fn encryption_key_address(x: B256, y_parity: u8) -> eyre::Result<Address> {
     compressed[1..].copy_from_slice(x.as_slice());
     let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&compressed)
         .map_err(|err| eyre::eyre!("invalid compressed encryption public key: {err}"))?;
-    Ok(alloy_signer::utils::public_key_to_address(&verifying_key))
+    Ok(Address::from_public_key(&verifying_key))
 }
 
 /// A decoded `LeaderUpdated` portal event.

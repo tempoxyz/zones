@@ -19,45 +19,32 @@ use tempo_chainspec::{
     spec::{DEV, TempoHardforks, chainspec_from_chain_id},
 };
 use tempo_primitives::TempoHeader;
-pub use zone_hardfork::ZoneHardfork;
 use zone_primitives::constants::{ZoneChainIdError, decode_l1_chain_id, decode_zone_chain_id};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 
 /// Chain specification for a Tempo Zone.
 ///
-/// Zone, Tempo, and Ethereum activations all live in the underlying canonical hardfork schedule;
-/// the typed query traits keep the protocol axes independently addressable.
+/// Zones use the underlying Tempo and Ethereum hardfork schedule, inheriting missing
+/// activations when their parent Tempo chain is known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneChainSpec {
-    /// Underlying Tempo chain specification, extended with Zone hardfork activations.
+    /// Underlying Tempo chain specification.
     pub inner: Arc<TempoChainSpec>,
-}
-
-/// Typed queries for Zone-owned hardfork activations.
-pub trait ZoneHardforks: TempoHardforks {
-    /// Returns the activation condition for a Zone-owned hardfork.
-    fn zone_fork_activation(&self, fork: ZoneHardfork) -> ForkCondition;
-
-    /// Returns the Zone-owned hardfork active at `timestamp`.
-    fn zone_hardfork_at(&self, timestamp: u64) -> ZoneHardfork {
-        ZoneHardfork::VARIANTS
-            .iter()
-            .rev()
-            .copied()
-            .find(|&fork| {
-                self.zone_fork_activation(fork)
-                    .active_at_timestamp(timestamp)
-            })
-            .unwrap_or(ZoneHardfork::Z0)
-    }
 }
 
 impl ZoneChainSpec {
     /// Converts a genesis configuration into a Zone chain specification.
+    ///
+    /// Known public and local development chains inherit their parent schedule. Custom chains
+    /// use only the supplied genesis, so dependency updates cannot activate omitted forks.
     pub fn from_genesis(genesis: Genesis) -> Result<Self, ZoneChainSpecError> {
         let parent_chain_id = decode_l1_chain_id(genesis.config.chain_id)?;
-        let parent = tempo_chain_spec_for_l1(parent_chain_id)
-            .ok_or(ZoneChainSpecError::UnsupportedParent(parent_chain_id))?;
-        Self::from_genesis_with_l1(genesis, parent.as_ref())
+        if let Some(parent) = tempo_chain_spec_for_l1(parent_chain_id) {
+            return Self::from_genesis_with_l1(genesis, parent.as_ref());
+        }
+        Ok(Self::from_explicit_genesis(genesis))
     }
 
     /// Converts a genesis configuration using an already-resolved L1 chain specification.
@@ -69,12 +56,7 @@ impl ZoneChainSpec {
     ) -> Result<Self, ZoneChainSpecError> {
         decode_l1_chain_id(genesis.config.chain_id)?;
         inherit_parent_fork_activations(&mut genesis, l1)?;
-        let mut zone = TempoChainSpec::from_genesis(genesis);
-        insert_zone_fork_activations(&mut zone);
-
-        Ok(Self {
-            inner: Arc::new(zone),
-        })
+        Ok(Self::from_explicit_genesis(genesis))
     }
 
     /// Zone identifier encoded in the genesis chain ID.
@@ -83,35 +65,13 @@ impl ZoneChainSpec {
             .expect("ZoneChainSpec validates its chain ID during construction")
             .1
     }
-}
 
-fn insert_zone_fork_activations(spec: &mut TempoChainSpec) {
-    let z1_time = spec
-        .genesis()
-        .config
-        .extra_fields
-        .get("z1Time")
-        .and_then(parse_activation_timestamp);
-
-    spec.inner
-        .hardforks
-        .insert(ZoneHardfork::Z0, ForkCondition::Timestamp(0));
-    if let Some(timestamp) = z1_time {
-        spec.inner
-            .hardforks
-            .insert(ZoneHardfork::Z1, ForkCondition::Timestamp(timestamp));
+    fn from_explicit_genesis(genesis: Genesis) -> Self {
+        let zone = TempoChainSpec::from_genesis(genesis);
+        Self {
+            inner: Arc::new(zone),
+        }
     }
-}
-
-fn parse_activation_timestamp(value: &serde_json::Value) -> Option<u64> {
-    value.as_u64().or_else(|| {
-        value.as_str().and_then(|value| {
-            value.strip_prefix("0x").map_or_else(
-                || value.parse().ok(),
-                |hex| u64::from_str_radix(hex, 16).ok(),
-            )
-        })
-    })
 }
 
 /// Fills missing fork activation fields in the Zone genesis from its parent.
@@ -230,12 +190,6 @@ impl TempoHardforks for ZoneChainSpec {
     }
 }
 
-impl ZoneHardforks for ZoneChainSpec {
-    fn zone_fork_activation(&self, fork: ZoneHardfork) -> ForkCondition {
-        self.fork(fork)
-    }
-}
-
 impl TempoConsensusSpec for ZoneChainSpec {
     fn shared_gas_limit_at(&self, _timestamp: u64, _gas_limit: u64) -> u64 {
         0
@@ -280,9 +234,6 @@ pub enum ZoneChainSpecError {
     /// The zone chain ID is not a valid encoding of its parent and zone IDs.
     #[error(transparent)]
     InvalidChainId(#[from] ZoneChainIdError),
-    /// The parent Tempo hardfork schedule is unknown.
-    #[error("unsupported parent Tempo chain ID {0}")]
-    UnsupportedParent(u64),
     /// The inherited parent fork activations could not be applied to the Zone genesis.
     #[error("failed to compose Zone genesis config: {0}")]
     InvalidGenesisConfig(#[from] serde_json::Error),
@@ -290,16 +241,12 @@ pub enum ZoneChainSpecError {
 
 /// Returns the Tempo chain specification whose hardfork schedule a parent uses.
 ///
-/// Tempo Anvil uses chain ID 31337 and the Tempo DEV schedule. Additional
-/// dev-schedule chain IDs can be listed in `ZONE_L1_DEV_CHAIN_IDS`.
+/// Local development chains 1337 and 31337 use the Tempo DEV schedule. Custom chains
+/// have no implicit parent schedule; `ZONE_L1_DEV_CHAIN_IDS` is no longer used.
 pub fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
         1_337 | 31_337 => Some(DEV.clone()),
-        _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
-            .ok()?
-            .split(',')
-            .any(|id| id.trim().parse() == Ok(chain_id))
-            .then(|| DEV.clone()),
+        _ => None,
     })
 }
 
@@ -325,7 +272,6 @@ mod tests {
             zone.chain().id(),
             zone_chain_id(DEV.chain().id(), 1).unwrap()
         );
-        assert_eq!(zone.fork(ZoneHardfork::Z0), ForkCondition::Timestamp(0));
         for &hardfork in TempoHardfork::VARIANTS {
             assert_eq!(
                 zone.tempo_fork_activation(hardfork),
@@ -335,33 +281,29 @@ mod tests {
     }
 
     #[test]
-    fn zone_schedule_defaults_to_z0() {
+    fn hardfork_schedule_matches_tempo() {
         let zone = dev_zone_spec(4);
-
-        assert_eq!(
-            zone.zone_fork_activation(ZoneHardfork::Z0),
-            ForkCondition::Timestamp(0)
-        );
-        assert_eq!(
-            zone.zone_fork_activation(ZoneHardfork::Z1),
-            ForkCondition::Never
-        );
-        assert_eq!(zone.zone_hardfork_at(u64::MAX), ZoneHardfork::Z0);
+        let zone_forks: Vec<_> = zone
+            .forks_iter()
+            .map(|(fork, condition)| (fork.name(), condition))
+            .collect();
+        let tempo_forks: Vec<_> = DEV
+            .forks_iter()
+            .map(|(fork, condition)| (fork.name(), condition))
+            .collect();
+        assert_eq!(zone_forks, tempo_forks);
+        assert_eq!(zone.latest_fork_id(), DEV.latest_fork_id());
     }
 
     #[test]
-    fn parses_z1_timestamp_and_activates_at_boundary() {
+    fn tempo_hardfork_activates_at_boundary() {
         let mut genesis = DEV.genesis().clone();
         genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 5).unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("z1Time".into(), 100)
-            .unwrap();
+        test_utils::set_tempo_fork(&mut genesis, TempoHardfork::T13, 100);
         let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
 
-        assert_eq!(zone.zone_hardfork_at(99), ZoneHardfork::Z0);
-        assert_eq!(zone.zone_hardfork_at(100), ZoneHardfork::Z1);
+        assert_eq!(zone.tempo_hardfork_at(99), TempoHardfork::T12);
+        assert_eq!(zone.tempo_hardfork_at(100), TempoHardfork::T13);
     }
 
     #[test]
@@ -424,7 +366,7 @@ mod tests {
         zone_genesis
             .config
             .extra_fields
-            .insert_value("zoneForkTime".to_string(), 789)
+            .insert_value("t11Time".to_string(), 789)
             .unwrap();
         let zone = ZoneChainSpec::from_genesis_with_l1(zone_genesis, &l1).unwrap();
 
@@ -433,13 +375,8 @@ mod tests {
             ForkCondition::Timestamp(123)
         );
         assert_eq!(
-            zone.genesis()
-                .config
-                .extra_fields
-                .get_deserialized::<u64>("zoneForkTime")
-                .unwrap()
-                .unwrap(),
-            789
+            zone.tempo_fork_activation(TempoHardfork::T11),
+            ForkCondition::Timestamp(789)
         );
     }
 
@@ -477,5 +414,79 @@ mod tests {
     #[test]
     fn parser_rejects_named_tempo_chain() {
         assert!(ZoneChainSpecParser::parse("dev").is_err());
+    }
+
+    #[test]
+    fn custom_genesis_preserves_historical_schedule() {
+        let genesis = historical_custom_genesis();
+        let expected = TempoChainSpec::from_genesis(genesis.clone());
+        let zone = ZoneChainSpec::from_genesis(genesis.clone()).unwrap();
+
+        assert_eq!(zone.genesis(), &genesis);
+        assert_eq!(zone.genesis_hash(), expected.genesis_hash());
+        assert_eq!(zone.tempo_hardfork_at(u64::MAX), TempoHardfork::T11);
+        assert_eq!(
+            zone.tempo_fork_activation(TempoHardfork::T14),
+            ForkCondition::Never
+        );
+        assert_eq!(zone.zone_id(), 11);
+        assert!(tempo_chain_spec_for_l1(31_318).is_none());
+    }
+
+    #[test]
+    fn custom_genesis_preserves_future_activation() {
+        let mut genesis = historical_custom_genesis();
+        genesis
+            .config
+            .extra_fields
+            .insert("t12Time".into(), serde_json::json!(1_000));
+        let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
+
+        assert_eq!(zone.tempo_hardfork_at(999), TempoHardfork::T11);
+        assert_eq!(zone.tempo_hardfork_at(1_000), TempoHardfork::T12);
+        assert_eq!(zone.tempo_hardfork_at(u64::MAX), TempoHardfork::T12);
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn parser_preserves_custom_genesis_schedule() {
+        let genesis = historical_custom_genesis();
+        let zone = ZoneChainSpecParser::parse(&serde_json::to_string(&genesis).unwrap()).unwrap();
+
+        assert_eq!(zone.genesis(), &genesis);
+        assert_eq!(zone.tempo_hardfork_at(u64::MAX), TempoHardfork::T11);
+    }
+
+    #[test]
+    fn custom_genesis_still_rejects_invalid_chain_ids() {
+        let mut genesis = historical_custom_genesis();
+        genesis.config.chain_id = 0;
+        assert!(matches!(
+            ZoneChainSpec::from_genesis(genesis),
+            Err(ZoneChainSpecError::InvalidChainId(_))
+        ));
+    }
+
+    fn historical_custom_genesis() -> Genesis {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(31_318, 11).unwrap();
+        // The existing devnet explicitly disabled T12/T13 before T14 was introduced.
+        for &fork in TempoHardfork::VARIANTS {
+            if fork > TempoHardfork::T13 {
+                genesis
+                    .config
+                    .extra_fields
+                    .remove(&format!("{}Time", fork.to_string().to_lowercase()));
+            }
+        }
+        genesis
+            .config
+            .extra_fields
+            .insert("t12Time".into(), serde_json::Value::Null);
+        genesis
+            .config
+            .extra_fields
+            .insert("t13Time".into(), serde_json::Value::Null);
+        genesis
     }
 }

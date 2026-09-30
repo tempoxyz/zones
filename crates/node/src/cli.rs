@@ -19,8 +19,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
-    ZoneShadowProverAddOnsConfig, dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
+    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
@@ -114,9 +114,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         let evm_config = cli_evm_config(spec.clone(), l1_rpc_url.clone());
         (
             evm_config,
-            TempoConsensus::new(spec)
-                .with_allow_equal_timestamps(true)
-                .with_allowed_future_block_time_millis(100),
+            TempoConsensus::new(spec).with_allow_equal_timestamps(true),
         )
     };
 
@@ -263,20 +261,33 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks || rpc_only,
-        "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
+        args.shadow_prover_pcrs.is_none() || (rpc_only && !should_sequence_blocks),
+        "--shadow-prover.pcrs requires an rpc_only follower; it is not a settlement policy"
     );
     let prover_addresses = ProverAddresses::new(args.prover_addresses.clone())?;
-    eyre::ensure!(
-        !args.enable_prover || !should_sequence_blocks || prover_addresses.is_some(),
-        "settlement proving requires --sequencer.prover-address for Nitro attestation"
-    );
+    let prover_config = if !args.enable_prover {
+        None
+    } else if should_sequence_blocks {
+        let addresses = prover_addresses.ok_or_else(|| {
+            eyre::eyre!(
+                "settlement proving requires --sequencer.prover-address for Nitro attestation"
+            )
+        })?;
+        Some(ZoneProverConfig::Settlement(addresses))
+    } else {
+        eyre::ensure!(
+            rpc_only,
+            "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
+        );
+        Some(ZoneProverConfig::Shadow {
+            prover_addresses,
+            proof_verifier: args.shadow_prover_pcrs.clone(),
+        })
+    };
 
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
-            #[cfg(feature = "test-utils")]
-            enable_proof_persistence: false,
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
             // scheduled leader, so it never submits an L1 settlement transaction.
@@ -291,16 +302,10 @@ async fn configure_sequencing(
                 max_batch_gas: args.withdrawal_max_batch_gas,
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
-            enable_prover: args.enable_prover,
-            prover_addresses: prover_addresses.clone(),
         });
-    } else if args.enable_prover {
-        node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
-            zone_id,
-            batch_anchor_config: BatchAnchorConfig::default(),
-            prover_runtime: prover_addresses
-                .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
-        });
+    }
+    if let Some(config) = prover_config {
+        node = node.with_prover(config);
     }
     if let Some(config) = p2p_config {
         node = node.with_p2p(config);
@@ -586,6 +591,16 @@ pub struct ZoneArgs {
         requires = "enable_prover"
     )]
     pub prover_addresses: Vec<HardforkProverAddress>,
+
+    /// Verify shadow Nitro proofs locally against independently approved PCR0, PCR1 and PCR2.
+    /// Works before T13; applies only to RPC followers and never enables settlement enforcement.
+    #[arg(
+        long = "shadow-prover.pcrs",
+        env = "SHADOW_PROVER_PCRS",
+        value_name = "PCR0,PCR1,PCR2",
+        requires = "prover_addresses"
+    )]
+    pub shadow_prover_pcrs: Option<zone_prover::ShadowProofVerifier>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -709,6 +724,46 @@ mod tests {
     }
 
     #[test]
+    fn shadow_verification_requires_remote_proving_and_complete_measurements() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x5ad0000000000000000000000000000000000002",
+        ];
+        let pcr = "11".repeat(48);
+        let pcrs = format!("{pcr},{pcr},{pcr}");
+        assert!(
+            ZoneArgsParser::try_parse_from(
+                common
+                    .into_iter()
+                    .chain(["--shadow-prover.pcrs", pcrs.as_str(),])
+            )
+            .is_err()
+        );
+        let args = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.enable-prover",
+            "--sequencer.prover-address",
+            "T13=localhost:5000",
+            "--shadow-prover.pcrs",
+            pcrs.as_str(),
+        ]))
+        .unwrap();
+        assert!(args.zone.shadow_prover_pcrs.is_some());
+        assert!(
+            ZoneArgsParser::try_parse_from(common.into_iter().chain([
+                "--sequencer.enable-prover",
+                "--sequencer.prover-address",
+                "T13=localhost:5000",
+                "--shadow-prover.pcrs",
+                "00,00,00",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn prover_addresses_accept_repeated_and_comma_separated_assignments() {
         let common = [
             "tempo-zone",
@@ -724,13 +779,18 @@ mod tests {
                 "T12=old:5000",
                 "--sequencer.prover-address",
                 "T13=new:5000",
+                "--sequencer.prover-address",
+                "T14=t14:5000",
             ],
-            vec!["--sequencer.prover-address", "T12=old:5000,T13=new:5000"],
+            vec![
+                "--sequencer.prover-address",
+                "T12=old:5000,T13=new:5000,T14=t14:5000",
+            ],
         ] {
             let args = ZoneArgsParser::try_parse_from(common.into_iter().chain(flags))
                 .unwrap()
                 .zone;
-            assert_eq!(args.prover_addresses.len(), 2);
+            assert_eq!(args.prover_addresses.len(), 3);
             assert!(
                 ProverAddresses::new(args.prover_addresses)
                     .unwrap()
@@ -890,9 +950,7 @@ mod tests {
 
         assert_eq!(
             signer.address(),
-            "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
-                .parse::<alloy_primitives::Address>()
-                .unwrap()
+            alloy_primitives::address!("0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
         );
     }
 
@@ -961,9 +1019,7 @@ mod tests {
 
         assert_eq!(
             signer.address(),
-            "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
-                .parse::<alloy_primitives::Address>()
-                .unwrap()
+            alloy_primitives::address!("0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
         );
     }
 

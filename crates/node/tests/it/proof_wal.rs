@@ -5,12 +5,12 @@ use alloy_provider::Provider as _;
 use std::time::Duration;
 use zone_sequencer::StoredBlockProof;
 
-use crate::utils::start_real_p2p_cluster_with_active_nodes;
+use crate::utils::start_real_p2p_cluster_with_settlement_proving;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn canonical_leader_block_has_durable_proof() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let mut cluster = start_real_p2p_cluster_with_active_nodes(120, 2).await?;
+    let mut cluster = start_real_p2p_cluster_with_settlement_proving(120, 2).await?;
     let leader = &cluster.nodes[0];
     let mut canonical = leader.subscribe_to_canonical_state();
     let mut follower_canonical = cluster.nodes[1].subscribe_to_canonical_state();

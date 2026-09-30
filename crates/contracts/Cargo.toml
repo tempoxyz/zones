@@ -21,7 +21,6 @@ alloy-contract = { workspace = true, optional = true }
 alloy-network = { workspace = true, optional = true }
 alloy-provider = { workspace = true, optional = true }
 alloy-rpc-types-eth = { workspace = true, optional = true }
-alloy-signer = { workspace = true, optional = true }
 alloy-transport = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
@@ -41,11 +40,11 @@ std = [
 ]
 serde = ["dep:serde", "alloy-primitives/serde"]
 rpc = [
+    "alloy-primitives/k256",
     "dep:alloy-contract",
     "dep:alloy-network",
     "dep:alloy-provider",
     "dep:alloy-rpc-types-eth",
-    "dep:alloy-signer",
     "dep:alloy-transport",
     "dep:k256",
     "dep:tokio",

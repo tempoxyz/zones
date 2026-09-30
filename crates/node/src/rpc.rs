@@ -283,7 +283,6 @@ where
                 .pending_block()
                 .map_err(|error| operator_rpc_error(internal(error)))?
                 .filter(|block| block.hash() == hash.block_hash)
-                .map(Arc::new)
         } else {
             None
         };
@@ -320,7 +319,7 @@ where
                             ExecutionWitnessRecord::new(statedb)
                                 .with_additional_state(spf_storage_targets(statedb))
                                 .into_execution_witness(
-                                    &statedb.database.database.0,
+                                    &statedb.database.database.0.0,
                                     eth_api.provider(),
                                     block_number,
                                     mode,
@@ -440,10 +439,9 @@ fn spf_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
     let mut history_storage = HashedStorage::default();
     for (number, hash) in state.block_hashes.iter() {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
-        history_storage.storage.insert(
-            keccak256(slot.to_be_bytes::<32>()),
-            U256::from_be_bytes(hash.0),
-        );
+        history_storage
+            .storage
+            .insert(keccak256(slot.to_be_bytes::<32>()), hash.into());
     }
     if !history_storage.storage.is_empty() {
         targets.extend(HashedPostState::from_hashed_storage(
@@ -1271,10 +1269,10 @@ where
                         .committed()
                         .blocks_iter()
                         .filter_map(move |block| {
-                            match api
-                                .converter()
-                                .convert_header(block.clone_sealed_header(), block.rlp_length())
-                            {
+                            match api.converter().convert_header(
+                                block.clone_sealed_header(),
+                                Some(block.rlp_length()),
+                            ) {
                                 Ok(header) => Some(header),
                                 Err(err) => {
                                     tracing::error!(
@@ -1628,7 +1626,7 @@ mod tests {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
         assert_eq!(
             storage.storage.get(&keccak256(slot.to_be_bytes::<32>())),
-            Some(&U256::from_be_bytes(hash.0))
+            Some(&hash.into())
         );
     }
 

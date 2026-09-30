@@ -7,7 +7,6 @@ use alloy::{
     primitives::{Address, address},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
-    sol_types::SolEvent,
 };
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
@@ -23,6 +22,7 @@ use zone_primitives::constants::zone_chain_id;
 
 use crate::{
     generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
+    genesis_forks::GenesisForkArgs,
     zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only},
 };
 
@@ -97,6 +97,9 @@ pub(crate) struct CreateZone {
     /// Genesis block gas limit for the zone L2.
     #[arg(long, default_value_t = 30_000_000)]
     gas_limit: u64,
+
+    #[command(flatten)]
+    forks: GenesisForkArgs,
 }
 
 /// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
@@ -237,10 +240,7 @@ impl CreateZone {
             .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
 
         let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ZoneFactory::ZoneCreated>()
             .ok_or_else(|| eyre!("no ZoneCreated event in receipt"))?;
 
         let zone_id = event.zoneId;
@@ -307,6 +307,7 @@ impl CreateZone {
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
+            forks: self.forks,
         };
         genesis_cmd.run().await?;
 
@@ -367,6 +368,7 @@ impl CreateZone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn factory_params_install_the_requested_quorum_atomically() {
@@ -391,10 +393,42 @@ mod tests {
             private_key: String::new(),
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
+            forks: GenesisForkArgs::default(),
         };
 
         let params = command.factory_params();
         assert_eq!(params.sequencers, sequencers);
         assert_eq!(params.threshold, 2);
+    }
+
+    #[test]
+    fn parses_genesis_fork_overrides() {
+        let command = CreateZone::try_parse_from([
+            "create-zone",
+            "--output",
+            "/tmp/zone",
+            "--admin",
+            "0x1000000000000000000000000000000000000001",
+            "--sequencer",
+            "0x1000000000000000000000000000000000000001",
+            "--private-key",
+            "unused",
+            "--t12-time",
+            "0",
+            "--t13-time",
+            "9223372036854775807",
+            "--t14-time",
+            "18446744073709551615",
+        ])
+        .unwrap();
+        let mut config = alloy::genesis::ChainConfig::default();
+        command.forks.apply_to(&mut config).unwrap();
+        assert_eq!(config.extra_fields["t4Time"], serde_json::json!(0));
+        assert_eq!(config.extra_fields["t12Time"], serde_json::json!(0));
+        assert_eq!(
+            config.extra_fields["t13Time"],
+            serde_json::json!(9223372036854775807u64)
+        );
+        assert_eq!(config.extra_fields["t14Time"], serde_json::json!(u64::MAX));
     }
 }

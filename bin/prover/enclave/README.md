@@ -117,18 +117,17 @@ endpoint to a different EIF during the transition. The node does not authenticat
 advertised release; L1 remains responsible for checking the attestation's PCRs.
 
 Configure the node with one exact `--sequencer.prover-address` assignment per L1 hardfork.
-For example, a T12/T13 transition uses:
+For example, a T13/T14 transition uses:
 
 ```sh
 --sequencer.enable-prover \
---sequencer.prover-address T12=prover-t12:5000 \
---sequencer.prover-address T13=prover-t13:5000
+--sequencer.prover-address T13=prover-t13:5000 \
+--sequencer.prover-address T14=prover-t14:5000
 ```
 
 The equivalent environment setting is
-`SEQUENCER_PROVER_ADDRESS=T12=prover-t12:5000,T13=prover-t13:5000`.
-Use the actual forks supported by the node binary; a future T14 assignment requires a binary
-whose Tempo dependency recognizes T14. Assign the same endpoint explicitly to adjacent forks
+`SEQUENCER_PROVER_ADDRESS=T13=prover-t13:5000,T14=prover-t14:5000`.
+Assign the same endpoint explicitly to adjacent forks
 when the accepted prover image is unchanged. At startup, sequencers with proving enabled and
 remote shadow provers require an assignment for the current L1 hardfork and every later Tempo
 fork in the node's chainspec activating within 72 hours of startup (inclusive). Overdue forks

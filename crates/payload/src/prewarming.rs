@@ -9,9 +9,9 @@ use alloy_primitives::B256;
 use reth_errors::ProviderError;
 use reth_evm::{ConfigureEvm, Database, execute::BlockBuilder};
 use reth_primitives_traits::SealedHeader;
-use reth_revm::{State, cancelled::ManualCancel, database::StateProviderDatabase};
-use reth_storage_api::StateProviderFactory;
-use reth_tasks::TaskExecutor;
+use reth_revm::{State, database::StateProviderDatabase};
+use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_tasks::{TaskExecutor, cancel::ManualCancel};
 use std::{error::Error, sync::Arc};
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_primitives::TempoHeader;
@@ -82,8 +82,11 @@ where
         &self,
         partial: PreparedL1Block,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let state =
-            StateProviderDatabase::new(self.provider.state_by_block_hash(self.parent_hash)?);
+        let state = StateProviderDatabase::new(
+            self.provider
+                .state_by_block_hash(self.parent_hash)?
+                .into_evm_state_provider(),
+        );
         let mut db = State::builder()
             .with_database(Box::new(state) as Box<dyn Database<Error = ProviderError>>)
             .with_bundle_update()

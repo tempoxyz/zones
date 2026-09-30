@@ -115,17 +115,17 @@ fn error_key(error: &Error) -> String {
     error.signature()
 }
 
-fn tempo_state_z1_surface() -> eyre::Result<AbiSurface> {
+fn tempo_state_t13_surface() -> eyre::Result<AbiSurface> {
     let abi = AbiProjection {
-        retired: tempo_zone_contracts::TempoStateZ0Retired::abi::contract(),
+        retired: tempo_zone_contracts::TempoStatePreT13Retired::abi::contract(),
     }
     .apply(tempo_zone_contracts::TempoState::abi::contract())?;
     Ok(AbiSurface::from_abi(&abi))
 }
 
-fn zone_inbox_z1_surface() -> eyre::Result<AbiSurface> {
+fn zone_inbox_t13_surface() -> eyre::Result<AbiSurface> {
     let abi = AbiProjection {
-        retired: tempo_zone_contracts::IZoneInboxZ0Retired::abi::contract(),
+        retired: tempo_zone_contracts::IZoneInboxPreT13Retired::abi::contract(),
     }
     .apply(tempo_zone_contracts::IZoneInbox::abi::contract())?;
     Ok(AbiSurface::from_abi(&abi))
@@ -144,7 +144,7 @@ const INTERFACES: &[InterfaceSpec] = &[
         name: "TempoState",
         artifact_name: "ITempoState",
         source: "IZone.sol",
-        rust: tempo_state_z1_surface,
+        rust: tempo_state_t13_surface,
         ignored_functions: &[
             "readTempoStorageSlot(address,bytes32) returns (bytes32) [view]",
             "readTempoStorageSlots(address,bytes32[]) returns (bytes32[]) [view]",
@@ -154,7 +154,7 @@ const INTERFACES: &[InterfaceSpec] = &[
         name: "IZoneInbox",
         artifact_name: "IZoneInbox",
         source: "IZone.sol",
-        rust: zone_inbox_z1_surface,
+        rust: zone_inbox_t13_surface,
         ignored_functions: &[],
     },
     interface!(IZoneOutbox, "IZoneOutbox"),

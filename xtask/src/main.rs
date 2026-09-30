@@ -38,6 +38,7 @@ mod deposit;
 mod forced_withdraw;
 mod generate_p2p_key;
 mod generate_zone_genesis;
+mod genesis_forks;
 mod install_reference_zone_factory;
 mod portal_access;
 mod portal_pause;

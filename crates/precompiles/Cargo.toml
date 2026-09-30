@@ -16,7 +16,6 @@ workspace = true
 exithatch.workspace = true
 tempo-zone-contracts = { workspace = true, default-features = false }
 zone-primitives = { workspace = true, default-features = false }
-zone-hardfork.workspace = true
 
 # tempo (workspace deps already have default-features = false)
 tempo-chainspec = { workspace = true, default-features = false }

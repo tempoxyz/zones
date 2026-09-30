@@ -20,23 +20,23 @@ crate::sol! {
         function tempoBlockHash() external view returns (bytes32);
         function tempoBlockNumber() external view returns (uint64);
 
-        /// Finalize one Tempo header. Active before Z1.
+        /// Finalize one Tempo header. Active before T13.
         function finalizeTempo(bytes calldata header) external;
 
-        /// Finalize consecutive Tempo headers. Active from Z1.
+        /// Finalize consecutive Tempo headers. Active from T13.
         function finalizeTempo(bytes[] calldata headers) external;
     }
 }
 
-/// TempoState entries retired by the Z1 hardfork.
-mod pre_z1_retired {
+/// TempoState entries retired by the T13 hardfork.
+mod pre_t13_retired {
     crate::sol! {
         #[sol(abi)]
-        contract TempoStateZ0Retired {
+        contract TempoStatePreT13Retired {
             function finalizeTempo(bytes header) external;
         }
     }
 }
 
 #[doc(hidden)]
-pub use pre_z1_retired::TempoStateZ0Retired;
+pub use pre_t13_retired::TempoStatePreT13Retired;

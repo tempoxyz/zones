@@ -1,4 +1,6 @@
 **/.git
+# Genesis is passed separately through the tempo-genesis named build context.
+.tempo-genesis/
 # Foundry's lockfile check requires Git metadata. Docker uses the already
 # checked-out submodule sources; contract CI validates their locked revisions.
 crates/contracts/foundry.lock

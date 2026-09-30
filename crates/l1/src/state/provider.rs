@@ -248,14 +248,13 @@ impl L1StateProvider {
 
     /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
     async fn fetch_slot(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
-        let key = U256::from_be_bytes(slot.0);
         let block_id = BlockId::number(block_number);
-        let value: U256 = self.provider.get_storage_at(address, key).block_id(block_id).await.map_err(|e| {
+        let value: U256 = self.provider.get_storage_at(address, slot.into()).block_id(block_id).await.map_err(|e| {
             warn!(%address, %slot, block_number, %e, "eth_getStorageAt RPC call failed");
             eyre::eyre!("eth_getStorageAt failed for address={address} slot={slot} block={block_number}: {e}")
         })?;
 
-        let result = B256::from(value.to_be_bytes());
+        let result = B256::from(value);
         debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
         Ok(result)
     }

@@ -100,6 +100,7 @@ vergen-git2.workspace = true
 
 [dev-dependencies]
 exithatch.workspace = true
+zone-chainspec = { workspace = true, features = ["test-utils"] }
 zone-node = { path = ".", features = ["test-utils"] }
 
 alloy = { workspace = true, features = [

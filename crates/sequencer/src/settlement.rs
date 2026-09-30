@@ -8,10 +8,10 @@
 //!
 //! # POC limitations
 //!
-//! Proof validation is **skipped** by the pre-T11 stub verifier. When a settlement prover is
+//! Proof validation is **skipped** by the pre-T13 stub verifier. When a settlement prover is
 //! configured, submissions normally carry its Nitro NSM attestation, but may use `NoProof` when
-//! proving fails, the verifier rejects a proof, or its simulation fails. The unconfigured
-//! compatibility path still submits an empty proof with `Nitro` mode for stub verifiers.
+//! proving fails, the verifier rejects a proof, or its simulation fails. Without a prover,
+//! submissions use `NoProof` with an empty proof.
 //!
 //! # Anchor modes
 //!
@@ -43,7 +43,6 @@ use crate::{
     prover_config::active_l1_hardfork,
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
-use alloy_contract::CallBuilder;
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -60,7 +59,6 @@ use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_contracts::precompiles::IZoneVerifier;
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 use zone_chainspec::ZoneChainSpec;
@@ -70,7 +68,6 @@ use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
 #[derive(Debug)]
 pub enum BatchSubmitError {
-    Cancelled,
     PortalAdvanced,
     PreparedAnchorInvalid(eyre::Report),
     /// The attestation was generated using a prover selected under a different L1 policy.
@@ -90,7 +87,6 @@ impl From<eyre::Report> for BatchSubmitError {
 impl fmt::Display for BatchSubmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cancelled => formatter.write_str("batch processing cancelled"),
             Self::PortalAdvanced => {
                 formatter.write_str("portal already committed the batch height")
             }
@@ -100,6 +96,15 @@ impl fmt::Display for BatchSubmitError {
                 "prover hardfork changed from {proved} to {current}; regenerate the proof"
             ),
             Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for BatchSubmitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PreparedAnchorInvalid(error) | Self::Other(error) => Some(error.as_ref()),
+            Self::PortalAdvanced | Self::ProverHardforkChanged { .. } => None,
         }
     }
 }
@@ -143,9 +148,10 @@ pub struct PortalZoneAnchor {
 
 /// Read the L1 portal tip and resolve it against the local canonical Zone chain.
 ///
-/// A zero portal hash denotes genesis. A non-zero hash must be present locally; silently treating
-/// a missing hash as genesis could replay already-submitted history and construct an invalid
-/// transition from state that the portal has superseded.
+/// A zero portal hash denotes genesis only when the portal's Zone height is also zero. A non-zero
+/// hash must be present locally at exactly the portal's Zone height; silently treating an inconsistent checkpoint or a missing hash as
+/// genesis could replay already-submitted history and construct an invalid transition from state
+/// that the portal has superseded.
 pub async fn resolve_portal_zone_anchor<P>(
     zone_provider: &P,
     portal_address: Address,
@@ -154,18 +160,31 @@ pub async fn resolve_portal_zone_anchor<P>(
 where
     P: BlockNumReader,
 {
-    let block_hash = ZonePortal::new(portal_address, l1_provider)
-        .blockHash()
-        .call()
+    let portal = ZonePortal::new(portal_address, l1_provider);
+    // Read both fields from the same L1 state so a concurrent submission cannot mix checkpoints.
+    let (block_hash, zone_height) = l1_provider
+        .multicall()
+        .add(portal.blockHash())
+        .add(portal.zoneHeight())
+        .aggregate()
         .await
-        .wrap_err("failed to read ZonePortal block hash")?;
+        .wrap_err("failed to read ZonePortal checkpoint")?;
 
     let block_number = if block_hash.is_zero() {
+        eyre::ensure!(
+            zone_height.is_zero(),
+            "inconsistent ZonePortal checkpoint: zero block hash at nonzero Zone height {zone_height}"
+        );
         0
     } else {
-        zone_provider.block_number(block_hash)?.ok_or_eyre(format!(
+        let block_number = zone_provider.block_number(block_hash)?.ok_or_eyre(format!(
             "portal block hash {block_hash} is not canonical in the Zone node"
-        ))?
+        ))?;
+        eyre::ensure!(
+            U256::from(block_number) == zone_height,
+            "inconsistent ZonePortal checkpoint: block hash {block_hash} is local Zone block {block_number}, but portal Zone height is {zone_height}"
+        );
+        block_number
     };
 
     Ok(PortalZoneAnchor {
@@ -345,40 +364,6 @@ impl BatchSubmitter {
     pub async fn prepare_batch(&self, batch: BatchData) -> Result<PreparedBatch> {
         let anchor = self.resolve_batch_anchor(batch.tempo_block_number).await?;
         Ok(PreparedBatch { batch, anchor })
-    }
-
-    /// Preflight the Nitro `proof` with an `eth_call` to the portal's verifier, made as T13
-    /// `submitBatch` would make it (`from` the portal, same arguments).
-    ///
-    /// Returns `None` before T13. The inner result contains the verdict or a
-    /// simulation failure; the outer error indicates preflight setup failed.
-    /// Portal advancement is handled separately by the submission reconciliation.
-    pub(crate) async fn simulate(
-        &self,
-        batch: &PreparedBatch,
-        proof: &ProofBundle,
-    ) -> Result<Option<Result<bool>>> {
-        if SettlementAbi::from_l1(&self.l1_provider, self.chain_spec.as_ref()).await?
-            != SettlementAbi::T13
-        {
-            return Ok(None);
-        }
-        let signer = self
-            .signer
-            .as_ref()
-            .map_or(Address::ZERO, PrivateKeySigner::address);
-        let metadata = self.read_submission_metadata(signer).await?;
-        let call = batch.verify_call(metadata.stable.zone_id, proof.proof.clone());
-        let verdict = CallBuilder::new_raw(&self.l1_provider, call.abi_encode().into())
-            .to(metadata.verifier)
-            .from(self.portal_address)
-            .call()
-            .await
-            .wrap_err("verifier preflight call failed")
-            .and_then(|output| {
-                IZoneVerifier::verifyCall::abi_decode_returns(&output).map_err(Into::into)
-            });
-        Ok(Some(verdict))
     }
 
     /// Submit a batch to the ZonePortal on Tempo L1.
@@ -628,11 +613,7 @@ impl BatchSubmitter {
         };
         let digest = domain.settlement_digest(&message);
         let signature = signer.sign_hash_sync(&digest)?;
-        let mut encoded = Vec::with_capacity(65);
-        encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
-        encoded.extend_from_slice(&signature.s().to_be_bytes::<32>());
-        encoded.push(signature.v() as u8 + 27);
-        Ok(encoded.into())
+        Ok(signature.as_bytes().into())
     }
 
     /// Read all mutable portal state needed for one submission at a single L1 block.
@@ -1072,8 +1053,8 @@ impl BatchSubmitter {
 
     /// Read the current `blockHash` from the ZonePortal on L1.
     ///
-    /// Used to resync the monitor's `prev_block_hash` after repeated submission
-    /// failures, ensuring subsequent batches use the portal's actual state.
+    /// Used to reject a prepared batch whose predecessor no longer matches the
+    /// portal before submitting it.
     pub async fn read_portal_block_hash(&self) -> Result<B256> {
         let hash = self.portal.blockHash().call().await?;
         Ok(hash)
@@ -1426,37 +1407,6 @@ impl PreparedBatch {
     pub const fn anchor_block_number(&self) -> u64 {
         self.anchor.block_number(self.batch.tempo_block_number)
     }
-
-    /// The Nitro `verify` call T13 `submitBatch` makes for this batch. Portal
-    /// advancement is reconciled separately before submission.
-    fn verify_call(&self, zone_id: u32, proof: Bytes) -> IZoneVerifier::verifyCall {
-        let batch = &self.batch;
-        IZoneVerifier::verifyCall {
-            zoneId: zone_id,
-            tempoBlockNumber: batch.tempo_block_number,
-            anchorBlockNumber: self.anchor_block_number(),
-            anchorBlockHash: self.anchor.block_hash(),
-            expectedWithdrawalBatchIndex: batch.withdrawal_batch_index,
-            nextZoneHeight: U256::from(batch.zone_height),
-            blockTransition: IZoneVerifier::BlockTransition {
-                prevBlockHash: batch.prev_block_hash,
-                nextBlockHash: batch.next_block_hash,
-            },
-            depositQueueTransition: IZoneVerifier::DepositQueueTransition {
-                prevProcessedHash: batch.prev_processed_deposit_hash,
-                nextProcessedHash: batch.next_processed_deposit_hash,
-                prevDepositNumber: batch.prev_deposit_number,
-                nextDepositNumber: batch.next_deposit_number,
-            },
-            tokenEnablementTransition: IZoneVerifier::TokenEnablementTransition {
-                prevProcessedTokenCount: batch.prev_processed_token_count,
-                nextProcessedTokenCount: batch.next_processed_token_count,
-            },
-            withdrawalQueueHash: batch.withdrawal_queue_hash,
-            verifierConfig: Bytes::from_static(VerifierMode::NitroV1.config()),
-            proof,
-        }
-    }
 }
 
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
@@ -1510,8 +1460,6 @@ fn settlement_proof(
 ) -> Result<(Bytes, Bytes)> {
     let config = Bytes::from_static(verifier_mode.config());
     let Some(bundle) = proof_bundle else {
-        // Without a prover, let the on-chain verifier decide whether an empty proof is valid.
-        // This preserves settlement against the stub verifier used by integration fixtures.
         return Ok((config, Bytes::new()));
     };
     eyre::ensure!(
@@ -2032,7 +1980,7 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
-    use alloy_consensus::Header as ConsensusHeader;
+    use alloy_consensus::{Header as ConsensusHeader, Sealable as _};
     use alloy_primitives::{B256, address};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
@@ -2042,6 +1990,7 @@ mod tests {
     use reth_provider::test_utils::MockEthProvider;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{Block, TempoHeader, TempoPrimitives};
+    use zone_chainspec::test_utils::set_tempo_fork;
 
     #[test]
     fn forced_withdrawal_reconstruction_preserves_public_tag_and_plain_fields() {
@@ -2089,11 +2038,7 @@ mod tests {
 
     fn chain_spec_with_t13(activation: u64) -> Arc<ZoneChainSpec> {
         let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), activation)
-            .unwrap();
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         Arc::new(ZoneChainSpec {
             inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
         })
@@ -2237,7 +2182,10 @@ mod tests {
         );
 
         let l1 = Asserter::new();
-        l1.push_success(&Bytes::copy_from_slice(portal_hash.as_slice()));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_word(portal_hash),
+            abi_word(U256::from(portal_height)),
+        ]));
 
         let anchor =
             resolve_portal_zone_anchor(&zone, Address::repeat_byte(0x11), &mock_l1(l1.clone()))
@@ -2252,7 +2200,10 @@ mod tests {
     #[tokio::test]
     async fn zero_portal_hash_resolves_to_genesis() {
         let l1 = Asserter::new();
-        l1.push_success(&Bytes::copy_from_slice(B256::ZERO.as_slice()));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_word(B256::ZERO),
+            abi_word(U256::ZERO),
+        ]));
 
         let anchor = resolve_portal_zone_anchor(
             &MockEthProvider::<TempoPrimitives>::new(),
@@ -2267,10 +2218,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_zero_portal_hash_at_nonzero_height() {
+        for zone_height in [U256::from(1), U256::from(15_552_000), U256::MAX] {
+            let l1 = Asserter::new();
+            l1.push_success(&abi_encode_multicall(vec![
+                abi_word(B256::ZERO),
+                abi_word(zone_height),
+            ]));
+
+            let error = resolve_portal_zone_anchor(
+                &MockEthProvider::<TempoPrimitives>::new(),
+                Address::repeat_byte(0x11),
+                &mock_l1(l1.clone()),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "inconsistent ZonePortal checkpoint: zero block hash at nonzero Zone height {zone_height}"
+                )
+            );
+            assert!(l1.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_portal_hash_at_mismatched_height() {
+        let portal_hash = B256::repeat_byte(0x42);
+        let zone = MockEthProvider::<TempoPrimitives>::new();
+        let mut header = TempoHeader::default();
+        header.inner.number = 42;
+        zone.add_block(
+            portal_hash,
+            Block {
+                header,
+                body: Default::default(),
+            },
+        );
+
+        for zone_height in [U256::ZERO, U256::from(41), U256::from(43), U256::MAX] {
+            let l1 = Asserter::new();
+            l1.push_success(&abi_encode_multicall(vec![
+                abi_word(portal_hash),
+                abi_word(zone_height),
+            ]));
+
+            let error =
+                resolve_portal_zone_anchor(&zone, Address::repeat_byte(0x11), &mock_l1(l1.clone()))
+                    .await
+                    .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "inconsistent ZonePortal checkpoint: block hash {portal_hash} is local Zone block 42, but portal Zone height is {zone_height}"
+                )
+            );
+            assert!(l1.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn rejects_noncanonical_portal_hash() {
         let portal_hash = B256::repeat_byte(0x42);
         let l1 = Asserter::new();
-        l1.push_success(&Bytes::copy_from_slice(portal_hash.as_slice()));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_word(portal_hash),
+            abi_word(U256::from(42)),
+        ]));
 
         let err = resolve_portal_zone_anchor(
             &MockEthProvider::<TempoPrimitives>::new(),
@@ -2303,7 +2320,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let hash = alloy_primitives::keccak256(alloy_rlp::encode(&header));
+        let hash = header.hash_slow();
         (
             TempoHeaderResponse {
                 inner: RpcHeader {
@@ -2755,6 +2772,10 @@ mod tests {
 
     #[test]
     fn settlement_proof_enforces_verifier_mode_shape() {
+        let (verifier_config, proof) = settlement_proof(VerifierMode::NoProof, None).unwrap();
+        assert_eq!(verifier_config.as_ref(), &[2]);
+        assert!(proof.is_empty());
+
         let empty_nitro = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
             proof: Bytes::new(),
@@ -2830,86 +2851,6 @@ mod tests {
         assert_eq!(second.stable.zone_id, 42);
         assert_eq!(second.stable.chain_id, 42431);
         assert!(asserter.read_q().is_empty());
-    }
-
-    #[test]
-    fn verify_call_matches_the_native_verifier_abi_and_portal_arguments() {
-        assert_eq!(
-            IZoneVerifier::verifyCall::SELECTOR,
-            [0xeb, 0xb2, 0xdd, 0xc9]
-        );
-        let mut prepared = test_prepared_batch(20, 100);
-        prepared.anchor = BatchAnchor::Ancestry {
-            block_number: 150,
-            block_hash: B256::repeat_byte(0xaa),
-            ancestry_headers: Vec::new(),
-        };
-        let call = prepared.verify_call(42, Bytes::from_static(&[0xbb]));
-        assert_eq!(
-            (call.zoneId, call.anchorBlockNumber, call.anchorBlockHash),
-            (42, 150, B256::repeat_byte(0xaa))
-        );
-        assert_eq!(call.expectedWithdrawalBatchIndex, 1);
-        assert_eq!(call.nextZoneHeight, U256::from(20));
-        assert_eq!(call.verifierConfig.as_ref(), VerifierMode::NitroV1.config());
-        assert_eq!(call.proof.as_ref(), [0xbb]);
-    }
-
-    #[tokio::test]
-    async fn verifier_preflight_returns_only_decoded_verdicts() {
-        let batch = test_prepared_batch(20, 100);
-        // (hardfork, portal withdrawal index, verifier response, expected)
-        for (fork, portal_index, response, expected) in [
-            ("T12", None, None, Some(None)),
-            ("T13", Some(0), Some(Ok(abi_word(true))), Some(Some(true))),
-            ("T13", Some(0), Some(Ok(abi_word(false))), Some(Some(false))),
-            ("T13", Some(0), Some(Ok(Bytes::new())), None),
-            (
-                "T13",
-                Some(0),
-                Some(Err("execution reverted: out of gas")),
-                None,
-            ),
-            ("T13", Some(1), Some(Ok(abi_word(true))), Some(Some(true))),
-        ] {
-            let asserter = Asserter::new();
-            asserter.push_success(&mock_fork_header(if fork == "T12" { 999 } else { 1_000 }));
-            if let Some(index) = portal_index {
-                asserter.push_success(&abi_encode_multicall(vec![
-                    abi_word(index),
-                    abi_word(1_u64),
-                    abi_word(U256::from(1)),
-                    abi_word(true),
-                    abi_word(Address::repeat_byte(0x44)),
-                    abi_word(42_u32),
-                    abi_word(U256::from(42431)),
-                ]));
-            }
-            match response {
-                Some(Ok(output)) => asserter.push_success(&output),
-                Some(Err(message)) => asserter.push_failure_msg(message),
-                None => {}
-            }
-            let submitter = BatchSubmitter::new(
-                Address::repeat_byte(0x22),
-                mock_l1(asserter.clone()),
-                chain_spec_with_t13(1_000),
-            );
-
-            let proof = ProofBundle {
-                verifier_config: Bytes::new(),
-                proof: Bytes::from_static(&[1]),
-            };
-            let result = submitter.simulate(&batch, &proof).await;
-            match expected {
-                Some(verdict) => assert_eq!(result.unwrap().transpose().unwrap(), verdict),
-                None => assert!(
-                    result.unwrap().unwrap().is_err(),
-                    "simulation failures must not become a verdict"
-                ),
-            }
-            assert!(asserter.read_q().is_empty());
-        }
     }
 
     #[test]
