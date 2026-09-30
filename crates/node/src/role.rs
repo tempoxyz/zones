@@ -733,17 +733,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
                 .as_ref()
                 .map(|generation| generation.role)
                 .unwrap_or(DesiredRole::Fenced);
-            metrics::counter!(
-                "zone_leadership_transitions_total",
-                "to" => active_role.name(),
-            )
-            .increment(1);
-            metrics::gauge!("zone_leadership_role").set(active_role.gauge());
-            if active_role.same_variant(desired)
-                && let Some(epoch) = desired.epoch()
-            {
-                metrics::gauge!("zone_leadership_epoch").set(epoch as f64);
-            }
+            record_active_role(active_role, desired);
         }
 
         let active_role = current
@@ -1115,12 +1105,29 @@ where
     ))
 }
 
+/// Records the active role after a role transition.
+fn record_active_role(active_role: DesiredRole, desired: DesiredRole) {
+    metrics::counter!(
+        "zone_leadership_transitions_total",
+        "to" => active_role.name(),
+    )
+    .increment(1);
+    metrics::gauge!("zone_leadership_role").set(active_role.gauge());
+    if active_role.same_variant(desired)
+        && let Some(epoch) = desired.epoch()
+    {
+        metrics::gauge!("zone_leadership_epoch").set(epoch as f64);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{future::pending, time::Duration};
 
     use alloy_consensus::Sealable as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use metrics_util::layers::{Layer, PrefixLayer};
     use reth_provider::test_utils::MockEthProvider;
     use tempo_primitives::{TempoHeader, TempoPrimitives};
     use tokio::sync::{mpsc, oneshot};
@@ -1129,8 +1136,9 @@ mod tests {
     use zone_sequencer::ZoneSequencerHandle;
 
     use super::{
-        EventSinks, TaskEnd, canonical_recovery_height, latest_sealed_header,
-        route_backfill_requests, route_backfill_responses, supervise_sequencer_tasks,
+        DesiredRole, EventSinks, TaskEnd, canonical_recovery_height, latest_sealed_header,
+        record_active_role, route_backfill_requests, route_backfill_responses,
+        supervise_sequencer_tasks,
     };
 
     struct DropSignal(Option<oneshot::Sender<()>>);
@@ -1355,5 +1363,25 @@ mod tests {
             .await
             .expect("event router did not stop")
             .expect("event router task panicked");
+    }
+
+    /// Metric names referenced by production alerts. Renaming any of these silently breaks
+    /// alerting, so the exported Prometheus names are pinned here.
+    #[test]
+    fn alerted_metric_names() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&PrefixLayer::new("reth").layer(recorder), || {
+            record_active_role(DesiredRole::Fenced, DesiredRole::Fenced);
+        });
+        let rendered = handle.render();
+
+        let name = "reth_zone_leadership_role";
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.split([' ', '{']).next() == Some(name)),
+            "missing `{name}` in:\n{rendered}"
+        );
     }
 }

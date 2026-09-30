@@ -241,6 +241,8 @@ itertools = "0.14.0"
 jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }
 libc = "0.2.186"
 metrics = "0.24.3"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+metrics-util = { version = "0.20.4", default-features = false }
 k256 = { version = "0.13.4", features = ["arithmetic", "ecdh"] }
 parking_lot = "0.12.4"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
