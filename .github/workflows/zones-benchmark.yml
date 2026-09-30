@@ -620,13 +620,6 @@ jobs:
             crates/contracts/benchmark-out
           key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.contracts-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
-      - name: Add file-backed mnemonic support to pinned Tempo xtask
-        run: |
-          set -euo pipefail
-          patch=contrib/bench/patches/tempo-xtask-mnemonic-file.patch
-          git -C "$TEMPO_ROOT" apply --check "$GITHUB_WORKSPACE/$patch"
-          git -C "$TEMPO_ROOT" apply "$GITHUB_WORKSPACE/$patch"
-
       - name: Prepare persistent build directories
         env:
           RUNNER_TOOL_CACHE_DIR: ${{ runner.tool_cache }}
