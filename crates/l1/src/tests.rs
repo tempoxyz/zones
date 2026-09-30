@@ -473,12 +473,7 @@ fn seal(header: TempoHeader) -> SealedHeader<TempoHeader> {
 
 fn header_response(header: TempoHeader) -> TempoHeaderResponse {
     TempoHeaderResponse {
-        inner: RpcHeader {
-            hash: header.hash_slow(),
-            inner: header,
-            total_difficulty: None,
-            size: None,
-        },
+        inner: RpcHeader::new(header),
         timestamp_millis: 0,
     }
 }

@@ -7,10 +7,10 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
+use alloy::primitives::{Address, B256, Bytes, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
-use alloy_network::ReceiptResponse;
+use alloy_network::{ReceiptResponse, TransactionBuilder as _};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
@@ -500,10 +500,10 @@ async fn test_contract_creation_transaction_is_rejected() -> eyre::Result<()> {
     )
     .await?;
 
-    let mut request = TransactionRequest::default().input(Bytes::from_static(&[0x00]).into());
-    request.to = Some(TxKind::Create);
-    request.gas = Some(CONTRACT_CREATION_TX_GAS);
-    request.gas_price = Some(TEMPO_T0_BASE_FEE as u128);
+    let request = TransactionRequest::default()
+        .with_deploy_code(Bytes::from_static(&[0x00]))
+        .gas_limit(CONTRACT_CREATION_TX_GAS)
+        .gas_price(TEMPO_T0_BASE_FEE as u128);
 
     let err = provider
         .send_transaction(request)

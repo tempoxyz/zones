@@ -44,7 +44,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         witness.public_inputs.parent_chain_id,
         witness.public_inputs.zone_id,
     )?;
-    let configured_chain_id = config.chain_spec().chain().id();
+    let configured_chain_id = config.chain_spec().chain_id();
     if configured_chain_id != expected_chain_id {
         return Err(Error::ChainIdMismatch {
             expected: configured_chain_id,
@@ -708,7 +708,7 @@ mod tests {
     fn test_config() -> SpfConfig {
         let tempo_chain_spec = tempo_chainspec::spec::MODERATO.clone();
         let mut genesis = tempo_chain_spec.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(tempo_chain_spec.chain().id(), 1).unwrap();
+        genesis.config.chain_id = zone_chain_id(tempo_chain_spec.chain_id(), 1).unwrap();
         let zone_chain_spec =
             Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
         SpfConfig::new(zone_chain_spec)
@@ -718,7 +718,7 @@ mod tests {
     fn derives_portal_from_the_chain_spec_zone_id() {
         let parent = tempo_chainspec::spec::MODERATO.clone();
         let mut genesis = parent.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(parent.chain().id(), 0x0102_0304).unwrap();
+        genesis.config.chain_id = zone_chain_id(parent.chain_id(), 0x0102_0304).unwrap();
         let spec = Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
         assert_eq!(
             SpfConfig::new(spec).portal(),
@@ -739,7 +739,7 @@ mod tests {
 
         BatchWitness {
             public_inputs: PublicInputs {
-                parent_chain_id: tempo_chainspec::spec::MODERATO.chain().id(),
+                parent_chain_id: tempo_chainspec::spec::MODERATO.chain_id(),
                 zone_id: 1,
                 tempo_block_number: 2,
                 anchor_block_number: 2,
@@ -986,8 +986,8 @@ mod tests {
         assert_eq!(
             prove_zone_batch(&config, witness),
             Err(Error::ChainIdMismatch {
-                expected: config.chain_spec().chain().id(),
-                actual: zone_chain_id(tempo_chainspec::spec::MODERATO.chain().id(), 2).unwrap(),
+                expected: config.chain_spec().chain_id(),
+                actual: zone_chain_id(tempo_chainspec::spec::MODERATO.chain_id(), 2).unwrap(),
             })
         );
     }
@@ -1265,7 +1265,7 @@ mod tests {
                 .unwrap();
         let env =
             next_block_evm_env(&config, tempo_database, &witness.parent_header, &block).unwrap();
-        assert_eq!(env.cfg_env.chain_id, config.chain_spec().chain().id());
+        assert_eq!(env.cfg_env.chain_id, config.chain_spec().chain_id());
         assert_eq!(env.block_env.inner.basefee, 0);
     }
 

@@ -1,7 +1,7 @@
 use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::{Header, Sealable as _};
 use alloy_eips::NumHash;
-use alloy_network::{EthereumWallet, ReceiptResponse};
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder, bindings::IMulticall3};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, TransactionRequest};
@@ -10,7 +10,7 @@ use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519PrivateKey};
 use eyre::WrapErr;
-use k256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
+use k256::SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
@@ -73,7 +73,7 @@ use zone_l1::{
 };
 use zone_node::{ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
-use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
+use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, ecies::compressed_x_and_parity};
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, zone_chain_id};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
@@ -142,7 +142,7 @@ pub(crate) fn local_dev_tempo_zone_account(
         .build()?;
     let dev_address = dev_signer.address();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(EthereumWallet::from(dev_signer))
+        .wallet(dev_signer)
         .connect_http(zone.http_url().clone())
         .erased();
     Ok((provider, dev_address))
@@ -1194,7 +1194,7 @@ impl ZoneTestNode {
         p2p_config: P2pConfig,
     ) -> eyre::Result<Self> {
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32])?;
-        let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+        let signer = alloy_signer_local::PrivateKeySigner::from(throwaway_key);
         Self::launch_with_genesis_and_withdrawal_batch_interval(
             l1_rpc_url,
             Address::ZERO,
@@ -1215,7 +1215,7 @@ impl ZoneTestNode {
     ) -> eyre::Result<Self> {
         // Generate a throwaway signer for tests that don't use encrypted deposits.
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
-        let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+        let signer = alloy_signer_local::PrivateKeySigner::from(throwaway_key);
         Self::launch_with_genesis_and_withdrawal_batch_interval(
             l1_ws_url,
             portal_address,
@@ -1430,14 +1430,11 @@ impl ZoneTestNode {
             // Direct queue injection bypasses the subscriber that normally observes and binds
             // SequencerEncryptionKeyUpdated, so mirror that binding before starting the engine.
             let fixture_key = L1Fixture::encryption_key();
-            let encoded = fixture_key.public_key().to_encoded_point(true);
+            let (x, y_parity) = compressed_x_and_parity(fixture_key.public_key().as_affine());
             deposit_decryption_keys.apply_rotation(&EncryptionKeyRotation {
-                x: B256::from_slice(encoded.x().expect("compressed fixture key has x")),
-                y_parity: encoded.as_bytes()[0],
-                pubkey: encryption_key_address(
-                    B256::from_slice(encoded.x().expect("compressed fixture key has x")),
-                    encoded.as_bytes()[0],
-                )?,
+                x,
+                y_parity,
+                pubkey: encryption_key_address(x, y_parity)?,
                 key_index: U256::ZERO,
                 activation_block: 0,
             })?;
@@ -2132,7 +2129,7 @@ impl L1TestNode {
         factory_address: Address,
         dex_address: Address,
     ) -> eyre::Result<Address> {
-        use alloy_primitives::{Bytes, TxKind};
+        use alloy_network::TransactionBuilder as _;
         use alloy_rpc_types_eth::TransactionRequest;
         use alloy_sol_types::SolValue;
 
@@ -2141,10 +2138,8 @@ impl L1TestNode {
         // Constructor: constructor(address _stablecoinDEX, address _zoneFactory)
         let mut deploy_bytes = forge_bytecode("SwapAndDepositRouter")?.to_vec();
         deploy_bytes.extend_from_slice(&(dex_address, factory_address).abi_encode());
-        let bytecode = Bytes::from(deploy_bytes);
 
-        let mut deploy_tx = TransactionRequest::default().input(bytecode.into());
-        deploy_tx.to = Some(TxKind::Create);
+        let deploy_tx = TransactionRequest::default().with_deploy_code(deploy_bytes);
         let receipt = l1_provider
             .send_transaction(deploy_tx)
             .await?
@@ -2431,11 +2426,10 @@ impl L1TestNode {
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<()> {
         // Sign with the encryption key (not the sequencer's Ethereum key)
-        let enc_key_bytes = B256::from_slice(&encryption_key.to_bytes());
-        let pop_signer = alloy_signer_local::PrivateKeySigner::from_bytes(&enc_key_bytes)?;
+        let pop_signer = alloy_signer_local::PrivateKeySigner::from(encryption_key);
 
         let sequencer_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(sequencer_signer))
+            .wallet(sequencer_signer)
             .connect_http(self.http_url.clone());
         zone_sequencer::register_encryption_key(&sequencer_provider, portal_address, &pop_signer)
             .await?;
@@ -2494,7 +2488,7 @@ impl L1TestNode {
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(self.dev_signer()))
+            .wallet(self.dev_signer())
             .connect_http(self.http_url.clone());
         let receipt = ITIP20::new(token, &provider)
             .transfer(to, U256::from(amount))
@@ -3636,7 +3630,7 @@ pub(crate) async fn start_local_zone_with_fixture_and_withdrawal_batch_interval(
     genesis: Genesis,
 ) -> eyre::Result<(ZoneTestNode, L1Fixture)> {
     let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32])?;
-    let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+    let signer = alloy_signer_local::PrivateKeySigner::from(throwaway_key);
     let zone = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
         DUMMY_L1_URL.to_string(),
         Address::ZERO,
@@ -5000,9 +4994,8 @@ impl L1Fixture {
         let enabled_token_config = enabled_deposits_active_token_config();
         let max_tempo_gas_rate = B256::from(U256::from(1_000_000_000_000_000_000_u128));
         let encryption_key = Self::encryption_key();
-        let encoded_key = encryption_key.public_key().to_encoded_point(true);
-        let encryption_key_x = B256::from_slice(&encoded_key.as_bytes()[1..]);
-        let encryption_key_y_parity = encoded_key.as_bytes()[0];
+        let (encryption_key_x, encryption_key_y_parity) =
+            compressed_x_and_parity(encryption_key.public_key().as_affine());
         let encryption_entries_base = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS));
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
@@ -5440,11 +5433,9 @@ impl L1Fixture {
         amount: u128,
         memo: B256,
     ) -> Deposit {
-        use k256::{ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
+        use k256::{ProjectivePoint, Scalar};
         use sha2::{Digest, Sha256};
-        use zone_precompiles::ecies::{
-            build_plaintext, compressed_x_and_parity, encrypt_plaintext, hkdf_sha256,
-        };
+        use zone_precompiles::ecies::{build_plaintext, encrypt_plaintext, hkdf_info, hkdf_sha256};
 
         // Deterministic ephemeral key for reproducibility
         let eph_bytes: [u8; 32] = Sha256::digest(b"test-ephemeral-key-for-e2e").into();
@@ -5456,15 +5447,10 @@ impl L1Fixture {
         // ECDH: shared = eph_scalar * sequencer_pub
         let shared_proj = ProjectivePoint::from(*sequencer_pub) * eph_scalar;
         let shared_affine = k256::AffinePoint::from(shared_proj);
-        let ss_enc = shared_affine.to_encoded_point(true);
-        let shared_secret_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
+        let (shared_secret_x, _) = compressed_x_and_parity(&shared_affine);
 
         // HKDF-SHA256 key derivation (matching ecies.rs)
-        let mut info = Vec::with_capacity(104);
-        info.extend_from_slice(portal_address.as_slice());
-        info.extend_from_slice(&key_index.to_be_bytes::<32>());
-        info.extend_from_slice(&eph_pub_x.0);
-        info.extend_from_slice(sender.as_slice());
+        let info = hkdf_info(&portal_address, &key_index, &eph_pub_x, &sender);
         let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
         // Build and encrypt plaintext (deterministic zero nonce)

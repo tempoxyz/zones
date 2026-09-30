@@ -37,7 +37,7 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{
     TempoTxEnvelope,
-    transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
+    transaction::{Call, TempoTransaction},
 };
 use tempo_zone_contracts::{
     IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
@@ -82,11 +82,7 @@ fn signed_sponsored_raw_transaction(
     transaction.fee_payer_signature = Some(fee_payer.sign_hash_sync(&fee_payer_hash)?);
 
     let signature = signer.sign_hash_sync(&transaction.signature_hash())?;
-    let signed = AASigned::new_unhashed(
-        transaction,
-        TempoSignature::Primitive(PrimitiveSignature::Secp256k1(signature)),
-    );
-    let envelope: TempoTxEnvelope = signed.into();
+    let envelope: TempoTxEnvelope = transaction.into_signed(signature.into()).into();
 
     Ok(hex::encode_prefixed(envelope.encoded_2718()))
 }
@@ -1512,13 +1508,9 @@ async fn test_zone_get_zone_info_returns_all_enabled_tokens() -> eyre::Result<()
 }
 
 fn encryption_public_key(secret_key: &k256::SecretKey) -> (String, u8) {
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
-
-    let encoded = secret_key.public_key().to_encoded_point(true);
-    (
-        format!("{:#x}", B256::from_slice(encoded.x().unwrap())),
-        encoded.as_bytes()[0],
-    )
+    let (x, y_parity) =
+        zone_precompiles::ecies::compressed_x_and_parity(secret_key.public_key().as_affine());
+    (format!("{x:#x}"), y_parity)
 }
 
 /// The method returns the latest key on Tempo L1 without waiting for the Zone

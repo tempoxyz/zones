@@ -6,7 +6,7 @@ use std::time::Duration;
 use alloy_consensus::{BlockHeader, Transaction};
 use alloy_primitives::{Address, B256, Bytes, U256, address};
 use alloy_provider::Provider;
-use alloy_rpc_types_eth::{BlockId, Filter, TransactionRequest};
+use alloy_rpc_types_eth::{Filter, TransactionRequest};
 use alloy_sol_types::{SolCall, SolError, SolEvent};
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoHardforks};
 use tempo_contracts::precompiles::UnknownFunctionSelector;
@@ -292,7 +292,7 @@ async fn assert_unknown_selector(
                 .input(Bytes::from(calldata.clone()).into())
                 .into(),
         )
-        .block(BlockId::number(block))
+        .number(block)
         .await
         .expect_err("selector must be inactive");
     let revert = error

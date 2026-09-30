@@ -365,13 +365,12 @@ fn decode_user_transactions(
                 transaction_index,
             });
         }
-        let signer = transaction
-            .recover_signer()
-            .map_err(|_| Error::TransactionSignature {
+        decoded.push(transaction.try_into_recovered().map_err(|_| {
+            Error::TransactionSignature {
                 block_index,
                 transaction_index,
-            })?;
-        decoded.push(Recovered::new_unchecked(transaction, signer));
+            }
+        })?);
     }
     Ok(decoded)
 }

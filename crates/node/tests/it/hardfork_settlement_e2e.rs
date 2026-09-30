@@ -126,7 +126,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     .await;
     proxy.pause_upstream_to_client(true);
     let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(alloy_network::EthereumWallet::from(l1.dev_signer()))
+        .wallet(l1.dev_signer())
         .connect_http(l1.http_url().clone())
         .erased();
     let submitter = BatchSubmitter::with_signer_and_anchor_config(
@@ -560,7 +560,7 @@ async fn recovery_witness(
             anchor_block_hash: alloy_consensus::Sealable::hash_slow(&final_header),
             expected_withdrawal_batch_index: 3,
         },
-        parent_header: parent.header.as_ref().clone(),
+        parent_header: parent.header.inner.into_consensus(),
         zone_blocks: blocks,
         zone_state_witness: ZoneStateWitness {
             node_pool: zone_nodes.into_values().collect(),

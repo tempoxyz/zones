@@ -659,12 +659,7 @@ mod tests {
         let mut previous_deposit = B256::ZERO;
         for number in 1_u64..=2 {
             let header = tempo_alloy::rpc::TempoHeaderResponse {
-                inner: alloy_rpc_types_eth::Header {
-                    hash: l1_header.hash_slow(),
-                    inner: l1_header.clone(),
-                    total_difficulty: None,
-                    size: None,
-                },
+                inner: alloy_rpc_types_eth::Header::new(l1_header.clone()),
                 timestamp_millis: 0,
             };
             l1.push_success(&header);

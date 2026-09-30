@@ -88,15 +88,7 @@ mod tests {
     fn test_db(contracts: impl IntoIterator<Item = (Address, Bytes)>) -> TestDb {
         let mut db = CacheDB::new(EmptyDB::default());
         for (address, code) in contracts {
-            db.insert_account_info(
-                address,
-                AccountInfo {
-                    code_hash: alloy_primitives::keccak256(&code),
-                    code: Some(Bytecode::new_raw(code)),
-                    nonce: 1,
-                    ..Default::default()
-                },
-            );
+            db.insert_account_info(address, AccountInfo::from_bytecode(Bytecode::new_raw(code)));
         }
         db
     }

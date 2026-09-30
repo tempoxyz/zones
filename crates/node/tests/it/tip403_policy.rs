@@ -4,7 +4,7 @@
 //! finalized raw L1 storage via `L1StateCache` and rejects mutating calls. The cache is populated
 //! directly in tests (no L1 subscriber).
 
-use alloy::primitives::{TxKind, U256, address};
+use alloy::primitives::{U256, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
@@ -140,12 +140,10 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
     let alice_provider = ProviderBuilder::new()
         .wallet(alice_signer)
         .connect_http(zone.http_url().clone());
-    let request = TransactionRequest {
-        to: Some(TxKind::Call(alice)),
-        gas: Some(TIP20_TX_GAS),
-        gas_price: Some(TEMPO_T0_BASE_FEE as u128),
-        ..Default::default()
-    };
+    let request = TransactionRequest::default()
+        .to(alice)
+        .gas_limit(TIP20_TX_GAS)
+        .gas_price(TEMPO_T0_BASE_FEE as u128);
 
     let nonce_before = alice_provider.get_transaction_count(alice).await?;
     let error = alice_provider

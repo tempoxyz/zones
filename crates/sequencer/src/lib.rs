@@ -230,10 +230,9 @@ async fn connect_l1_provider(
     retry_connection_interval: Duration,
     signer: PrivateKeySigner,
 ) -> TransportResult<DynProvider<TempoNetwork>> {
-    let wallet = alloy_network::EthereumWallet::from(signer);
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .with_nonce_key_filler()
-        .wallet(wallet)
+        .wallet(signer)
         .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
         .await?
         .erased();

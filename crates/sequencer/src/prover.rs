@@ -1103,7 +1103,7 @@ async fn tempo_header(provider: &DynProvider<TempoNetwork>, number: u64) -> Resu
     provider
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await?
-        .map(|block| block.header.as_ref().clone())
+        .map(|block| block.header.inner.into_consensus())
         .ok_or_eyre(format!("Tempo block {number} not found"))
 }
 

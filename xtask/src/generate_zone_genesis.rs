@@ -137,10 +137,7 @@ impl GenerateZoneGenesis {
 
         evm.db_mut().insert_account_info(
             DEPLOYER,
-            AccountInfo {
-                balance: U256::from(1_000_000_000_000_000_000_000u128),
-                ..Default::default()
-            },
+            AccountInfo::from_balance(U256::from(1_000_000_000_000_000_000_000u128)),
         );
 
         // Initialize all precompiles and deploy standard contracts to match the

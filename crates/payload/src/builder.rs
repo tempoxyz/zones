@@ -217,7 +217,7 @@ where
             .build();
 
         let chain_spec = self.provider.chain_spec();
-        let chain_id = chain_spec.chain().id();
+        let chain_id = chain_spec.chain_id();
 
         let block_gas_limit = parent_header.gas_limit();
 
@@ -362,7 +362,7 @@ where
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
-            tx_count = sealed_block.body().transactions.len(),
+            tx_count = sealed_block.transaction_count(),
             block_size_bytes = execution_block_size_estimate,
             ?elapsed,
             "Built zone payload"

@@ -992,11 +992,11 @@ async fn zone_header(zone: &DynProvider<TempoNetwork>, number: u64) -> Result<Te
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await?
         .ok_or_else(|| eyre!("Zone block {number} not found"))?;
-    Ok(block.header.as_ref().clone())
+    Ok(block.header.inner.into_consensus())
 }
 
 fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
-    let header = block.header.as_ref().clone();
+    let header = block.header.inner.into_consensus();
     let block_hash = header.hash_slow();
     let rpc_transactions = match block.transactions {
         BlockTransactions::Full(transactions) => transactions,
@@ -1138,7 +1138,7 @@ async fn tempo_header(tempo: &DynProvider<TempoNetwork>, number: u64) -> Result<
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await?
         .ok_or_else(|| eyre!("Tempo block {number} not found"))?;
-    Ok(block.header.as_ref().clone())
+    Ok(block.header.inner.into_consensus())
 }
 
 fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {

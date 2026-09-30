@@ -99,13 +99,11 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
                     slot: U256::ZERO,
                 });
             }
-            for (slot, value) in &account.storage {
-                if value.is_changed() {
-                    return Err(ZoneDbError::L1Write {
-                        address: TIP403_REGISTRY_ADDRESS,
-                        slot: *slot,
-                    });
-                }
+            if let Some((&slot, _)) = account.changed_storage_slots().next() {
+                return Err(ZoneDbError::L1Write {
+                    address: TIP403_REGISTRY_ADDRESS,
+                    slot,
+                });
             }
             // A read-only overlay has identical original and present values, so it is not changed
             // above, but committing the touched account could still persist that L1 value locally.
