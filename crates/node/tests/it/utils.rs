@@ -4964,7 +4964,8 @@ impl L1Fixture {
         let encryption_key = Self::encryption_key();
         let (encryption_key_x, encryption_key_y_parity) =
             compressed_x_and_parity(encryption_key.public_key().as_affine());
-        let encryption_entries_base = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS));
+        let encryption_entries_base: U256 =
+            keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
         // address-level receive policies, so seed their absence as baseline raw L1 state.
@@ -4984,7 +4985,7 @@ impl L1Fixture {
                 portal_address,
                 sequencer_membership_slot,
                 block,
-                B256::from(U256::from(u8::from(PortalRole::Sequencer))),
+                B256::with_last_byte(u8::from(PortalRole::Sequencer)),
             );
             // Deposit queue hash slot (3) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
@@ -4997,13 +4998,13 @@ impl L1Fixture {
             );
             cache.set(
                 portal_address,
-                encryption_entries_base,
+                encryption_entries_base.into(),
                 block,
                 encryption_key_x,
             );
             cache.set(
                 portal_address,
-                B256::from(U256::from_be_bytes(encryption_entries_base.0) + U256::from(1)),
+                (encryption_entries_base + U256::ONE).into(),
                 block,
                 B256::with_last_byte(encryption_key_y_parity),
             );

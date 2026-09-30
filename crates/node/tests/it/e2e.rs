@@ -850,11 +850,7 @@ async fn test_large_deposit_batch() -> eyre::Result<()> {
 
     // Build 10 deposits to different recipients in one L1 block
     let recipients: Vec<Address> = (0..num_deposits)
-        .map(|i| {
-            let mut addr_bytes = [0u8; 20];
-            addr_bytes[19] = (i + 1) as u8;
-            Address::from(addr_bytes)
-        })
+        .map(|i| Address::with_last_byte((i + 1) as u8))
         .collect();
     let deposits: Vec<_> = recipients
         .iter()

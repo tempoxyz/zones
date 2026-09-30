@@ -1,7 +1,7 @@
 use alloy::{
     consensus::BlockHeader as _,
     network::primitives::ReceiptResponse,
-    primitives::{Address, B256, U256},
+    primitives::{Address, U256},
     providers::Provider,
     rpc::types::Filter,
     signers::local::PrivateKeySigner,
@@ -66,8 +66,8 @@ pub(crate) async fn find_zone_deployment_block<P: Provider<TempoNetwork>>(
 ) -> eyre::Result<u64> {
     let events = ZoneFactory::new(ZONE_FACTORY_ADDRESS, provider)
         .ZoneCreated_filter()
-        .topic1(B256::from(U256::from(zone_id)))
-        .topic2(portal.into_word())
+        .topic1(U256::from(zone_id))
+        .topic2(portal)
         .from_block(0)
         .to_block(snapshot_block)
         .chunked()

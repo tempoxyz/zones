@@ -3136,7 +3136,7 @@ mod tests {
     fn resolve_hash_mismatch_skipped() {
         let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
         let withdrawals = vec![w0];
-        let wrong_hash = B256::from([0xabu8; 32]);
+        let wrong_hash = B256::repeat_byte(0xab);
 
         let mut events = BTreeMap::new();
         events.insert(5, test_batch_event(wrong_hash));
@@ -3201,7 +3201,7 @@ mod tests {
     #[test]
     fn resolve_empty_withdrawals_vec_skipped() {
         let mut events = BTreeMap::new();
-        events.insert(5, test_batch_event(B256::from([0x11u8; 32])));
+        events.insert(5, test_batch_event(B256::repeat_byte(0x11)));
 
         let mut slot_withdrawals = BTreeMap::new();
         slot_withdrawals.insert(5, vec![]);
@@ -3230,7 +3230,7 @@ mod tests {
         let withdrawals = vec![w];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
         // head_slot_hash doesn't match any tail of the withdrawal list
-        let corrupted_hash = B256::from([0xdeu8; 32]);
+        let corrupted_hash = B256::repeat_byte(0xde);
 
         let mut events = BTreeMap::new();
         events.insert(5, test_batch_event(full_hash));

@@ -232,7 +232,7 @@ async fn spf_replays_migrated_policy_transaction_with_parent_forks() -> eyre::Re
     let (tempo_state_root, tempo_state_nodes) =
         tempo_state_with_transfer_policy(PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
     let built = build_single_transaction_block(&genesis, Some(tempo_state_root)).await?;
-    let legacy_policy_slot = U256::from(7).to_be_bytes::<32>();
+    let legacy_policy_slot = B256::with_last_byte(7);
     assert!(
         !built
             .generated_witness
@@ -418,9 +418,7 @@ fn spf_config(genesis: &Genesis) -> SpfConfig {
 }
 
 fn tempo_state_with_transfer_policy(token: Address, policy_id: u64) -> (B256, Vec<Bytes>) {
-    let policy_slot = token
-        .mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES)
-        .to_be_bytes::<32>();
+    let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
     let packed_policy = U256::from(policy_id) | (U256::ONE << u64::BITS);
     let genesis = Genesis {
         alloc: [(

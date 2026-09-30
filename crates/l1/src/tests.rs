@@ -685,8 +685,8 @@ fn assert_tempo_header_fixture_rejected(value: &str) {
 fn assert_tempo_header_rejected(input: &[u8]) {
     assert!(
         alloy_rlp::decode_exact::<TempoHeader>(input).is_err(),
-        "TempoHeader should reject malformed RLP input 0x{}",
-        const_hex::encode(input)
+        "TempoHeader should reject malformed RLP input {}",
+        const_hex::encode_prefixed(input)
     );
 }
 

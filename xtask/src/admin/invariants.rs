@@ -1628,7 +1628,7 @@ address = "node-c.example:9200"
         );
         let second = test_node_snapshot(
             "second",
-            with_manifest(test_sequencer_info(false, true), 1, 7, B256::from([1; 32])),
+            with_manifest(test_sequencer_info(false, true), 1, 7, B256::repeat_byte(1)),
         );
 
         let result = loaded_manifest_agreement_invariant(1, 7, &[first, second]);
