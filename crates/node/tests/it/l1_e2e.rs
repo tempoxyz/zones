@@ -6,8 +6,8 @@
 
 use crate::utils::{
     L1TestNode, PolicySeed, RouterCallbackArgs, RouterDepositArgs, STABLECOIN_DEX_ADDRESS,
-    WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode, poll_until,
-    seed_raw_tip403_policy, seed_raw_tip403_token_policy, spawn_sequencer,
+    WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode, fetch_submit_batch_call,
+    poll_until, seed_raw_tip403_policy, seed_raw_tip403_token_policy, spawn_sequencer,
     spawn_sequencer_with_config, start_real_p2p_cluster, start_real_p2p_cluster_with_active_nodes,
 };
 use alloy::{
@@ -22,7 +22,7 @@ use std::{collections::HashMap, time::Duration};
 use tempo_precompiles::{PATH_USD_ADDRESS, zone_factory::portal};
 use tempo_zone_contracts::{
     IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
-    ZonePortal, ZonePortal::Role as PortalRole, submitBatchCall,
+    ZonePortal, ZonePortal::Role as PortalRole,
 };
 use zone_node::dev::{ProvisionConfig, provision_zone};
 
@@ -309,7 +309,7 @@ async fn test_two_online_sequencers_submit_two_signature_certificate() -> eyre::
     let submitted_height = u64::try_from(submitted_height)
         .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
 
-    let call = fetch_submit_batch_call(&cluster.l1, tx_hash).await?;
+    let (call, _) = fetch_submit_batch_call(&cluster.l1, tx_hash).await?;
     eyre::ensure!(
         call.signatures.len() == 2,
         "expected exactly the 2-of-3 threshold signatures, got {}",
@@ -327,52 +327,6 @@ async fn test_two_online_sequencers_submit_two_signature_certificate() -> eyre::
     cluster.assert_same_block(submitted_height).await?;
 
     Ok(())
-}
-
-async fn fetch_submit_batch_call(l1: &L1TestNode, tx_hash: B256) -> eyre::Result<submitBatchCall> {
-    let response: serde_json::Value = reqwest::Client::new()
-        .post(l1.http_url().clone())
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_getTransactionByHash",
-            "params": [format!("{tx_hash:#x}")],
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    if let Some(error) = response.get("error") {
-        eyre::bail!("eth_getTransactionByHash failed for {tx_hash}: {error}");
-    }
-
-    let tx = response
-        .get("result")
-        .filter(|value| !value.is_null())
-        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} not found"))?;
-    let input = tx
-        .get("input")
-        .and_then(|value| value.as_str())
-        .filter(|input| *input != "0x")
-        .or_else(|| {
-            tx.get("calls")
-                .and_then(|value| value.as_array())
-                .and_then(|calls| {
-                    calls
-                        .iter()
-                        .filter_map(|call| call.get("input").and_then(|value| value.as_str()))
-                        .find(|input| *input != "0x")
-                })
-        })
-        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} has no calldata input"))?;
-    let calldata = const_hex::decode(input.strip_prefix("0x").unwrap_or(input)).map_err(|err| {
-        eyre::eyre!("failed to hex-decode submitBatch calldata for {tx_hash}: {err}")
-    })?;
-
-    submitBatchCall::abi_decode(&calldata)
-        .map_err(|err| eyre::eyre!("failed to decode submitBatch calldata: {err}"))
 }
 
 /// A follower signs only after it can independently reconstruct the leader's batch statement.

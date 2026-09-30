@@ -63,6 +63,7 @@ use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{
     ZONE_OUTBOX_ADDRESS,
     ZonePortal::{self, Role as PortalRole},
+    submitBatchCall,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
@@ -3560,6 +3561,30 @@ impl ZoneAccount {
         self.l2_outbox_approved_tokens.insert(token);
         Ok(())
     }
+}
+
+pub(crate) async fn fetch_submit_batch_call(
+    l1: &L1TestNode,
+    tx_hash: B256,
+) -> eyre::Result<(submitBatchCall, u64)> {
+    let tx = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_http(l1.http_url().clone())
+        .get_transaction_by_hash(tx_hash)
+        .await?
+        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} not found"))?;
+    let input = tx
+        .inner
+        .calls()
+        .map(|(_, input)| input)
+        .find(|input| !input.is_empty())
+        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} has no calldata input"))?;
+    let call = submitBatchCall::abi_decode(input)
+        .map_err(|err| eyre::eyre!("failed to decode submitBatch calldata: {err}"))?;
+    let block_number = tx
+        .block_number
+        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} is missing blockNumber"))?;
+
+    Ok((call, block_number))
 }
 
 /// Spawn the zone sequencer background tasks (batch submitter + withdrawal processor).

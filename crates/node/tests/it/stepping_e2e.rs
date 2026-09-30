@@ -6,14 +6,14 @@
 //! ancestry path instead of the simpler direct-mode case.
 
 use crate::utils::{
-    L1TestNode, ZoneTestNode, poll_until, spawn_sequencer, spawn_sequencer_with_config,
+    L1TestNode, ZoneTestNode, fetch_submit_batch_call, poll_until, spawn_sequencer,
+    spawn_sequencer_with_config,
 };
 use alloy::providers::Provider;
 use alloy_rpc_types_eth::BlockId;
-use alloy_sol_types::SolCall;
 use std::time::Duration;
 use tempo_zone_contracts::{
-    IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_OUTBOX_ADDRESS, ZonePortal, submitBatchCall,
+    IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use zone_sequencer::BatchAnchorConfig;
 
@@ -40,65 +40,6 @@ const CURRENT_TIP_BATCH_INTERVAL: u64 = 8;
 const STEPPING_TIMEOUT: Duration = Duration::from_secs(300);
 const BATCH_TIMEOUT: Duration = Duration::from_secs(90);
 const SHORT_STEPPING_TIMEOUT: Duration = Duration::from_secs(60);
-
-async fn fetch_submit_batch_call(
-    l1: &L1TestNode,
-    tx_hash: alloy_primitives::B256,
-) -> eyre::Result<(submitBatchCall, u64)> {
-    let response: serde_json::Value = reqwest::Client::new()
-        .post(l1.http_url().clone())
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_getTransactionByHash",
-            "params": [format!("{tx_hash:#x}")],
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    if let Some(error) = response.get("error") {
-        eyre::bail!("eth_getTransactionByHash failed for {tx_hash}: {error}");
-    }
-
-    let tx = response
-        .get("result")
-        .filter(|value| !value.is_null())
-        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} not found"))?;
-
-    let input = tx
-        .get("input")
-        .and_then(|value| value.as_str())
-        .filter(|input| *input != "0x")
-        .or_else(|| {
-            tx.get("calls")
-                .and_then(|value| value.as_array())
-                .and_then(|calls| {
-                    calls
-                        .iter()
-                        .filter_map(|call| call.get("input").and_then(|value| value.as_str()))
-                        .find(|input| *input != "0x")
-                })
-        })
-        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} has no calldata input"))?;
-
-    let calldata = const_hex::decode(input.strip_prefix("0x").unwrap_or(input)).map_err(|err| {
-        eyre::eyre!("failed to hex-decode submitBatch calldata for {tx_hash}: {err}")
-    })?;
-    let call = submitBatchCall::abi_decode(&calldata)
-        .map_err(|err| eyre::eyre!("failed to decode submitBatch calldata: {err}"))?;
-
-    let block_number = tx
-        .get("blockNumber")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} is missing blockNumber"))?;
-    let block_number =
-        u64::from_str_radix(block_number.strip_prefix("0x").unwrap_or(block_number), 16)?;
-
-    Ok((call, block_number))
-}
 
 /// A transaction submitted after observing L1 head N can only execute in N+1 or later. Prove that
 /// the production submitter skips latest-state estimation and settles a batch anchored to N in
