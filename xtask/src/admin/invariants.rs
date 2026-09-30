@@ -36,6 +36,16 @@ impl InvariantResult {
     }
 }
 
+pub(crate) fn ensure_invariants(context: &str, invariants: &[InvariantResult]) -> eyre::Result<()> {
+    let failed = invariants
+        .iter()
+        .filter(|result| result.required_failed())
+        .map(|result| format!("{}: {}", result.name, result.detail))
+        .collect::<Vec<_>>();
+    eyre::ensure!(failed.is_empty(), "{context}: {}", failed.join("; "));
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct InvariantInputs<'a> {
     pub config: &'a EffectiveConfig,
