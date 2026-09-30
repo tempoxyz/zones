@@ -3,10 +3,7 @@ use alloy_evm::{
     precompiles::{DynPrecompile, Precompile as _, PrecompileInput},
 };
 use alloy_primitives::{Address, B256, U256};
-use k256::{
-    AffinePoint, ProjectivePoint, Scalar,
-    elliptic_curve::{ops::Reduce, sec1::ToEncodedPoint},
-};
+use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::ops::Reduce};
 use revm::{
     Context,
     context::{CfgEnv, TxEnv},
@@ -157,8 +154,7 @@ impl EncryptedDepositFixture {
         // ECDH (depositor side)
         let shared_proj = ProjectivePoint::from(seq_pub) * eph_scalar;
         let shared_affine = AffinePoint::from(shared_proj);
-        let ss_enc = shared_affine.to_encoded_point(true);
-        let shared_secret_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
+        let (shared_secret_x, _) = compressed_x_and_parity(&shared_affine);
 
         let portal = Address::repeat_byte(0xAA);
         let key_index = U256::from(42u64);

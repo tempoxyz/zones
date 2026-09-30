@@ -1512,13 +1512,9 @@ async fn test_zone_get_zone_info_returns_all_enabled_tokens() -> eyre::Result<()
 }
 
 fn encryption_public_key(secret_key: &k256::SecretKey) -> (String, u8) {
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
-
-    let encoded = secret_key.public_key().to_encoded_point(true);
-    (
-        format!("{:#x}", B256::from_slice(encoded.x().unwrap())),
-        encoded.as_bytes()[0],
-    )
+    let (x, y_parity) =
+        zone_precompiles::ecies::compressed_x_and_parity(secret_key.public_key().as_affine());
+    (format!("{x:#x}"), y_parity)
 }
 
 /// The method returns the latest key on Tempo L1 without waiting for the Zone

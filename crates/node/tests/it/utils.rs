@@ -10,7 +10,7 @@ use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519PrivateKey};
 use eyre::WrapErr;
-use k256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
+use k256::SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
@@ -73,7 +73,7 @@ use zone_l1::{
 };
 use zone_node::{ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
-use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
+use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, ecies::compressed_x_and_parity};
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, zone_chain_id};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
@@ -1430,14 +1430,11 @@ impl ZoneTestNode {
             // Direct queue injection bypasses the subscriber that normally observes and binds
             // SequencerEncryptionKeyUpdated, so mirror that binding before starting the engine.
             let fixture_key = L1Fixture::encryption_key();
-            let encoded = fixture_key.public_key().to_encoded_point(true);
+            let (x, y_parity) = compressed_x_and_parity(fixture_key.public_key().as_affine());
             deposit_decryption_keys.apply_rotation(&EncryptionKeyRotation {
-                x: B256::from_slice(encoded.x().expect("compressed fixture key has x")),
-                y_parity: encoded.as_bytes()[0],
-                pubkey: encryption_key_address(
-                    B256::from_slice(encoded.x().expect("compressed fixture key has x")),
-                    encoded.as_bytes()[0],
-                )?,
+                x,
+                y_parity,
+                pubkey: encryption_key_address(x, y_parity)?,
                 key_index: U256::ZERO,
                 activation_block: 0,
             })?;
@@ -5000,9 +4997,8 @@ impl L1Fixture {
         let enabled_token_config = enabled_deposits_active_token_config();
         let max_tempo_gas_rate = B256::from(U256::from(1_000_000_000_000_000_000_u128));
         let encryption_key = Self::encryption_key();
-        let encoded_key = encryption_key.public_key().to_encoded_point(true);
-        let encryption_key_x = B256::from_slice(&encoded_key.as_bytes()[1..]);
-        let encryption_key_y_parity = encoded_key.as_bytes()[0];
+        let (encryption_key_x, encryption_key_y_parity) =
+            compressed_x_and_parity(encryption_key.public_key().as_affine());
         let encryption_entries_base = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS));
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
@@ -5440,11 +5436,9 @@ impl L1Fixture {
         amount: u128,
         memo: B256,
     ) -> Deposit {
-        use k256::{ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
+        use k256::{ProjectivePoint, Scalar};
         use sha2::{Digest, Sha256};
-        use zone_precompiles::ecies::{
-            build_plaintext, compressed_x_and_parity, encrypt_plaintext, hkdf_sha256,
-        };
+        use zone_precompiles::ecies::{build_plaintext, encrypt_plaintext, hkdf_info, hkdf_sha256};
 
         // Deterministic ephemeral key for reproducibility
         let eph_bytes: [u8; 32] = Sha256::digest(b"test-ephemeral-key-for-e2e").into();
@@ -5456,15 +5450,10 @@ impl L1Fixture {
         // ECDH: shared = eph_scalar * sequencer_pub
         let shared_proj = ProjectivePoint::from(*sequencer_pub) * eph_scalar;
         let shared_affine = k256::AffinePoint::from(shared_proj);
-        let ss_enc = shared_affine.to_encoded_point(true);
-        let shared_secret_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
+        let (shared_secret_x, _) = compressed_x_and_parity(&shared_affine);
 
         // HKDF-SHA256 key derivation (matching ecies.rs)
-        let mut info = Vec::with_capacity(104);
-        info.extend_from_slice(portal_address.as_slice());
-        info.extend_from_slice(&key_index.to_be_bytes::<32>());
-        info.extend_from_slice(&eph_pub_x.0);
-        info.extend_from_slice(sender.as_slice());
+        let info = hkdf_info(&portal_address, &key_index, &eph_pub_x, &sender);
         let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
         // Build and encrypt plaintext (deterministic zero nonce)
