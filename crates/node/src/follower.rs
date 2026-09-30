@@ -13,7 +13,7 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
 use std::{
     collections::{BTreeMap, HashMap},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::dispatch::abi_decoder_config_for_spec;
@@ -644,6 +644,7 @@ where
         }
 
         // 4. All txns in the block execute properly
+        validate_block_timestamp(block.header().timestamp_millis(), SystemTime::now())?;
         let payload = ZonePayloadTypes::block_to_payload(block, None);
         let status = self.context.engine.new_payload(payload).await?;
         if !status.is_valid() {
@@ -1027,6 +1028,16 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
     })
 }
 
+/// Reject peer blocks too far ahead of the local clock before they reach `newPayload`.
+fn validate_block_timestamp(timestamp_millis: u64, now: SystemTime) -> eyre::Result<()> {
+    let now_millis = now.duration_since(UNIX_EPOCH)?.as_millis();
+    eyre::ensure!(
+        u128::from(timestamp_millis) <= now_millis + 100,
+        "block timestamp {timestamp_millis} exceeds local clock {now_millis} by more than 100 ms"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1079,18 +1090,15 @@ mod tests {
     #[test]
     fn rejects_advance_tempo_sent_to_wrong_contract() {
         use alloy_consensus::{Signed, TxLegacy};
-        use alloy_primitives::{Address, Bytes, U256};
-        use alloy_rlp::Encodable as _;
+        use alloy_primitives::{Address, U256};
         use alloy_sol_types::SolCall as _;
         use reth_primitives_traits::SealedBlock;
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
         };
 
-        let mut header_rlp = Vec::new();
-        TempoHeader::default().encode(&mut header_rlp);
         let calldata = zone_payload::abi::IZoneInbox::advanceTempoCall {
-            header: Bytes::from(header_rlp),
+            header: alloy_rlp::encode(TempoHeader::default()).into(),
             deposits: vec![],
             decryptions: vec![],
             enabledTokens: vec![],

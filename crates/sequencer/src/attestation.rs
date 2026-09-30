@@ -159,7 +159,7 @@ impl SignedSettlementAttestation {
         let signature = signer.sign_hash_sync(&domain.settlement_digest(&attestation))?;
         Ok(Self {
             attestation,
-            signature: Bytes::copy_from_slice(&signature.as_bytes()),
+            signature: signature.as_bytes().into(),
         })
     }
 
@@ -366,7 +366,7 @@ mod tests {
             SECP256K1_ORDER - signature.s(),
             !signature.v(),
         );
-        signed.signature = Bytes::copy_from_slice(&high_s_signature.as_bytes());
+        signed.signature = high_s_signature.as_bytes().into();
 
         assert!(signed.recover_signer(domain).is_err());
     }

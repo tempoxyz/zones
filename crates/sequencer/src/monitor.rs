@@ -1088,11 +1088,11 @@ mod tests {
     }
 
     fn abi_encode_b256(value: B256) -> Bytes {
-        Bytes::copy_from_slice(value.as_slice())
+        value.into()
     }
 
     fn abi_encode_u64(value: u64) -> Bytes {
-        Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>())
+        value.abi_encode().into()
     }
 
     fn abi_encode_multicall(values: Vec<Bytes>) -> Bytes {
@@ -1363,7 +1363,7 @@ mod tests {
         l1.push_success(&mock_l1_header(1_000));
         let proof = SettlementProof {
             bundle: ProofBundle {
-                verifier_config: NITRO_VERIFIER_CONFIG_V1.to_vec().into(),
+                verifier_config: NITRO_VERIFIER_CONFIG_V1.into(),
                 proof: vec![1].into(),
             },
             hardfork: TempoHardfork::T12,
@@ -1433,7 +1433,7 @@ mod tests {
     #[tokio::test]
     async fn refill_withdrawal_cache_does_not_resync_the_portal_anchor() {
         let l1 = Asserter::new();
-        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
+        let portal_hash = B256::with_last_byte(7);
         let zone = mock_zone_provider(portal_hash, 42, B256::repeat_byte(0x33));
 
         l1.push_success(&abi_encode_multicall(vec![
@@ -1475,7 +1475,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_hash_mismatch_invalidates_pipeline() {
         let l1 = Asserter::new();
-        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
+        let portal_hash = B256::with_last_byte(7);
         l1.push_success(&abi_encode_b256(portal_hash));
 
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());

@@ -990,12 +990,11 @@ mod tests {
         // RFC 4231 Test Case 2
         let key = b"Jefe";
         let data = b"what do ya want for nothing?";
-        let expected =
-            const_hex::decode("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
-                .unwrap();
+        let expected = alloy_primitives::hex!(
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
 
-        let result = hmac_sha256(key, data);
-        assert_eq!(result.as_slice(), expected.as_slice());
+        assert_eq!(hmac_sha256(key, data), expected);
     }
 
     #[test]

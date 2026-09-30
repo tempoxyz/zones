@@ -165,15 +165,7 @@ async fn tempo_signature_roundtrip_secp256k1_from_token_bytes() {
     let (fields, digest) = build_token_fields(1, 2, now, now + 600);
     let sig = signer.sign_hash(&digest).await.unwrap();
 
-    let mut sig_bytes = Vec::with_capacity(65);
-    sig_bytes.extend_from_slice(&sig.r().to_be_bytes::<32>());
-    sig_bytes.extend_from_slice(&sig.s().to_be_bytes::<32>());
-    sig_bytes.push(sig.v() as u8);
-    let blob = {
-        let mut blob = sig_bytes.clone();
-        blob.extend_from_slice(&fields);
-        blob
-    };
+    let blob = [sig.as_rsy().as_slice(), &fields].concat();
     let token = AuthorizationToken::parse(&blob).unwrap();
     let parsed = TempoSignature::from_bytes(&token.signature).unwrap();
 

@@ -1,4 +1,4 @@
-use alloy_primitives::{B256, Bytes, keccak256};
+use alloy_primitives::{B256, Bytes};
 use alloy_sol_types::{SolStruct as _, sol};
 use keccak_const::Keccak256;
 use serde::{Deserialize, Serialize};
@@ -233,7 +233,7 @@ pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &Batch
         prevProcessedTokenCount: output.token_enablement_transition.prevProcessedTokenCount,
         nextProcessedTokenCount: output.token_enablement_transition.nextProcessedTokenCount,
         withdrawalQueueHash: output.withdrawal_queue_hash,
-        verifierConfigHash: keccak256(NITRO_VERIFIER_CONFIG_V1),
+        verifierConfigHash: NITRO_VERIFIER_CONFIG_V1_HASH,
     };
     attestation.eip712_hash_struct()
 }
@@ -241,6 +241,7 @@ pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &Batch
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::keccak256;
     use zone_spf::{
         BatchOutput, BlockTransition, DepositQueueTransition, LastBatchCommitment,
         TokenEnablementTransition,
@@ -274,7 +275,10 @@ mod tests {
             NO_PROOF_FALLBACK_VERIFIER_HASH,
             keccak256(NO_PROOF_FALLBACK_VERIFIER)
         );
-        assert_ne!(NITRO_VERIFIER_CONFIG_V1_HASH, keccak256([]));
+        assert_ne!(
+            NITRO_VERIFIER_CONFIG_V1_HASH,
+            alloy_consensus::constants::KECCAK_EMPTY
+        );
     }
 
     #[test]

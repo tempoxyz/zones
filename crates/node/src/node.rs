@@ -107,9 +107,9 @@ use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle, ProverAddresses,
-    SettlementManager, SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits,
+    SettlementManager, SettlementProver, SettlementProverConfig, WithdrawalBatchLimits,
     ZoneSequencerConfig, attestation::AttestationDomain, create_proof_collector,
-    spawn_shadow_prover, spawn_zone_sequencer,
+    spawn_settlement_prover, spawn_shadow_prover, spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -188,9 +188,6 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
-    /// Exercise witness persistence without requiring a remote prover in integration fixtures.
-    #[cfg(feature = "test-utils")]
-    pub enable_proof_persistence: bool,
     /// Shared sequencer signer used for block production and encryption.
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
@@ -205,52 +202,44 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
-    /// Require SPF validation and a Nitro NSM attestation before settlement.
-    ///
-    /// Implies enable_proof_persistence.
-    pub enable_prover: bool,
-    /// Remote Nitro prover endpoints. Required when proof-gated settlement is enabled.
-    pub prover_addresses: Option<ProverAddresses>,
 }
 
-impl ZoneSequencerAddOnsConfig {
-    fn requires_proof_persistence(&self) -> bool {
-        let enabled = self.enable_prover;
-        #[cfg(feature = "test-utils")]
-        let enabled = enabled || self.enable_proof_persistence;
-        enabled
+/// How this node validates Zone batches with the SPF.
+#[derive(Debug, Clone)]
+pub enum ZoneProverConfig {
+    /// Require SPF validation and a Nitro NSM attestation from the prover assigned to the live
+    /// L1 hardfork before settlement. Requires a sequencer and implies proof persistence.
+    Settlement(ProverAddresses),
+    /// Observationally validate finalized L1 submissions. Requires an rpc_only P2P follower.
+    Shadow {
+        /// Remote provers routed by the live L1 hardfork. When absent, execute the SPF in
+        /// this process.
+        prover_addresses: Option<ProverAddresses>,
+        /// Independently approved enclave measurements for local, observational verification.
+        proof_verifier: Option<zone_prover::ShadowProofVerifier>,
+    },
+}
+
+impl ZoneProverConfig {
+    const fn is_shadow(&self) -> bool {
+        matches!(self, Self::Shadow { .. })
     }
-}
 
-/// Execution mode for the detached shadow prover.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProverRuntime {
-    /// Execute the SPF in this process.
-    InProcess,
-    /// Route witnesses to the endpoint assigned to the live L1 hardfork.
-    Remote(ProverAddresses),
-}
-
-impl ProverRuntime {
-    fn remote_addresses(&self) -> Option<&ProverAddresses> {
+    const fn prover_addresses(&self) -> Option<&ProverAddresses> {
         match self {
-            Self::InProcess => None,
-            Self::Remote(address) => Some(address),
+            Self::Settlement(addresses) => Some(addresses),
+            Self::Shadow {
+                prover_addresses, ..
+            } => prover_addresses.as_ref(),
         }
     }
-}
 
-/// Configuration for detached shadow proving that does not require sequencer keys.
-#[derive(Debug, Clone)]
-pub struct ZoneShadowProverAddOnsConfig {
-    /// Zone ID bound into SPF public inputs.
-    pub zone_id: u32,
-    /// EIP-2935 history settings used to recover recently finalized submissions.
-    pub batch_anchor_config: BatchAnchorConfig,
-    /// Where to execute the SPF.
-    pub prover_runtime: ProverRuntime,
-    /// Independently approved enclave measurements for local, observational verification.
-    pub proof_verifier: Option<zone_prover::ShadowProofVerifier>,
+    const fn proof_verifier(&self) -> Option<&zone_prover::ShadowProofVerifier> {
+        match self {
+            Self::Settlement(_) => None,
+            Self::Shadow { proof_verifier, .. } => proof_verifier.as_ref(),
+        }
+    }
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -292,8 +281,8 @@ pub struct ZoneNode {
     redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
-    /// Optional detached shadow prover config.
-    shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
+    /// Optional SPF validation config.
+    prover_config: Option<ZoneProverConfig>,
     /// Optional static Zone P2P networking config.
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
@@ -342,7 +331,7 @@ impl ZoneNode {
             withdrawal_reveal_encryptor: None,
             redacted_rpc_config: ZoneRedactedRpcConfig::default(),
             sequencer_config: None,
-            shadow_prover_config: None,
+            prover_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
         }
@@ -373,9 +362,9 @@ impl ZoneNode {
         self
     }
 
-    /// Enable detached shadow proving without configuring block production or settlement keys.
-    pub fn with_shadow_prover(mut self, config: ZoneShadowProverAddOnsConfig) -> Self {
-        self.shadow_prover_config = Some(config);
+    /// Enable SPF validation, either gating settlement or shadowing finalized submissions.
+    pub fn with_prover(mut self, config: ZoneProverConfig) -> Self {
+        self.prover_config = Some(config);
         self
     }
 
@@ -507,8 +496,8 @@ where
     redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Sequencer configuration.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
-    /// Detached shadow prover configuration.
-    shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
+    /// SPF validation configuration.
+    prover_config: Option<ZoneProverConfig>,
     /// Static Zone P2P networking configuration.
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
@@ -541,7 +530,7 @@ where
         portal_address: Address,
         redacted_rpc_config: ZoneRedactedRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
-        shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
+        prover_config: Option<ZoneProverConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
     ) -> Self {
@@ -563,7 +552,7 @@ where
             portal_address,
             redacted_rpc_config,
             sequencer_config,
-            shadow_prover_config,
+            prover_config,
             p2p_config,
             external_deposit_consumer,
         }
@@ -666,37 +655,19 @@ where
                     portal_zone_id,
                 )?;
             }
-            if let Some(config) = self.shadow_prover_config.as_ref() {
-                validate_configured_zone_id(
-                    "shadow prover configuration",
-                    config.zone_id,
-                    portal_zone_id,
-                )?;
-            }
             if let Some(config) = self.p2p_config.as_ref() {
                 validate_configured_zone_id("P2P configuration", config.zone_id(), portal_zone_id)?;
             }
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
         }
 
-        let effective_shadow_prover_config = self.shadow_prover_config.clone().or_else(|| {
-            self.sequencer_config
-                .as_ref()
-                .filter(|config| config.enable_prover)
-                .map(|config| ZoneShadowProverAddOnsConfig {
-                    zone_id: config.zone_id,
-                    batch_anchor_config: config.batch_anchor_config,
-                    prover_runtime: config
-                        .prover_addresses
-                        .clone()
-                        .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
-                    proof_verifier: None,
-                })
-        });
-        let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
         let mut finalized_batch_submission_sender = None;
         let mut finalized_batch_submissions = None;
-        if rpc_only && effective_shadow_prover_config.is_some() {
+        if self
+            .prover_config
+            .as_ref()
+            .is_some_and(ZoneProverConfig::is_shadow)
+        {
             let (sender, receiver) =
                 tokio::sync::mpsc::channel(zone_sequencer::SHADOW_PROVER_QUEUE_CAPACITY);
             finalized_batch_submission_sender = Some(sender);
@@ -806,11 +777,6 @@ where
                     self.sequencer_config
                         .as_ref()
                         .map(|config| config.batch_anchor_config)
-                        .or_else(|| {
-                            effective_shadow_prover_config
-                                .as_ref()
-                                .map(|config| config.batch_anchor_config)
-                        })
                         .unwrap_or_default(),
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.retry_connection_interval,
@@ -873,101 +839,74 @@ where
             })
             .await?;
 
-        let persist_before_canonicalization = self
-            .sequencer_config
-            .as_ref()
-            .is_some_and(ZoneSequencerAddOnsConfig::requires_proof_persistence);
-        let proof_collector =
-            if persist_before_canonicalization || finalized_batch_submissions.is_some() {
-                let proof_collector_config = ProofCollectorConfig {
-                    directory: datadir.join("proofs"),
-                    debug_api: Arc::new(NodeZoneDebugApi::new(
-                        handle.eth_handlers().api.clone(),
-                        l1_provider.clone(),
-                    )),
-                    portal_address: self.portal_address,
-                    l1_provider: l1_provider.clone(),
-                };
-                // The collector serves every role and stops only with the node.
-                let (collector, collector_task) =
-                    create_proof_collector(proof_collector_config, provider.clone()).await?;
-                task_executor.spawn_critical_task("zone-proof-collector", collector_task);
-                Some(collector)
-            } else {
-                None
-            };
-        // Repair a pre-existing canonical tail before admitting new blocks or starting settlement.
-        if persist_before_canonicalization {
-            proof_collector
-                .as_ref()
-                .expect("proof collector enabled")
-                .collect_canonical_tail(&provider)
-                .await?;
-        }
-        let prover_config = self
-            .sequencer_config
-            .as_ref()
-            .filter(|config| config.enable_prover)
-            .map(|config| SettlementProverConfig {
-                parent_chain_id: l1_chain_id,
-                zone_id: config.zone_id,
-                chain_spec: evm_chain_spec.clone(),
-                debug_api: Arc::new(NodeZoneDebugApi::new(
-                    handle.eth_handlers().api.clone(),
-                    l1_provider.clone(),
-                )),
-                prover_addresses: config.prover_addresses.clone(),
-                proof_verifier: None,
-            });
-
-        let shadow_prover_config =
-            effective_shadow_prover_config
-                .as_ref()
-                .map(|config| ShadowProverConfig {
-                    parent_chain_id: l1_chain_id,
-                    zone_id: config.zone_id,
-                    chain_spec: evm_chain_spec,
-                    debug_api: Arc::new(NodeZoneDebugApi::new(
-                        handle.eth_handlers().api.clone(),
-                        l1_provider.clone(),
-                    )),
-                    prover_addresses: config.prover_runtime.remote_addresses().cloned(),
-                    proof_verifier: config.proof_verifier.clone(),
-                });
-
-        let readiness_config = if rpc_only {
-            shadow_prover_config.as_ref()
-        } else {
-            prover_config.as_ref()
-        };
-        if let Some(config) = readiness_config
-            && let Some(addresses) = config.prover_addresses.clone()
-        {
-            let chain_spec = config.chain_spec.clone();
-            task_executor.spawn_critical_task("prover-upgrade-readiness", async move {
-                addresses.monitor_upgrade_readiness(chain_spec).await;
-            });
-        }
-
-        if let (Some(runtime_config), Some(submissions)) =
-            (shadow_prover_config, finalized_batch_submissions)
-        {
-            let prover = spawn_shadow_prover(
-                runtime_config,
-                proof_collector.clone(),
-                provider.clone(),
+        // One proof collector and prover per node, shared by every leader generation.
+        let mut proof_collector = None;
+        let mut settlement_prover = None;
+        if let Some(prover_config) = self.prover_config.as_ref() {
+            let debug_api = Arc::new(NodeZoneDebugApi::new(
+                handle.eth_handlers().api.clone(),
                 l1_provider.clone(),
-            );
-            task_executor.spawn_critical_task(
-                "rpc-follower-shadow-prover",
-                RpcFollowerShadowProver::new(
-                    self.portal_address,
-                    provider.clone(),
-                    l1_provider.clone(),
-                    prover,
-                )
-                .run(submissions),
-            );
+            ));
+            let proof_collector_config = ProofCollectorConfig {
+                directory: datadir.join("proofs"),
+                debug_api: debug_api.clone(),
+                portal_address: self.portal_address,
+                l1_provider: l1_provider.clone(),
+            };
+            let (collector, collector_task) =
+                create_proof_collector(proof_collector_config, provider.clone()).await?;
+            task_executor.spawn_critical_task("zone-proof-collector", collector_task);
+
+            if let Some(addresses) = prover_config.prover_addresses().cloned() {
+                let chain_spec = evm_chain_spec.clone();
+                task_executor.spawn_critical_task("prover-upgrade-readiness", async move {
+                    addresses.monitor_upgrade_readiness(chain_spec).await;
+                });
+            }
+            let spf_config = SettlementProverConfig {
+                parent_chain_id: l1_chain_id,
+                zone_id: genesis_zone_id,
+                chain_spec: evm_chain_spec,
+                debug_api,
+                prover_addresses: prover_config.prover_addresses().cloned(),
+                proof_verifier: prover_config.proof_verifier().cloned(),
+            };
+            match prover_config {
+                ZoneProverConfig::Settlement(_) => {
+                    // Repair a pre-existing canonical tail before admitting new blocks or
+                    // starting settlement.
+                    collector.collect_canonical_tail(&provider).await?;
+                    settlement_prover = Some(spawn_settlement_prover(
+                        spf_config,
+                        collector.clone(),
+                        provider.clone(),
+                        l1_provider.clone(),
+                    ));
+                }
+                ZoneProverConfig::Shadow { .. } => {
+                    let prover = spawn_shadow_prover(
+                        spf_config,
+                        Some(collector.clone()),
+                        provider.clone(),
+                        l1_provider.clone(),
+                    );
+                    task_executor.spawn_critical_task(
+                        "rpc-follower-shadow-prover",
+                        RpcFollowerShadowProver::new(
+                            self.portal_address,
+                            provider.clone(),
+                            l1_provider.clone(),
+                            prover,
+                        )
+                        .run(
+                            finalized_batch_submissions
+                                .take()
+                                .expect("shadow proving wires finalized submissions"),
+                        ),
+                    );
+                }
+            }
+            proof_collector = Some(collector);
         }
 
         Self::launch_redacted_rpc(
@@ -1015,7 +954,7 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     proof_collector.clone(),
-                    prover_config.clone(),
+                    settlement_prover,
                 )?),
                 None => None,
             };
@@ -1085,8 +1024,7 @@ where
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
-                proof_collector,
-                prover_config,
+                settlement_prover,
             )
             .await?;
         }
@@ -1518,7 +1456,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         proof_collector: Option<ProofCollectorHandle>,
-        prover_config: Option<SettlementProverConfig>,
+        settlement_prover: Option<SettlementProver>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             chain_spec,
@@ -1536,7 +1474,7 @@ where
             config,
             sequencer_config,
             proof_collector,
-            prover_config,
+            prover: settlement_prover,
         })
     }
 
@@ -1709,8 +1647,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         sequencer_addr: Address,
-        proof_collector: Option<ProofCollectorHandle>,
-        prover_config: Option<SettlementProverConfig>,
+        settlement_prover: Option<SettlementProver>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
@@ -1733,8 +1670,7 @@ where
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
-            proof_collector,
-            prover_config,
+            settlement_prover,
             None,
             tokio_util::sync::CancellationToken::new(),
         )
@@ -1855,7 +1791,7 @@ where
             self.portal_address,
             self.redacted_rpc_config.clone(),
             self.sequencer_config.clone(),
-            self.shadow_prover_config.clone(),
+            self.prover_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,
         )
@@ -1939,9 +1875,7 @@ where
     type Consensus = TempoConsensus<ZoneChainSpec>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(TempoConsensus::new(ctx.chain_spec())
-            .with_allow_equal_timestamps(true)
-            .with_allowed_future_block_time_millis(100))
+        Ok(TempoConsensus::new(ctx.chain_spec()).with_allow_equal_timestamps(true))
     }
 }
 

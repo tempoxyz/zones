@@ -613,11 +613,7 @@ impl BatchSubmitter {
         };
         let digest = domain.settlement_digest(&message);
         let signature = signer.sign_hash_sync(&digest)?;
-        let mut encoded = Vec::with_capacity(65);
-        encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
-        encoded.extend_from_slice(&signature.s().to_be_bytes::<32>());
-        encoded.push(signature.v() as u8 + 27);
-        Ok(encoded.into())
+        Ok(signature.as_bytes().into())
     }
 
     /// Read all mutable portal state needed for one submission at a single L1 block.
@@ -1950,7 +1946,7 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
-    use alloy_consensus::Header as ConsensusHeader;
+    use alloy_consensus::{Header as ConsensusHeader, Sealable as _};
     use alloy_primitives::{B256, address};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
@@ -2258,7 +2254,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let hash = alloy_primitives::keccak256(alloy_rlp::encode(&header));
+        let hash = header.hash_slow();
         (
             TempoHeaderResponse {
                 inner: RpcHeader {

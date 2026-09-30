@@ -314,13 +314,7 @@ impl TestContext {
         let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, issued_at, expires_at);
         let sig = self.signer.sign_hash_sync(&digest).expect("signing failed");
 
-        let mut blob = Vec::with_capacity(65 + fields.len());
-        blob.extend_from_slice(&sig.r().to_be_bytes::<32>());
-        blob.extend_from_slice(&sig.s().to_be_bytes::<32>());
-        blob.push(sig.v() as u8);
-        blob.extend_from_slice(&fields);
-
-        alloy_primitives::hex::encode(&blob)
+        alloy_primitives::hex::encode([sig.as_rsy().as_slice(), &fields].concat())
     }
 
     fn ws_url(&self) -> String {

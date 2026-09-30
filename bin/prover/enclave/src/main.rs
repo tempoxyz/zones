@@ -356,7 +356,7 @@ where
     let digest = nitro_batch_attestation_hash(public_inputs, output);
     let document = attestor(digest)?;
     Ok(ProofBundle {
-        verifier_config: NITRO_VERIFIER_CONFIG_V1.to_vec().into(),
+        verifier_config: NITRO_VERIFIER_CONFIG_V1.into(),
         proof: document.into(),
     })
 }

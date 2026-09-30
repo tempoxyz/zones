@@ -60,9 +60,6 @@ zeroize.workspace = true
 
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
-# crypto (for encryption key registration)
-k256.workspace = true
-
 [dev-dependencies]
 tempfile.workspace = true
 zone-chainspec.workspace = true

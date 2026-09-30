@@ -27,21 +27,15 @@ pub trait TempoStateExt {
 impl<T: StateProvider + ?Sized> TempoStateExt for T {
     fn tempo_block_number(&self) -> ProviderResult<u64> {
         let block_number = self
-            .storage(
-                TEMPO_STATE_ADDRESS,
-                B256::from(slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
-            )?
+            .storage(TEMPO_STATE_ADDRESS, slots::TEMPO_BLOCK_NUMBER.into())?
             .unwrap_or_default();
         Ok(block_number.to::<u64>())
     }
 
     fn tempo_block_hash(&self) -> ProviderResult<B256> {
         Ok(self
-            .storage(
-                TEMPO_STATE_ADDRESS,
-                B256::from(slots::TEMPO_BLOCK_HASH.to_be_bytes()),
-            )?
-            .map(|v| B256::from(v.to_be_bytes()))
+            .storage(TEMPO_STATE_ADDRESS, slots::TEMPO_BLOCK_HASH.into())?
+            .map(B256::from)
             .unwrap_or_default())
     }
 }
@@ -79,7 +73,7 @@ impl<N: reth_primitives_traits::NodePrimitives> ChainTempoStateExt for reth_prov
     fn tempo_block_hash(&self) -> B256 {
         self.execution_outcome()
             .storage(&TEMPO_STATE_ADDRESS, slots::TEMPO_BLOCK_HASH)
-            .map(|v| B256::from(v.to_be_bytes()))
+            .map(B256::from)
             .unwrap_or_default()
     }
 }

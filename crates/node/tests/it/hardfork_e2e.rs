@@ -184,8 +184,7 @@ async fn test_t12_to_t13_tip1096_activation() -> eyre::Result<()> {
     assert!(
         IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider)
             .BatchFinalized_filter()
-            .from_block(3)
-            .to_block(3)
+            .select(3)
             .query()
             .await?
             .is_empty()
@@ -211,8 +210,7 @@ async fn test_t12_to_t13_tip1096_activation() -> eyre::Result<()> {
         .get_logs(
             &Filter::new()
                 .address(ZONE_INBOX_ADDRESS)
-                .from_block(4)
-                .to_block(4)
+                .select(4)
                 .event_signature(TempoAdvanced::SIGNATURE_HASH),
         )
         .await?;
@@ -266,8 +264,7 @@ async fn assert_advance_event<E: SolEvent>(
         .get_logs(
             &Filter::new()
                 .address(ZONE_INBOX_ADDRESS)
-                .from_block(block)
-                .to_block(block)
+                .select(block)
                 .event_signature(E::SIGNATURE_HASH),
         )
         .await?;
