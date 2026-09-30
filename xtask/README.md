@@ -61,7 +61,4 @@ from accounts used for bridge correctness checks.
 The initial in-memory allocation importer is limited to 16 MiB dumps plus chunk
 headers. This is a conservative smoke-test guard, **not** a validated Nitro capacity
 limit. Larger state needs measured resource limits and potentially a streaming
-genesis builder. For the Nitro workflow, select `full-journey-pathusd-fees`,
-`zone-state-bloat-mib=1`, `state-bloat-mib=0`, and T14. This labelled variant pays
-Zone transaction fees from the seeded PathUSD balances; its bridged asset remains
-DLUSD. Do not withdraw synthetic PathUSD against real escrow.
+genesis builder.

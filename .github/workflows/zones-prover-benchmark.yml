@@ -25,7 +25,7 @@ on:
         type: choice
         required: true
         default: full-journey
-        options: [full-journey, full-journey-pathusd-fees, private-withdrawal, swapped-lifecycle, swapped-redemption]
+        options: [full-journey, private-withdrawal, swapped-lifecycle, swapped-redemption]
       accounts:
         type: string
         required: true
@@ -44,11 +44,6 @@ on:
         default: "4"
       state-bloat-mib:
         description: Tempo L1 bloat. Start with 0 for the Nitro smoke test.
-        type: string
-        required: true
-        default: "0"
-      zone-state-bloat-mib:
-        description: Zone PathUSD dump MiB (0-16). Use full-journey-pathusd-fees; start with 1 and L1 bloat 0.
         type: string
         required: true
         default: "0"
@@ -153,7 +148,6 @@ jobs:
       BENCH_TPS: ${{ inputs.tps || '5' }}
       BENCH_MAX_CONCURRENT: ${{ inputs.max-concurrent || '4' }}
       BENCH_L1_BLOAT_MIB: ${{ inputs.state-bloat-mib || '0' }}
-      BENCH_ZONE_BLOAT_MIB: ${{ inputs.zone-state-bloat-mib || '0' }}
       BENCH_BATCH_INTERVAL_BLOCKS: "20"
       BENCH_RESULTS_PATH: ${{ github.workspace }}/zones-prover-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -273,7 +267,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: zones-prover-${{ github.run_id }}-${{ github.run_attempt }}-l1-${{ inputs.state-bloat-mib || '0' }}-zone-${{ inputs.zone-state-bloat-mib || '0' }}
+          name: zones-prover-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.BENCH_RESULTS_PATH }}/results
             ${{ env.BENCH_RESULTS_PATH }}/summary.md
