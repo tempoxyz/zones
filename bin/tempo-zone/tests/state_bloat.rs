@@ -12,6 +12,15 @@ struct Generate {
     args: GenerateStateBloat,
 }
 
+/// Nextest archives relocate binaries, so prefer its runtime path over the compile-time one.
+fn zone_command() -> Command {
+    Command::new(
+        std::env::var_os("NEXTEST_BIN_EXE_tempo-zone")
+            .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_tempo_zone"))
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_tempo-zone").into()),
+    )
+}
+
 #[test]
 fn binary_dump_import_requires_zone_genesis_without_node_arguments() {
     let mut chain = zone_node::genesis::genesis_template().unwrap();
@@ -78,7 +87,7 @@ async fn import_tempo_dump_into_zone_database() {
     .unwrap();
 
     for subcommand in ["init-from-binary-dump", "init", "init"] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tempo-zone"));
+        let mut command = zone_command();
         command
             .arg(subcommand)
             .arg("--chain")
@@ -127,7 +136,7 @@ async fn import_tempo_dump_into_zone_database() {
     .unwrap();
     assert_eq!(checked, evidence["entry_count"].as_u64().unwrap());
     // The original unbloated configuration must not reopen this database.
-    let wrong_chain = Command::new(env!("CARGO_BIN_EXE_tempo-zone"))
+    let wrong_chain = zone_command()
         .arg("init")
         .arg("--chain")
         .arg(&genesis)
@@ -137,7 +146,7 @@ async fn import_tempo_dump_into_zone_database() {
         .unwrap();
     assert!(!wrong_chain.status.success());
     // Import never mutates an existing database, even if it is still at block zero.
-    let repeat = Command::new(env!("CARGO_BIN_EXE_tempo-zone"))
+    let repeat = zone_command()
         .arg("init-from-binary-dump")
         .arg("--chain")
         .arg(&genesis)
@@ -186,7 +195,7 @@ fn invalid_dumps_do_not_initialize_a_database() {
         let dump_path = directory.path().join(format!("bad-{index}.bin"));
         let datadir = directory.path().join(format!("data-{index}"));
         fs::write(&dump_path, dump).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_tempo-zone"))
+        let output = zone_command()
             .arg("init-from-binary-dump")
             .arg("--chain")
             .arg(&genesis)
@@ -205,7 +214,7 @@ fn invalid_dumps_do_not_initialize_a_database() {
     chain.alloc.clear();
     fs::write(&genesis, serde_json::to_vec(&chain).unwrap()).unwrap();
     fs::write(directory.path().join("valid.bin"), valid).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tempo-zone"))
+    let output = zone_command()
         .arg("init-from-binary-dump")
         .arg("--chain")
         .arg(&genesis)
