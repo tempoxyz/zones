@@ -295,7 +295,7 @@ fn execute_raw(
     let count = entries.len() as u64;
     let (deposits, decryptions): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
     let call = IZoneInbox::advanceTempoCall {
-        header: encode_header(&header),
+        header: alloy_rlp::encode(&header).into(),
         deposits,
         decryptions: decryptions.into_iter().flatten().collect(),
         enabledTokens: enabled_tokens,
