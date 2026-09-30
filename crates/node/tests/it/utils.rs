@@ -2889,6 +2889,17 @@ async fn build_l1_anchored_genesis_at_block(
     Ok((genesis, genesis_block_number))
 }
 
+pub(crate) async fn batch_count(
+    portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
+) -> eyre::Result<usize> {
+    Ok(portal
+        .BatchSubmitted_1_filter()
+        .from_block(0)
+        .query()
+        .await?
+        .len())
+}
+
 /// Poll an async condition until it returns `Some(T)` or the timeout expires.
 pub(crate) async fn poll_until<T, Fut, F>(
     timeout: std::time::Duration,

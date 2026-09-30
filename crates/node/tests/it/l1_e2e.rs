@@ -2738,7 +2738,6 @@ async fn test_deposit_blacklisted_recipient() -> eyre::Result<()> {
     // for the sender's L1 balance to be restored.
     {
         use tempo_contracts::precompiles::ITIP20;
-        use zone_precompiles::ecies;
 
         let portal = tempo_zone_contracts::ZonePortal::new(portal_address, depositor.l1_provider());
 
@@ -2749,35 +2748,21 @@ async fn test_deposit_blacklisted_recipient() -> eyre::Result<()> {
             .get_receipt()
             .await?;
 
-        // Read sequencer encryption key from portal
-        let key_result = portal.sequencerEncryptionKey().call().await?;
-        let key_count = portal.encryptionKeyCount().call().await?;
-        eyre::ensure!(key_count > U256::ZERO, "no encryption key registered");
-        let key_index = key_count - U256::from(1);
-
-        let enc = ecies::encrypt_deposit(
-            &key_result.x,
-            key_result.yParity,
-            blacklisted_recipient,
-            B256::ZERO,
-            depositor.address(),
-            portal_address,
-            key_index,
-        )
-        .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
+        let (key_index, encrypted) = l1
+            .encrypt_deposit_for_portal(
+                portal_address,
+                depositor.address(),
+                blacklisted_recipient,
+                B256::ZERO,
+            )
+            .await?;
 
         let receipt = portal
             .deposit(
                 PATH_USD_ADDRESS,
                 deposit_amount,
                 key_index,
-                tempo_zone_contracts::DepositPayload {
-                    ephemeralPubkeyX: enc.eph_pub_x,
-                    ephemeralPubkeyYParity: enc.eph_pub_y_parity,
-                    ciphertext: enc.ciphertext.into(),
-                    nonce: alloy_primitives::FixedBytes(enc.nonce),
-                    tag: alloy_primitives::FixedBytes(enc.tag),
-                },
+                encrypted,
                 depositor.address(),
             )
             .send()

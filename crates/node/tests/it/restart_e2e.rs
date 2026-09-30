@@ -7,7 +7,7 @@
 //! - Withdrawals continue to be processed after a sequencer restart
 //! - Multiple restart cycles don't corrupt state
 
-use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
+use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, batch_count, spawn_sequencer};
 use alloy::primitives::{Address, U256};
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
@@ -37,13 +37,7 @@ async fn portal_queue_state(l1: &L1TestNode, portal_address: Address) -> eyre::R
 
 /// Count `BatchSubmitted` events on the portal.
 async fn batch_submitted_count(l1: &L1TestNode, portal_address: Address) -> eyre::Result<usize> {
-    let portal = ZonePortal::new(portal_address, l1.provider());
-    let events = portal
-        .BatchSubmitted_1_filter()
-        .from_block(0)
-        .query()
-        .await?;
-    Ok(events.len())
+    batch_count(&ZonePortal::new(portal_address, l1.provider())).await
 }
 
 async fn wait_for_withdrawal_requested(

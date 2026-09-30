@@ -140,13 +140,6 @@ alloy_sol_types::sol! {
     }
 
     #[sol(rpc)]
-    contract EarnShare {
-        function approve(address spender, uint256 amount) external returns (bool);
-        function balanceOf(address account) external view returns (uint256);
-        function totalSupply() external view returns (uint256);
-    }
-
-    #[sol(rpc)]
     contract VenueVault {
         constructor(address asset_, string name_, string symbol_, uint8 decimals_);
         function approve(address spender, uint256 amount) external returns (bool);
@@ -979,7 +972,7 @@ impl EarnZoneFixture {
             .balance_of(input_token, self.user.address())
             .await?;
         let recipient_earn_before = self.zone.balance_of(self.earn_share, recipient).await?;
-        let share_supply_before = EarnShare::new(self.earn_share, self.l1.provider())
+        let share_supply_before = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1022,7 +1015,7 @@ impl EarnZoneFixture {
             "failed Earn callback credited private EarnShare"
         );
         assert_eq!(
-            EarnShare::new(self.earn_share, self.l1.provider())
+            ITIP20::new(self.earn_share, self.l1.provider())
                 .totalSupply()
                 .call()
                 .await?,
@@ -1070,7 +1063,7 @@ impl EarnZoneFixture {
             .l1
             .balance_of(self.earn_share, self.user.address())
             .await?;
-        let share_supply_before = EarnShare::new(self.earn_share, self.l1.provider())
+        let share_supply_before = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1111,7 +1104,7 @@ impl EarnZoneFixture {
                 BOUNCE_TIMEOUT,
             )
             .await?;
-        let share_supply_after = EarnShare::new(self.earn_share, self.l1.provider())
+        let share_supply_after = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1315,11 +1308,8 @@ impl EarnZoneFixture {
             .encrypt_deposit_for_portal(self.portal, user, user, B256::ZERO)
             .await?;
         let private_before = self.zone.balance_of(self.earn_share, user).await?;
-        let public_before = EarnShare::new(self.earn_share, self.l1.provider())
-            .balanceOf(user)
-            .call()
-            .await?;
-        let supply_before = EarnShare::new(self.earn_share, self.l1.provider())
+        let public_before = self.l1.balance_of(self.earn_share, user).await?;
+        let supply_before = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1353,7 +1343,7 @@ impl EarnZoneFixture {
             Call {
                 to: TxKind::Call(self.earn_share),
                 value: U256::ZERO,
-                input: EarnShare::approveCall {
+                input: ITIP20::approveCall {
                     spender: self.portal,
                     amount: earn_shares,
                 }
@@ -1416,11 +1406,8 @@ impl EarnZoneFixture {
             .balanceOf(self.engine)
             .call()
             .await?;
-        let public_after = EarnShare::new(self.earn_share, self.l1.provider())
-            .balanceOf(user)
-            .call()
-            .await?;
-        let supply_after = EarnShare::new(self.earn_share, self.l1.provider())
+        let public_after = self.l1.balance_of(self.earn_share, user).await?;
+        let supply_after = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1989,7 +1976,7 @@ async fn matrix_redeem_private_public_rejects_legacy_destination() -> eyre::Resu
     let user = fixture.user.address();
     let earn_shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
     let private_before = fixture.zone.balance_of(fixture.earn_share, user).await?;
-    let supply_before = EarnShare::new(fixture.earn_share, fixture.l1.provider())
+    let supply_before = ITIP20::new(fixture.earn_share, fixture.l1.provider())
         .totalSupply()
         .call()
         .await?;
@@ -2036,7 +2023,7 @@ async fn matrix_redeem_private_public_rejects_legacy_destination() -> eyre::Resu
         )
         .await?;
     assert_eq!(
-        EarnShare::new(fixture.earn_share, fixture.l1.provider())
+        ITIP20::new(fixture.earn_share, fixture.l1.provider())
             .totalSupply()
             .call()
             .await?,
