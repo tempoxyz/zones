@@ -674,7 +674,7 @@ mod tests {
         let mut genesis = tempo_chainspec::spec::DEV.genesis().clone();
         set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         genesis.config.chain_id =
-            zone_primitives::constants::zone_chain_id(tempo_chainspec::spec::DEV.chain().id(), 1)
+            zone_primitives::constants::zone_chain_id(tempo_chainspec::spec::DEV.chain_id(), 1)
                 .unwrap();
         ZoneChainSpec::from_genesis(genesis).unwrap()
     }

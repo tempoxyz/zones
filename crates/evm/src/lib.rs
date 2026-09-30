@@ -376,7 +376,7 @@ where
                     .as_ref()
                     .map(|withdrawals| Cow::Borrowed(withdrawals.as_slice())),
                 extra_data: block.header().extra_data().clone(),
-                tx_count_hint: Some(block.body().transactions.len()),
+                tx_count_hint: Some(block.transaction_count()),
                 slot_number: block.slot_number(),
             },
             general_gas_limit: 0,
@@ -601,7 +601,7 @@ mod tests {
             .config
             .extra_fields
             .retain(|name, _| !name.ends_with("Time"));
-        genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 1).unwrap();
+        genesis.config.chain_id = zone_chain_id(MODERATO.chain_id(), 1).unwrap();
         let composed = Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap());
         let activation_timestamp = TempoHardfork::VARIANTS
             .iter()

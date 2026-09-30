@@ -141,10 +141,7 @@ impl GenerateZoneGenesis {
 
         evm.db_mut().insert_account_info(
             DEPLOYER,
-            AccountInfo {
-                balance: U256::from(1_000_000_000_000_000_000_000u128),
-                ..Default::default()
-            },
+            AccountInfo::from_balance(U256::from(1_000_000_000_000_000_000_000u128)),
         );
 
         // Initialize all precompiles and deploy standard contracts to match the
@@ -472,11 +469,7 @@ fn deploy_arachnid_create2_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) {
     println!("Deploying Arachnid CREATE2 factory at {ARACHNID_CREATE2_FACTORY_ADDRESS}");
     evm.db_mut().insert_account_info(
         ARACHNID_CREATE2_FACTORY_ADDRESS,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(ARACHNID_CREATE2_FACTORY_BYTECODE)),
-            nonce: 0,
-            ..Default::default()
-        },
+        AccountInfo::default().with_code(Bytecode::new_raw(ARACHNID_CREATE2_FACTORY_BYTECODE)),
     );
 }
 

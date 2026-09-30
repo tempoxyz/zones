@@ -183,7 +183,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     l1_rpc_url: args.l1_rpc_url.clone(),
                     portal_address: args.portal_address,
                     zone_id,
-                    zone_chain_id: builder.config().chain.chain().id(),
+                    zone_chain_id: builder.config().chain.chain_id(),
                     database_path: builder.config().datadir().data_dir().join("checker"),
                     l1_block_tracker: node.l1_block_tracker(),
                 });
@@ -682,7 +682,7 @@ mod tests {
         let parent = tempo_chainspec::spec::MODERATO.clone();
         let mut genesis = parent.genesis().clone();
         genesis.config.chain_id =
-            zone_primitives::constants::zone_chain_id(parent.chain().id(), 11).unwrap();
+            zone_primitives::constants::zone_chain_id(parent.chain_id(), 11).unwrap();
         let genesis = serde_json::to_string(&genesis).unwrap();
         let parsed =
             ZoneCli::try_parse_from(["tempo-zone", "re-execute", "--chain", &genesis]).unwrap();
@@ -708,7 +708,7 @@ mod tests {
         ] {
             let mut genesis = parent.genesis().clone();
             genesis.config.chain_id =
-                zone_primitives::constants::zone_chain_id(parent.chain().id(), zone_id).unwrap();
+                zone_primitives::constants::zone_chain_id(parent.chain_id(), zone_id).unwrap();
             let spec =
                 std::sync::Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
             let config =

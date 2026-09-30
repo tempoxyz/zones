@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn malformed_t11_finalization_does_not_advance_block_phase() {
         let mut zone_genesis = DEV.genesis().clone();
-        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain_id(), 2).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
         let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let mut env = EvmEnv::default();
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn withdrawal_requests_require_same_block_finalization() {
         let mut zone_genesis = DEV.genesis().clone();
-        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain_id(), 2).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
         let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), EvmEnv::default());
@@ -673,7 +673,7 @@ mod tests {
             ),
         ] {
             let mut zone_genesis = DEV.genesis().clone();
-            zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+            zone_genesis.config.chain_id = zone_chain_id(DEV.chain_id(), 2).unwrap();
             let chain_spec =
                 std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
             let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
@@ -911,7 +911,7 @@ mod tests {
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
             .unwrap();
         let mut zone_genesis = DEV.genesis().clone();
-        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 1).unwrap();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain_id(), 1).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
         let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(db, EvmEnv::default());
