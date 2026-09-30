@@ -16,10 +16,7 @@ use eyre::{Context as _, eyre};
 use std::{collections::BTreeMap, num::NonZeroU64, time::Instant};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20;
-use tempo_primitives::{
-    TempoSignature,
-    transaction::{Call, PrimitiveSignature},
-};
+use tempo_primitives::transaction::Call;
 use tempo_zone_contracts::{DepositPayload, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
@@ -207,9 +204,7 @@ impl SpamDeposits {
 
                 let sig_hash = tx.signature_hash();
                 let sig = signer.sign_hash_sync(&sig_hash)?;
-                let tempo_sig = TempoSignature::Primitive(PrimitiveSignature::Secp256k1(sig));
-                let signed = tx.into_signed(tempo_sig);
-                encoded_txs.push(signed.encoded_2718());
+                encoded_txs.push(tx.into_signed(sig.into()).encoded_2718());
             }
 
             // Send all deposits concurrently (returns receipts directly)

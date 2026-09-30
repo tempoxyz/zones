@@ -1326,7 +1326,7 @@ where
                 use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
                 let provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
                     .with_nonce_key_filler()
-                    .wallet(alloy_network::EthereumWallet::from(signer))
+                    .wallet(signer)
                     .connect_with_config(
                         &l1_rpc_url,
                         rpc_connection_config(retry_connection_interval),
@@ -2112,9 +2112,7 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
-    use tempo_primitives::transaction::{
-        AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
-    };
+    use tempo_primitives::transaction::{Call, TempoTransaction};
     use zone_chainspec::tempo_chain_spec_for_l1;
 
     fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
@@ -2126,10 +2124,10 @@ mod tests {
             calls,
             ..Default::default()
         };
-        let signature =
-            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature()));
         pooled_transaction(
-            AASigned::new_unhashed(transaction, signature).into(),
+            transaction
+                .into_signed(Signature::test_signature().into())
+                .into(),
             sender,
         )
     }

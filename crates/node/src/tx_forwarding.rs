@@ -218,7 +218,7 @@ mod tests {
     };
     use tempo_primitives::{
         TempoTxEnvelope,
-        transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
+        transaction::{Call, TempoTransaction},
     };
     use tempo_transaction_pool::{ordering::TempoTipOrdering, transaction::TempoPooledTransaction};
 
@@ -256,13 +256,8 @@ mod tests {
         let signature = signer
             .sign_hash_sync(&transaction.signature_hash())
             .unwrap();
-        let envelope: TempoTxEnvelope = AASigned::new_unhashed(
-            transaction,
-            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(signature)),
-        )
-        .into();
-        let mut raw = Vec::with_capacity(envelope.encode_2718_len());
-        envelope.encode_2718(&mut raw);
+        let envelope: TempoTxEnvelope = transaction.into_signed(signature.into()).into();
+        let raw = envelope.encoded_2718();
         let pooled = <TempoPooledTransaction as PoolTransaction>::recover_raw_transaction(&raw)
             .expect("test transaction must recover");
         (pooled, raw)

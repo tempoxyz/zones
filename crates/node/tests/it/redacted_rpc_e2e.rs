@@ -37,7 +37,7 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{
     TempoTxEnvelope,
-    transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
+    transaction::{Call, TempoTransaction},
 };
 use tempo_zone_contracts::{
     IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
@@ -82,11 +82,7 @@ fn signed_sponsored_raw_transaction(
     transaction.fee_payer_signature = Some(fee_payer.sign_hash_sync(&fee_payer_hash)?);
 
     let signature = signer.sign_hash_sync(&transaction.signature_hash())?;
-    let signed = AASigned::new_unhashed(
-        transaction,
-        TempoSignature::Primitive(PrimitiveSignature::Secp256k1(signature)),
-    );
-    let envelope: TempoTxEnvelope = signed.into();
+    let envelope: TempoTxEnvelope = transaction.into_signed(signature.into()).into();
 
     Ok(hex::encode_prefixed(envelope.encoded_2718()))
 }

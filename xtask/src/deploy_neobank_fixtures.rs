@@ -2,7 +2,7 @@
 
 use alloy::{
     network::{EthereumWallet, TransactionBuilder, primitives::ReceiptResponse},
-    primitives::{Address, Bytes, Uint, keccak256},
+    primitives::{Address, Uint, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -968,12 +968,11 @@ async fn deploy<P: Provider<TempoNetwork>>(
     let receipt = provider
         .send_transaction(
             TransactionRequest::default()
-                .with_kind(alloy::primitives::TxKind::Create)
+                .with_deploy_code(bytecode)
                 // Fixture constructors can make contract calls that Tempo's generic
                 // estimator underestimates. Use as much of the configured general-transaction
                 // budget as Tempo's per-transaction cap allows.
                 .with_gas_limit(gas_limit)
-                .input(Bytes::from(bytecode).into())
                 .into(),
         )
         .await

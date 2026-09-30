@@ -38,7 +38,10 @@ use crate::{
         LegacyBatchSubmitted, LegacyTempoAdvanced, TempoAdvanced, TokenEnablementTransition,
         ZonePortal,
     },
-    attestation::{AttestationDomain, SettlementAttestation, SettlementCertificate},
+    attestation::{
+        AttestationDomain, SettlementAttestation, SettlementCertificate,
+        SignedSettlementAttestation,
+    },
     prover::SettlementProof,
     prover_config::active_l1_hardfork,
 };
@@ -49,7 +52,6 @@ use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
-use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use eyre::{OptionExt as _, Result, WrapErr as _};
@@ -611,9 +613,7 @@ impl BatchSubmitter {
             withdrawalQueueHash: batch.withdrawal_queue_hash,
             verifierConfigHash: keccak256(verifier_config),
         };
-        let digest = domain.settlement_digest(&message);
-        let signature = signer.sign_hash_sync(&digest)?;
-        Ok(signature.as_bytes().into())
+        Ok(SignedSettlementAttestation::sign(message, domain, signer)?.signature)
     }
 
     /// Read all mutable portal state needed for one submission at a single L1 block.

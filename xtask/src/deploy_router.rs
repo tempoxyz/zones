@@ -1,6 +1,6 @@
 use alloy::{
     network::{EthereumWallet, TransactionBuilder},
-    primitives::{Address, Bytes, TxKind},
+    primitives::Address,
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -79,9 +79,7 @@ impl DeployRouter {
         println!("  ZoneFactory:    {zone_factory}");
         println!("  StablecoinDEX:  {}", self.stablecoin_dex);
 
-        let tx = TransactionRequest::default()
-            .with_kind(TxKind::Create)
-            .input(Bytes::from(deploy_bytes).into());
+        let tx = TransactionRequest::default().with_deploy_code(deploy_bytes);
         let receipt = provider
             .send_transaction(tx.into())
             .await?

@@ -13,7 +13,7 @@ use alloy::{
     primitives::{Address, B256, Bytes, TxKind, U256, keccak256},
     providers::{Provider, ProviderBuilder},
 };
-use alloy_network::ReceiptResponse;
+use alloy_network::{ReceiptResponse, TransactionBuilder as _};
 use alloy_rpc_types_eth::{Filter, TransactionRequest};
 use alloy_sol_types::{SolCall, SolConstructor, SolValue};
 use eyre::WrapErr;
@@ -1445,11 +1445,11 @@ async fn deploy_contract(
 ) -> eyre::Result<Address> {
     let mut deployment = forge_bytecode(contract)?.to_vec();
     deployment.extend_from_slice(&constructor_args);
-    let mut request = TransactionRequest::default().input(Bytes::from(deployment).into());
-    request.to = Some(TxKind::Create);
     // Contract-to-contract constructor calls are valid on Tempo but can be under-estimated by the
     // generic Ethereum gas estimator. Earn's local deployer likewise applies explicit headroom.
-    request.gas = Some(CONTRACT_DEPLOYMENT_TX_GAS_LIMIT);
+    let request = TransactionRequest::default()
+        .with_deploy_code(deployment)
+        .gas_limit(CONTRACT_DEPLOYMENT_TX_GAS_LIMIT);
     let receipt = l1
         .dev_provider()
         .send_transaction(request)

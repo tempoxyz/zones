@@ -1,7 +1,7 @@
 use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::{Header, Sealable as _};
 use alloy_eips::NumHash;
-use alloy_network::{EthereumWallet, ReceiptResponse};
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder, bindings::IMulticall3};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, TransactionRequest};
@@ -142,7 +142,7 @@ pub(crate) fn local_dev_tempo_zone_account(
         .build()?;
     let dev_address = dev_signer.address();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(EthereumWallet::from(dev_signer))
+        .wallet(dev_signer)
         .connect_http(zone.http_url().clone())
         .erased();
     Ok((provider, dev_address))
@@ -1194,7 +1194,7 @@ impl ZoneTestNode {
         p2p_config: P2pConfig,
     ) -> eyre::Result<Self> {
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32])?;
-        let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+        let signer = alloy_signer_local::PrivateKeySigner::from(throwaway_key);
         Self::launch_with_genesis_and_withdrawal_batch_interval(
             l1_rpc_url,
             Address::ZERO,
@@ -1215,7 +1215,7 @@ impl ZoneTestNode {
     ) -> eyre::Result<Self> {
         // Generate a throwaway signer for tests that don't use encrypted deposits.
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
-        let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+        let signer = alloy_signer_local::PrivateKeySigner::from(throwaway_key);
         Self::launch_with_genesis_and_withdrawal_batch_interval(
             l1_ws_url,
             portal_address,
@@ -2132,7 +2132,7 @@ impl L1TestNode {
         factory_address: Address,
         dex_address: Address,
     ) -> eyre::Result<Address> {
-        use alloy_primitives::{Bytes, TxKind};
+        use alloy_network::TransactionBuilder as _;
         use alloy_rpc_types_eth::TransactionRequest;
         use alloy_sol_types::SolValue;
 
@@ -2141,10 +2141,8 @@ impl L1TestNode {
         // Constructor: constructor(address _stablecoinDEX, address _zoneFactory)
         let mut deploy_bytes = forge_bytecode("SwapAndDepositRouter")?.to_vec();
         deploy_bytes.extend_from_slice(&(dex_address, factory_address).abi_encode());
-        let bytecode = Bytes::from(deploy_bytes);
 
-        let mut deploy_tx = TransactionRequest::default().input(bytecode.into());
-        deploy_tx.to = Some(TxKind::Create);
+        let deploy_tx = TransactionRequest::default().with_deploy_code(deploy_bytes);
         let receipt = l1_provider
             .send_transaction(deploy_tx)
             .await?
@@ -2431,11 +2429,10 @@ impl L1TestNode {
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<()> {
         // Sign with the encryption key (not the sequencer's Ethereum key)
-        let enc_key_bytes = B256::from_slice(&encryption_key.to_bytes());
-        let pop_signer = alloy_signer_local::PrivateKeySigner::from_bytes(&enc_key_bytes)?;
+        let pop_signer = alloy_signer_local::PrivateKeySigner::from(encryption_key);
 
         let sequencer_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(sequencer_signer))
+            .wallet(sequencer_signer)
             .connect_http(self.http_url.clone());
         zone_sequencer::register_encryption_key(&sequencer_provider, portal_address, &pop_signer)
             .await?;
@@ -2494,7 +2491,7 @@ impl L1TestNode {
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(self.dev_signer()))
+            .wallet(self.dev_signer())
             .connect_http(self.http_url.clone());
         let receipt = ITIP20::new(token, &provider)
             .transfer(to, U256::from(amount))
@@ -3636,7 +3633,7 @@ pub(crate) async fn start_local_zone_with_fixture_and_withdrawal_batch_interval(
     genesis: Genesis,
 ) -> eyre::Result<(ZoneTestNode, L1Fixture)> {
     let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32])?;
-    let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+    let signer = alloy_signer_local::PrivateKeySigner::from(throwaway_key);
     let zone = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
         DUMMY_L1_URL.to_string(),
         Address::ZERO,
