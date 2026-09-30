@@ -2968,9 +2968,7 @@ async fn test_deposit_to_blacklisted_recipient_is_accepted_on_l1() -> eyre::Resu
     l1.fund_user(depositor, deposit_amount).await?;
 
     // Build a provider for the depositor
-    let depositor_provider = alloy::providers::ProviderBuilder::new()
-        .wallet(depositor_signer)
-        .connect_http(l1.http_url().clone());
+    let depositor_provider = l1.provider_with_signer(depositor_signer);
 
     // Approve the portal to spend pathUSD
     use tempo_contracts::precompiles::ITIP20;

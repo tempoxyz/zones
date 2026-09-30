@@ -94,11 +94,18 @@ fn next_unique_chain_id() -> u64 {
         .expect("test zone ID fits in u32")
 }
 
-fn l1_dev_signer() -> alloy_signer_local::PrivateKeySigner {
+/// Returns a signer derived from [`TEST_MNEMONIC`] at the given BIP-44 index.
+pub(crate) fn signer_at(index: u32) -> alloy_signer_local::PrivateKeySigner {
     MnemonicBuilder::<English>::default()
         .phrase(TEST_MNEMONIC)
+        .index(index)
+        .expect("valid derivation index")
         .build()
         .expect("valid test mnemonic")
+}
+
+pub(crate) fn l1_dev_signer() -> alloy_signer_local::PrivateKeySigner {
+    signer_at(0)
 }
 
 /// Default timeout for polling loops in e2e tests.
@@ -123,9 +130,7 @@ pub(crate) const TEST_MNEMONIC: &str =
 pub(crate) use tempo_contracts::precompiles::STABLECOIN_DEX_ADDRESS;
 
 pub(crate) fn local_dev_zone_account(zone: &ZoneTestNode) -> eyre::Result<(DynProvider, Address)> {
-    let dev_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let dev_signer = l1_dev_signer();
     let dev_address = dev_signer.address();
     let provider = ProviderBuilder::new()
         .wallet(dev_signer)
@@ -137,9 +142,7 @@ pub(crate) fn local_dev_zone_account(zone: &ZoneTestNode) -> eyre::Result<(DynPr
 pub(crate) fn local_dev_tempo_zone_account(
     zone: &ZoneTestNode,
 ) -> eyre::Result<(DynProvider<TempoNetwork>, Address)> {
-    let dev_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let dev_signer = l1_dev_signer();
     let dev_address = dev_signer.address();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .wallet(EthereumWallet::from(dev_signer))
@@ -1320,8 +1323,7 @@ impl ZoneTestNode {
         };
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
-            serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
-                .expect("valid zone genesis template")
+            zone_node::genesis::genesis_template().expect("valid zone genesis template")
         });
         genesis.config.chain_id = chain_id;
         let chain_spec = ZoneChainSpec::from_genesis(genesis)?;
@@ -1607,10 +1609,7 @@ impl L1TestNode {
     /// corresponding to address `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`.
     /// The account is pre-funded with pathUSD in `test-genesis.json`.
     pub(crate) fn dev_signer(&self) -> alloy_signer_local::PrivateKeySigner {
-        MnemonicBuilder::<English>::default()
-            .phrase(TEST_MNEMONIC)
-            .build()
-            .expect("valid test mnemonic")
+        l1_dev_signer()
     }
 
     /// Returns the address of the pre-funded dev account.
@@ -1638,22 +1637,12 @@ impl L1TestNode {
     /// This account is NOT pre-funded — use [`fund_user`](Self::fund_user) to
     /// transfer pathUSD from the dev account before depositing.
     pub(crate) fn user_signer(&self) -> alloy_signer_local::PrivateKeySigner {
-        MnemonicBuilder::<English>::default()
-            .phrase(TEST_MNEMONIC)
-            .index(1)
-            .expect("valid derivation index")
-            .build()
-            .expect("valid test mnemonic")
+        self.signer_at(1)
     }
 
     /// Returns a signer derived from [`TEST_MNEMONIC`] at the given BIP-44 index.
     pub(crate) fn signer_at(&self, index: u32) -> alloy_signer_local::PrivateKeySigner {
-        MnemonicBuilder::<English>::default()
-            .phrase(TEST_MNEMONIC)
-            .index(index)
-            .expect("valid derivation index")
-            .build()
-            .expect("valid test mnemonic")
+        signer_at(index)
     }
 
     /// Transfer pathUSD from the dev account to a recipient on L1.
@@ -1836,10 +1825,7 @@ impl L1TestNode {
 
     /// Returns an HTTP provider with the dev account wallet attached.
     pub(crate) fn dev_provider(&self) -> alloy_provider::DynProvider {
-        ProviderBuilder::new()
-            .wallet(self.dev_signer())
-            .connect_http(self.http_url.clone())
-            .erased()
+        self.provider_with_signer(self.dev_signer())
     }
 
     /// Returns an HTTP provider with the admin account wallet attached.
@@ -1847,10 +1833,7 @@ impl L1TestNode {
     /// Used for `onlyAdmin` portal calls so they are signed by the admin key
     /// rather than the dev (sequencer) key.
     pub(crate) fn admin_provider(&self) -> alloy_provider::DynProvider {
-        ProviderBuilder::new()
-            .wallet(self.admin_signer())
-            .connect_http(self.http_url.clone())
-            .erased()
+        self.provider_with_signer(self.admin_signer())
     }
 
     /// Returns an HTTP provider with an explicit signer attached.
@@ -3072,27 +3055,7 @@ impl ZoneAccount {
         zone: &ZoneTestNode,
         portal_address: Address,
     ) -> Self {
-        let signer = l1.user_signer();
-        let address = signer.address();
-
-        let l1_provider = ProviderBuilder::new()
-            .wallet(signer.clone())
-            .connect_http(l1.http_url().clone())
-            .erased();
-
-        let l2_provider = ProviderBuilder::new()
-            .wallet(signer)
-            .connect_http(zone.http_url().clone())
-            .erased();
-
-        Self {
-            address,
-            l1_provider,
-            l2_provider,
-            portal_address,
-            l1_portal_approved: false,
-            l2_outbox_approved_tokens: BTreeSet::new(),
-        }
+        Self::with_signer(l1.user_signer(), l1, zone, portal_address)
     }
 
     /// Create a `ZoneAccount` with a custom signer.
@@ -3109,10 +3072,7 @@ impl ZoneAccount {
     ) -> Self {
         let address = signer.address();
 
-        let l1_provider = ProviderBuilder::new()
-            .wallet(signer.clone())
-            .connect_http(l1.http_url().clone())
-            .erased();
+        let l1_provider = l1.provider_with_signer(signer.clone());
 
         let l2_provider = ProviderBuilder::new()
             .wallet(signer)
@@ -4219,7 +4179,7 @@ pub(crate) async fn start_local_p2p_cluster(seed_blocks: u64) -> eyre::Result<P2
 
     let chain_id = next_unique_chain_id();
     let l1_rpc_url = spawn_test_l1_rpc(1337).await?;
-    let genesis: Genesis = serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)?;
+    let genesis = zone_node::genesis::genesis_template()?;
     let mut nodes = Vec::with_capacity(3);
     for (index, config) in configs.into_iter().enumerate() {
         nodes.push(
