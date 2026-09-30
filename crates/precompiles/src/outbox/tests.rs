@@ -3,7 +3,7 @@ use super::*;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address, keccak256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
-use revm::precompile::PrecompileResult;
+use revm::precompile::{PrecompileHalt, PrecompileResult, PrecompileStatus};
 use tempo_precompiles::{
     storage::{StorageCtx, StorageKey},
     test_util::TIP20Setup,
@@ -667,9 +667,9 @@ fn callback_and_reveal_boundaries_are_enforced() -> eyre::Result<()> {
         ZoneOutboxError::invalid_reveal_to(),
     );
 
-    let valid = Bytes::copy_from_slice(&alloy_primitives::hex!(
+    let valid = alloy_primitives::bytes!(
         "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-    ));
+    );
     harness.request_custom(base(Bytes::new(), valid))?;
     Ok(())
 }
@@ -855,26 +855,30 @@ fn many_withdrawals_finalize_and_clear_pending_state() -> eyre::Result<()> {
 }
 
 #[test]
-fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
+fn static_mutation_halts_without_changing_state() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let token = harness.token;
-    assert_revert(
-        harness.call_static(
-            ALICE,
-            ZoneOutboxAbi::requestWithdrawalCall {
-                token,
-                to: BOB,
-                amount: 1,
-                memo: B256::ZERO,
-                gasLimit: 0,
-                zoneFallbackRecipient: ALICE,
-                data: Bytes::new(),
-                revealTo: Bytes::new(),
-            }
-            .abi_encode(),
-        ),
-        ZoneOutboxError::static_call_not_allowed(),
+    let output = harness.call_static(
+        ALICE,
+        ZoneOutboxAbi::requestWithdrawalCall {
+            token,
+            to: BOB,
+            amount: 1,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            zoneFallbackRecipient: ALICE,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        }
+        .abi_encode(),
+    )?;
+    assert_eq!(
+        output.status,
+        PrecompileStatus::Halt(PrecompileHalt::other_static(
+            "state change during static call"
+        ))
     );
+    assert!(output.bytes.is_empty());
     assert!(
         harness.l1.storage_requests().is_empty(),
         "static mutation must reach dispatch without portal reads"
@@ -908,10 +912,14 @@ fn fallback_recipient_nonce_is_private_and_consumed_once_by_inbox() -> eyre::Res
         ),
         ZoneOutboxError::invalid_fallback_recipient(),
     );
-    assert_revert(
-        harness.call_static(ZONE_INBOX_ADDRESS, &calldata),
-        ZoneOutboxError::static_call_not_allowed(),
+    let output = harness.call_static(ZONE_INBOX_ADDRESS, &calldata)?;
+    assert_eq!(
+        output.status,
+        PrecompileStatus::Halt(PrecompileHalt::other_static(
+            "state change during static call"
+        ))
     );
+    assert!(output.bytes.is_empty());
 
     // The failed static call must not consume the mapping entry.
     let output = harness.call(ZONE_INBOX_ADDRESS, &calldata)?;

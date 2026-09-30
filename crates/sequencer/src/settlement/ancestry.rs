@@ -251,7 +251,7 @@ fn resolve(
 #[cfg(test)]
 pub(crate) mod test_utils {
     use super::*;
-    use alloy_consensus::Header as ConsensusHeader;
+    use alloy_consensus::{Header as ConsensusHeader, Sealable as _};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_transport::mock::Asserter;
@@ -286,7 +286,7 @@ pub(crate) mod test_utils {
             },
             ..Default::default()
         };
-        let hash = keccak256(alloy_rlp::encode(&header));
+        let hash = header.hash_slow();
         (
             TempoHeaderResponse {
                 inner: RpcHeader {

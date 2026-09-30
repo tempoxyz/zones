@@ -9,6 +9,11 @@ on:
         description: Exact 40-character Zones commit to compare with main.
         type: string
         required: true
+      tempo-hardfork:
+        description: Tempo L1 hardfork for both phases (for example, t14).
+        type: string
+        required: true
+        default: t13
       region:
         description: Existing AWS benchmark region.
         type: choice
@@ -136,6 +141,7 @@ jobs:
       BENCH_TEMPO_ROOT: ${{ github.workspace }}/tempo
       BENCH_EARN_ROOT: ${{ github.workspace }}/earn
       BENCH_REGION: ${{ inputs.region || 'us-east-1' }}
+      BENCH_TEMPO_HARDFORK: ${{ inputs['tempo-hardfork'] || 't13' }}
       BENCH_PRESET: ${{ inputs.preset || 'full-journey' }}
       BENCH_ACCOUNTS: ${{ inputs.accounts || '20' }}
       BENCH_COUNT: ${{ inputs.count || '20' }}

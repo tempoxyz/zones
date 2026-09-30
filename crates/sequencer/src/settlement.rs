@@ -66,7 +66,6 @@ use zone_prover::{ProofBundle, VerifierMode};
 
 #[derive(Debug)]
 pub enum BatchSubmitError {
-    Cancelled,
     PortalAdvanced,
     PreparedAnchorInvalid(eyre::Report),
     /// The attestation was generated using a prover selected under a different L1 policy.
@@ -86,7 +85,6 @@ impl From<eyre::Report> for BatchSubmitError {
 impl fmt::Display for BatchSubmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cancelled => formatter.write_str("batch processing cancelled"),
             Self::PortalAdvanced => {
                 formatter.write_str("portal already committed the batch height")
             }
@@ -96,6 +94,15 @@ impl fmt::Display for BatchSubmitError {
                 "prover hardfork changed from {proved} to {current}; regenerate the proof"
             ),
             Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for BatchSubmitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PreparedAnchorInvalid(error) | Self::Other(error) => Some(error.as_ref()),
+            Self::PortalAdvanced | Self::ProverHardforkChanged { .. } => None,
         }
     }
 }
@@ -591,11 +598,7 @@ impl BatchSubmitter {
         };
         let digest = domain.settlement_digest(&message);
         let signature = signer.sign_hash_sync(&digest)?;
-        let mut encoded = Vec::with_capacity(65);
-        encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
-        encoded.extend_from_slice(&signature.s().to_be_bytes::<32>());
-        encoded.push(signature.v() as u8 + 27);
-        Ok(encoded.into())
+        Ok(signature.as_bytes().into())
     }
 
     /// Read all mutable portal state needed for one submission at a single L1 block.
@@ -942,8 +945,8 @@ impl BatchSubmitter {
 
     /// Read the current `blockHash` from the ZonePortal on L1.
     ///
-    /// Used to resync the monitor's `prev_block_hash` after repeated submission
-    /// failures, ensuring subsequent batches use the portal's actual state.
+    /// Used to reject a prepared batch whose predecessor no longer matches the
+    /// portal before submitting it.
     pub async fn read_portal_block_hash(&self) -> Result<B256> {
         let hash = self.portal.blockHash().call().await?;
         Ok(hash)

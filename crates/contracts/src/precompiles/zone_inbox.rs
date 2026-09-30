@@ -68,7 +68,7 @@ crate::sol! {
             uint64 lastProcessedDepositNumber
         );
 
-        /// Z1 Tempo advancement event with the processed enabled-token cursor.
+        /// T13 Tempo advancement event with the processed enabled-token cursor.
         event TempoAdvanced(
             bytes32 indexed tempoBlockHash,
             uint64 indexed tempoBlockNumber,
@@ -143,11 +143,11 @@ crate::sol! {
     }
 }
 
-/// IZoneInbox entries retired by the Z1 hardfork.
-mod pre_z1_retired {
+/// IZoneInbox entries retired by the T13 hardfork.
+mod pre_t13_retired {
     crate::sol! {
         #[sol(abi)]
-        contract IZoneInboxZ0Retired {
+        contract IZoneInboxPreT13Retired {
             event TempoAdvanced(
                 bytes32 indexed tempoBlockHash,
                 uint64 indexed tempoBlockNumber,
@@ -160,7 +160,7 @@ mod pre_z1_retired {
 }
 
 #[doc(hidden)]
-pub use pre_z1_retired::IZoneInboxZ0Retired;
+pub use pre_t13_retired::IZoneInboxPreT13Retired;
 
 impl EnabledToken {
     /// Hash this token enablement as the next link in the portal commitment.

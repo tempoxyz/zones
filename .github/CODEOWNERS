@@ -3,7 +3,6 @@ bin/prover/ @rkrasiuk @shekhirin
 crates/chainspec/ @0xrusowsky @0xKitsune @klkvr @mattsse
 crates/contracts/ @0xrusowsky @0xKitsune @klkvr @mattsse @legion2002 @0xalpharush
 crates/evm/ @0xrusowsky @klkvr @0xKitsune
-crates/hardfork/ @0xrusowsky @legion2002 @klkvr
 crates/l1/ @0xKitsune @mattsse @klkvr @0xrusowsky @adityapk00
 crates/node/ @mattsse @0xKitsune @klkvr @0xrusowsky @adityapk00 @legion2002
 crates/p2p/ @adityapk00 @legion2002 @klkvr

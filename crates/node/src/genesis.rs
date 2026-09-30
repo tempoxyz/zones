@@ -6,7 +6,7 @@
 
 use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, U256};
 use tempo_primitives::TempoHeader;
 use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, tempo_state, zone_fee_manager};
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
@@ -49,13 +49,10 @@ pub fn l1_anchored_genesis(
     let storage = tempo_state_account
         .storage
         .get_or_insert_with(Default::default);
+    storage.insert(tempo_state::slots::TEMPO_BLOCK_HASH.into(), l1_genesis_hash);
     storage.insert(
-        B256::from(tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes()),
-        l1_genesis_hash,
-    );
-    storage.insert(
-        B256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
-        B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
+        tempo_state::slots::TEMPO_BLOCK_NUMBER.into(),
+        U256::from(l1_header.inner.number).into(),
     );
 
     // Patch 2: canonical default fee token.
@@ -67,8 +64,8 @@ pub fn l1_anchored_genesis(
         .storage
         .get_or_insert_with(Default::default)
         .insert(
-            B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN.to_be_bytes()),
-            B256::left_padding_from(default_fee_token.as_slice()),
+            zone_fee_manager::slots::DEFAULT_FEE_TOKEN.into(),
+            default_fee_token.into_word(),
         );
 
     Ok((genesis, genesis_block_number))
@@ -77,7 +74,7 @@ pub fn l1_anchored_genesis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
+    use alloy_primitives::{B256, address};
     use tempo_contracts::precompiles::PATH_USD_ADDRESS;
     use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -100,9 +97,8 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            fee_manager_storage
-                [&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN.to_be_bytes())],
-            B256::left_padding_from(PATH_USD_ADDRESS.as_slice()),
+            fee_manager_storage[&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN)],
+            PATH_USD_ADDRESS.into_word(),
         );
     }
 
@@ -120,7 +116,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            storage[&B256::from(tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes())],
+            storage[&B256::from(tempo_state::slots::TEMPO_BLOCK_HASH)],
             l1_header.hash_slow(),
         );
 
@@ -129,9 +125,8 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            fee_manager_storage
-                [&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN.to_be_bytes())],
-            B256::left_padding_from(default_fee_token.as_slice()),
+            fee_manager_storage[&B256::from(zone_fee_manager::slots::DEFAULT_FEE_TOKEN)],
+            default_fee_token.into_word(),
         );
     }
 }

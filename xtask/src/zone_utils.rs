@@ -1,7 +1,7 @@
 use alloy::{
     consensus::BlockHeader as _,
     network::primitives::ReceiptResponse,
-    primitives::{Address, B256, U256, address},
+    primitives::{Address, B256, U256},
     providers::Provider,
     rpc::types::Filter,
     sol_types::SolEvent,
@@ -51,8 +51,7 @@ pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// `zone.json` already provides a zone-specific value.
 /// Explorer: https://explore.moderato.tempo.xyz/address/0x5aF2000000000000000000000000000000000000
 pub(crate) const MODERATO_ZONE_FACTORY: Address = ZONE_FACTORY_ADDRESS;
-pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
-    address!("0xDEc0000000000000000000000000000000000000");
+pub(crate) use tempo_contracts::precompiles::STABLECOIN_DEX_ADDRESS;
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;
 const DEFAULT_WAIT_ATTEMPTS: usize = 120;
 const DEFAULT_WAIT_POLL: Duration = Duration::from_millis(500);

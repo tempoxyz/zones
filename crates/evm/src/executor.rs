@@ -318,10 +318,9 @@ mod tests {
         ZoneBlockPhase, ZoneTransactionKind,
     };
 
-    use alloy_consensus::{Header, Signed, TxLegacy};
+    use alloy_consensus::{Header, Sealable as _, Signed, TxLegacy};
     use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor, eth::EthBlockExecutionCtx};
-    use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256, keccak256};
-    use alloy_rlp::Encodable as _;
+    use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256};
     use alloy_sol_types::{SolCall, SolEvent};
     use reth_chainspec::EthChainSpec as _;
     use reth_primitives_traits::Recovered;
@@ -365,10 +364,7 @@ mod tests {
     }
 
     fn advance_tempo_tx() -> TempoTxEnvelope {
-        system_tx(
-            ZONE_INBOX_ADDRESS,
-            Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
-        )
+        system_tx(ZONE_INBOX_ADDRESS, ADVANCE_TEMPO_SELECTOR.into())
     }
 
     fn finalize_withdrawal_batch_tx() -> TempoTxEnvelope {
@@ -503,7 +499,7 @@ mod tests {
 
         let malformed_finalize = system_tx(
             ZONE_OUTBOX_ADDRESS,
-            Bytes::copy_from_slice(&IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR),
+            IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR.into(),
         );
         assert_eq!(
             ZoneBlockPhase::Executing
@@ -533,8 +529,7 @@ mod tests {
         let mut zone_genesis = DEV.genesis().clone();
         zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
-        let factory =
-            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let mut env = EvmEnv::default();
         env.cfg_env.spec = TempoHardfork::T11;
         let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
@@ -558,7 +553,7 @@ mod tests {
         let tx = Recovered::new_unchecked(
             system_tx(
                 ZONE_OUTBOX_ADDRESS,
-                Bytes::copy_from_slice(&IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR),
+                IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR.into(),
             ),
             TEMPO_SYSTEM_TX_SENDER,
         );
@@ -589,8 +584,7 @@ mod tests {
         let mut zone_genesis = DEV.genesis().clone();
         zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
-        let factory =
-            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), EvmEnv::default());
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
@@ -682,8 +676,7 @@ mod tests {
             zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
             let chain_spec =
                 std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
-            let factory =
-                ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+            let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
             let mut env: EvmEnv<TempoHardfork, TempoBlockEnv> = EvmEnv::default();
             env.cfg_env.spec = spec;
             let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
@@ -866,10 +859,7 @@ mod tests {
 
     #[test]
     fn non_system_selector_lookalikes_are_regular_transactions() {
-        let advance_lookalike = ordinary_tx(
-            ZONE_INBOX_ADDRESS,
-            Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
-        );
+        let advance_lookalike = ordinary_tx(ZONE_INBOX_ADDRESS, ADVANCE_TEMPO_SELECTOR.into());
         let finalize_lookalike = ordinary_tx(
             ZONE_OUTBOX_ADDRESS,
             IZoneOutbox::finalizeWithdrawalBatchCall {
@@ -906,9 +896,7 @@ mod tests {
     #[test]
     fn reverted_advance_tempo_does_not_satisfy_block_guard() {
         let genesis = TempoHeader::default();
-        let mut genesis_rlp = Vec::new();
-        genesis.encode(&mut genesis_rlp);
-        let genesis_hash = keccak256(&genesis_rlp);
+        let genesis_hash = genesis.hash_slow();
         let child = TempoHeader {
             inner: Header {
                 parent_hash: genesis_hash,
@@ -917,23 +905,15 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut child_rlp = Vec::new();
-        child.encode(&mut child_rlp);
-
         let mut db = CacheDB::new(EmptyDB::default());
-        db.insert_account_storage(
-            TEMPO_STATE_ADDRESS,
-            U256::ZERO,
-            U256::from_be_bytes(genesis_hash.0),
-        )
-        .unwrap();
+        db.insert_account_storage(TEMPO_STATE_ADDRESS, U256::ZERO, genesis_hash.into())
+            .unwrap();
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
             .unwrap();
         let mut zone_genesis = DEV.genesis().clone();
         zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 1).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
-        let factory =
-            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(db, EvmEnv::default());
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
@@ -954,7 +934,7 @@ mod tests {
         // The header is the valid next checkpoint, but a decryption entry without an encrypted
         // deposit makes the Inbox precompile revert after attempting the checkpoint transition.
         let calldata = IZoneInbox::advanceTempoCall {
-            header: child_rlp.into(),
+            header: alloy_rlp::encode(&child).into(),
             deposits: Vec::new(),
             decryptions: vec![DecryptionData {
                 sharedSecret: B256::ZERO,

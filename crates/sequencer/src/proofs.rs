@@ -11,7 +11,7 @@ use std::{
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
-use alloy_rpc_types_eth::BlockNumberOrTag;
+use alloy_rpc_types_eth::BlockId;
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
 use futures::StreamExt as _;
 use parking_lot::RwLock;
@@ -308,7 +308,7 @@ impl ProofCollectorConfig {
         Ok(u64::try_from(
             ZonePortal::new(self.portal_address, &self.l1_provider)
                 .zoneHeight()
-                .block(BlockNumberOrTag::Finalized.into())
+                .block(BlockId::finalized())
                 .call()
                 .await?,
         )?)

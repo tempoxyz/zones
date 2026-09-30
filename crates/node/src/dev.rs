@@ -11,7 +11,6 @@ use alloy_network::{EthereumWallet, ReceiptResponse as _};
 use alloy_primitives::{Address, B256};
 use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::SolEvent;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
@@ -133,10 +132,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     eyre::ensure!(receipt.status(), "createZone reverted");
 
     let zone_created = receipt
-        .inner
-        .logs()
-        .iter()
-        .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
+        .decoded_log::<ZoneFactory::ZoneCreated>()
         .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
     let zone_id = zone_created.zoneId;
     let portal = zone_created.portal;
