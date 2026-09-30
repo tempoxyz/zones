@@ -876,8 +876,7 @@ jobs:
               --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
               --chain "$ZONES_BENCH_ZONE_GENESIS" \
               --zone-rpc-url "$ZONE_RPC_URL" \
-              --from-block "$ZONES_BENCH_SPF_FROM_BLOCK" \
-              --to-block "$ZONES_BENCH_SPF_TO_BLOCK" \
+              --block "$(( (ZONES_BENCH_SPF_FROM_BLOCK + ZONES_BENCH_SPF_TO_BLOCK) / 2 ))" \
               --output "$ZONES_BENCH_SPF_OUTPUT" \
             > "$ZONES_BENCH_SPF_REPORT" \
             2> target/zones-benchmark/spf.log
