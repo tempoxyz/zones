@@ -1,7 +1,7 @@
 //! Safe, disposable Zone genesis initialization from Tempo's TIP20 dump format.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -11,7 +11,7 @@ use std::{
 
 use alloy_consensus::BlockHeader;
 use alloy_genesis::Genesis;
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use eyre::{Context as _, ensure};
 use reth_chainspec::EthChainSpec;
 use reth_cli_commands::common::{AccessRights, EnvironmentArgs};
@@ -27,7 +27,7 @@ use reth_trie_db::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tempo_precompiles::PATH_USD_ADDRESS;
+use tempo_precompiles::{PATH_USD_ADDRESS, tip20::is_tip20_prefix};
 use tempo_state_bloat::read_dump;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 
@@ -36,12 +36,13 @@ use crate::ZoneNode;
 /// Logical 16 MiB plus chunk headers; a provisional smoke-test guard, not a Nitro limit.
 const MAX_DUMP_BYTES: u64 = 16 * 1024 * 1024 + 65536;
 
-/// Initialize a fresh Zone database with PathUSD bloat committed in block zero.
+/// Initialize a fresh Zone database with TIP20 bloat committed in block zero.
 #[derive(Debug, clap::Parser)]
 pub struct InitZoneFromBinaryDump {
     #[command(flatten)]
     env: EnvironmentArgs<ZoneChainSpecParser>,
-    /// A Tempo generate-state-bloat token-0 dump (up to 16 MiB plus chunk headers).
+    /// A Tempo generate-state-bloat dump for one or more tokens (up to 16 MiB plus chunk headers
+    /// in total).
     state: PathBuf,
     /// Write the resulting chain specification here; use it for every node restart.
     #[arg(long)]
@@ -122,7 +123,8 @@ impl InitZoneFromBinaryDump {
         );
         let dump_bytes = dump.len() as u64;
         let dump_sha256 = format!("{:x}", Sha256::digest(&dump));
-        let entries = apply_dump(&mut genesis, dump.as_slice())?;
+        let tokens = apply_dump(&mut genesis, dump.as_slice())?;
+        let entries = tokens.values().sum::<u64>();
         self.env.chain = Arc::new(ZoneChainSpec::from_genesis(genesis)?);
         let expected = self.env.chain.genesis_header().state_root();
         // Persist the exact specification that normal node startup must reopen.
@@ -180,7 +182,7 @@ impl InitZoneFromBinaryDump {
         drop(reopened);
         let manifest = json!({
             "schema": 1, "dump_sha256": dump_sha256, "dump_bytes": dump_bytes,
-            "token": PATH_USD_ADDRESS, "entry_count": entries, "database_bytes": directory_bytes(datadir)?,
+            "tokens": tokens, "entry_count": entries, "database_bytes": directory_bytes(datadir)?,
             "genesis_hash": hash, "committed_state_root": expected, "database_state_root": root,
             "reopened": true, "import_seconds": started.elapsed().as_secs_f64(),
             "genesis_config_sha256": format!("{:x}", Sha256::digest(serde_json::to_vec(&self.env.chain.genesis().config)?)),
@@ -190,35 +192,52 @@ impl InitZoneFromBinaryDump {
     }
 }
 
-/// Add an isolated PathUSD working set before constructing the Zone chain spec.
+/// Add isolated TIP20 working sets before constructing the Zone chain spec.
+///
+/// PathUSD must already be deployed in genesis. Other TIP20 tokens are seeded as storage-only
+/// accounts: they stay uninitialized until the portal enables them, and the Zone inbox's
+/// initialization writes metadata and roles without touching the seeded supply or balances.
 ///
 /// Existing nonzero state and duplicate entries are rejected, not overwritten.
 /// On error the caller must discard the modified in-memory genesis.
-pub fn apply_dump(genesis: &mut Genesis, reader: impl Read) -> eyre::Result<u64> {
-    let token = genesis
-        .alloc
-        .get_mut(&PATH_USD_ADDRESS)
-        .ok_or_else(|| eyre::eyre!("PathUSD is missing from genesis"))?;
+/// Returns the number of imported entries per token.
+pub fn apply_dump(
+    genesis: &mut Genesis,
+    reader: impl Read,
+) -> eyre::Result<BTreeMap<Address, u64>> {
     ensure!(
-        token.code.as_ref().is_some_and(|code| !code.is_empty()),
+        genesis
+            .alloc
+            .get(&PATH_USD_ADDRESS)
+            .and_then(|token| token.code.as_ref())
+            .is_some_and(|code| !code.is_empty()),
         "PathUSD has no genesis code"
     );
-    let storage = token.storage.get_or_insert_default();
     let mut seen = BTreeSet::new();
+    let mut tokens = BTreeMap::new();
     read_dump(reader, |address, slot, value| {
+        ensure!(is_tip20_prefix(address), "{address} is not a TIP20 address");
+        let account = genesis.alloc.entry(address).or_default();
+        // Genesis code would make the token usable before the portal enables it.
         ensure!(
-            address == PATH_USD_ADDRESS,
-            "only genesis PathUSD/token 0 may be imported"
+            address == PATH_USD_ADDRESS || account.code.as_ref().is_none_or(|code| code.is_empty()),
+            "token {address} must be enabled through the portal, not deployed in genesis"
         );
-        ensure!(seen.insert(slot), "duplicate dump slot {slot}");
+        ensure!(
+            seen.insert((address, slot)),
+            "duplicate dump slot {slot} for token {address}"
+        );
         ensure!(!value.is_zero(), "zero dump values are not supported");
+        let storage = account.storage.get_or_insert_default();
         ensure!(
             storage.get(&slot).is_none_or(|value| value.is_zero()),
-            "dump conflicts with genesis slot {slot}"
+            "dump conflicts with genesis slot {slot} for token {address}"
         );
         storage.insert(slot, B256::from(value.to_be_bytes::<32>()));
+        *tokens.entry(address).or_default() += 1;
         Ok(())
-    })
+    })?;
+    Ok(tokens)
 }
 
 fn directory_bytes(path: &Path) -> eyre::Result<u64> {
