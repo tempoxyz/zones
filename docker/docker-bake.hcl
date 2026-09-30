@@ -24,6 +24,7 @@ target "chef" {
   args = {
     RUST_PROFILE = "profiling"
     RUST_FEATURES = "jemalloc"
+    CACHE_FAMILY = "node"
   }
 }
 
@@ -34,7 +35,15 @@ target "prover-chef" {
   args = {
     RUST_PROFILE = "release"
     RUST_FEATURES = ""
+    CACHE_FAMILY = "enclave"
   }
+}
+
+# Independent Cargo builders must not queue on the same locked cache mounts.
+# Chef and final compilation within each family deliberately share their IDs.
+target "utils-chef" {
+  inherits = ["prover-chef"]
+  args = { CACHE_FAMILY = "utils" }
 }
 
 target "_common" {
@@ -46,6 +55,7 @@ target "_common" {
   args = {
     CHEF_IMAGE = "chef"
     RUST_PROFILE = "profiling"
+    CACHE_FAMILY = "node"
     VERGEN_GIT_SHA = "${VERGEN_GIT_SHA}"
     VERGEN_GIT_SHA_SHORT = "${VERGEN_GIT_SHA_SHORT}"
   }
@@ -66,6 +76,7 @@ target "tempo-zone-prover-enclave" {
   args = {
     CHEF_IMAGE = "chef"
     RUST_PROFILE = "release"
+    CACHE_FAMILY = "enclave"
   }
   platforms = ["linux/amd64"]
 }
@@ -75,11 +86,12 @@ target "tempo-zone-prover-utils" {
   dockerfile = "docker/Dockerfile.prover-utils"
   context = "."
   contexts = {
-    chef = "target:prover-chef"
+    chef = "target:utils-chef"
   }
   args = {
     CHEF_IMAGE = "chef"
     RUST_PROFILE = "release"
+    CACHE_FAMILY = "utils"
   }
   platforms = ["linux/amd64"]
 }
