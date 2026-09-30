@@ -789,7 +789,7 @@ jobs:
           set -euo pipefail
           cargo install samply \
             --git https://github.com/DaniPopes/samply \
-            --rev 06f9075697ad144feaf3e15c2254a043b243fdbf \
+            --rev d1f783d139dfbda60cc0109df9d134135983c551 \
             --locked \
             --force
           samply_path="$(command -v samply)"
