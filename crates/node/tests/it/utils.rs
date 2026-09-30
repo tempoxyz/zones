@@ -233,13 +233,8 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
     portal.code = Some(code.into());
 
     // The native factory requires the initial token's TIP-403 policy binding to exist.
-    let token_policy_slot = keccak256(
-        (
-            PATH_USD_ADDRESS,
-            tip403_registry_slots::TOKEN_TRANSFER_POLICIES,
-        )
-            .abi_encode(),
-    );
+    let token_policy_slot =
+        PATH_USD_ADDRESS.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
     let packed_policy = U256::from(ALLOW_ALL_POLICY_ID) | (U256::ONE << u64::BITS);
     genesis
         .alloc
@@ -247,7 +242,7 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
         .or_default()
         .storage
         .get_or_insert_default()
-        .insert(token_policy_slot, packed_policy.into());
+        .insert(token_policy_slot.into(), packed_policy.into());
 
     Ok(())
 }
@@ -474,7 +469,9 @@ pub(crate) fn seed_raw_tip403_token_policy(
     token: Address,
     policy_id: u64,
 ) {
-    let slot = keccak256((token, tip403_registry_slots::TOKEN_TRANSFER_POLICIES).abi_encode());
+    let slot: B256 = token
+        .mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES)
+        .into();
     let packed: U256 = U256::from(policy_id) | (U256::ONE << 64);
     cache.set(TIP403_REGISTRY_ADDRESS, slot, block_number, packed.into());
 }
@@ -4993,7 +4990,7 @@ impl L1Fixture {
         let mut cache = cache_handle.lock();
         let deposit_queue_hash_slot = portal::slots::CURRENT_DEPOSIT_QUEUE_HASH.into();
         let refunds_slot = portal::slots::REFUNDS.into();
-        let sequencer_membership_slot = keccak256((sequencer, portal::slots::ROLE).abi_encode());
+        let sequencer_membership_slot: B256 = sequencer.mapping_slot(portal::slots::ROLE).into();
         let path_usd_config_slot: B256 = PATH_USD_ADDRESS
             .mapping_slot(portal::slots::TOKEN_CONFIGS)
             .into();

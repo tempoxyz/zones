@@ -692,7 +692,9 @@ mod tests {
     use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
     use reth_evm::ConfigureEvm;
-    use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
+    use reth_trie_common::{
+        EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode, root::state_root_unhashed,
+    };
     use revm::{
         DatabaseCommit as _,
         database::{State, states::bundle_state::BundleRetention},
@@ -1109,10 +1111,7 @@ mod tests {
             storage_root: EMPTY_ROOT_HASH,
             code_hash: alloy_consensus::constants::KECCAK_EMPTY,
         };
-        let expected_root = keccak256(alloy_rlp::encode(TrieNode::Leaf(LeafNode::new(
-            Nibbles::unpack(keccak256(address)),
-            alloy_rlp::encode(expected_account),
-        ))));
+        let expected_root = state_root_unhashed([(address, expected_account)]);
         assert_eq!(
             state.database.state_root(state.bundle_state).unwrap(),
             expected_root

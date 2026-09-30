@@ -471,9 +471,9 @@ mod tests {
     use super::*;
 
     use alloy_consensus::Sealable as _;
-    use alloy_primitives::{B256, U256, address, keccak256};
-    use alloy_sol_types::{SolCall, SolValue};
-    use reth_chainspec::{EthChainSpec, ForkCondition};
+    use alloy_primitives::{B256, U256, address};
+    use alloy_sol_types::SolCall;
+    use reth_chainspec::EthChainSpec;
     use revm::{
         context::result::ExecutionResult,
         database::{CacheDB, EmptyDB},
@@ -519,14 +519,18 @@ mod tests {
         let reader = MockL1Reader::default();
 
         reader.seed_active_sequencer(portal, CHILD, sequencer);
-        let token_enablement_hash =
-            keccak256((B256::ZERO, token, "Adversarial Token", "ADV", "USD").abi_encode_params());
+        let enabled_token = IZoneInbox::EnabledToken {
+            token,
+            name: "Adversarial Token".into(),
+            symbol: "ADV".into(),
+            currency: "USD".into(),
+        };
         let portal_storage = ZonePortalStorage::new(portal);
         reader.insert(
             portal,
             portal_storage.token_enablement_hash.slot(),
             CHILD,
-            token_enablement_hash.into(),
+            enabled_token.hash_with_previous(B256::ZERO).into(),
         );
 
         let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
@@ -564,12 +568,7 @@ mod tests {
             header: alloy_rlp::encode(&child).into(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
-            enabledTokens: vec![IZoneInbox::EnabledToken {
-                token,
-                name: "Adversarial Token".into(),
-                symbol: "ADV".into(),
-                currency: "USD".into(),
-            }],
+            enabledTokens: vec![enabled_token],
         }
         .abi_encode();
 
@@ -605,10 +604,8 @@ mod tests {
         let composed = Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap());
         let activation_timestamp = TempoHardfork::VARIANTS
             .iter()
-            .find_map(|&hardfork| match MODERATO.tempo_fork_activation(hardfork) {
-                ForkCondition::Timestamp(timestamp) if timestamp > 0 => Some(timestamp),
-                _ => None,
-            })
+            .filter_map(|&hardfork| MODERATO.tempo_fork_activation(hardfork).as_timestamp())
+            .find(|&timestamp| timestamp > 0)
             .expect("Moderato must have a post-genesis Tempo hardfork");
         let config = ZoneEvmConfig::new(composed, MockL1Reader::default(), Address::ZERO);
         for timestamp in [activation_timestamp - 1, activation_timestamp] {

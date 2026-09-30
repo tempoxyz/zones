@@ -466,9 +466,8 @@ fn genesis_state_witness(genesis: &Genesis) -> (B256, Vec<Bytes>, Vec<Bytes>) {
         }
 
         let code_hash = account
-            .code
-            .as_ref()
-            .map_or(alloy_consensus::constants::KECCAK_EMPTY, keccak256);
+            .code_hash()
+            .unwrap_or(alloy_consensus::constants::KECCAK_EMPTY);
         if let Some(code) = &account.code {
             bytecodes.entry(code_hash).or_insert_with(|| code.clone());
         }
@@ -494,14 +493,9 @@ fn genesis_state_witness(genesis: &Genesis) -> (B256, Vec<Bytes>, Vec<Bytes>) {
 
 fn storage_trie(account: &GenesisAccount) -> (B256, Vec<Bytes>) {
     let leaves = account
-        .storage
-        .iter()
-        .flat_map(|storage| storage.iter())
+        .storage_slots()
         .filter(|(_, value)| !value.is_zero())
-        .map(|(slot, value)| {
-            let value = U256::from_be_bytes(value.0);
-            (keccak256(slot), alloy_rlp::encode(value))
-        })
+        .map(|(slot, value)| (keccak256(slot), alloy_rlp::encode(value)))
         .collect();
     trie(leaves)
 }
