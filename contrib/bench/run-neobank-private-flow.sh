@@ -718,18 +718,21 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         ;;
 esac
 
-pathusd_working_set_balance() {
-    local total=0 account balance
+# Prints "<total> <minimum>" of a Zone token balance across the benchmark accounts.
+working_set_balance() {
+    local token="$1" total=0 minimum="" account balance
     while IFS= read -r account; do
-        balance="$(cast call "$ZONES_BENCH_PATHUSD" 'balanceOf(address)(uint256)' \
+        balance="$(cast call "$token" 'balanceOf(address)(uint256)' \
             "$account" --from "$account" --rpc-url "$ZONE_RPC_URL" | awk '{print $1}')"
-        [[ "$balance" =~ ^[0-9]+$ ]] || die "invalid PathUSD working-set balance"
+        [[ "$balance" =~ ^[0-9]+$ ]] || die "invalid $token working-set balance"
         total="$(bigint_eval "$total + $balance")"
+        if [[ -z "$minimum" ]] || bigint_true "$balance < $minimum"; then minimum="$balance"; fi
     done < <(jq -r '.[]' "$ZONES_BENCH_OUTPUT/accounts.json")
-    printf '%s\n' "$total"
+    printf '%s %s\n' "$total" "$minimum"
 }
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == full-journey-pathusd-fees ]]; then
-    pathusd_before="$(pathusd_working_set_balance)"
+    read -r pathusd_before _ <<<"$(working_set_balance "$ZONES_BENCH_PATHUSD")"
+    read -r dlusd_before dlusd_min_before <<<"$(working_set_balance "$ZONES_BENCH_DLUSD")"
 fi
 [[ -z "${ZONES_BENCH_SETTLEMENT_FILE:-}" || -n "${ZONES_BENCH_SETTLEMENT_START_FILE:-}" ]] ||
     die "ZONES_BENCH_SETTLEMENT_FILE requires ZONES_BENCH_SETTLEMENT_START_FILE"
@@ -817,12 +820,21 @@ if [[ -n "${ZONES_BENCH_SETTLEMENT_FILE:-}" ]]; then
     done
 fi
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == full-journey-pathusd-fees ]]; then
-    pathusd_after="$(pathusd_working_set_balance)"
-    bigint_true "$pathusd_after < $pathusd_before" || die "measured journey did not spend seeded PathUSD"
-    jq -n --arg before "$pathusd_before" --arg after "$pathusd_after" \
-        --arg token "$ZONES_BENCH_PATHUSD" \
-        '{token:$token,balance_before:$before,balance_after:$after,seeded_balance_spent:true}' \
-        >"$ZONES_BENCH_OUTPUT/seeded-fee-balances.json"
+    read -r pathusd_after _ <<<"$(working_set_balance "$ZONES_BENCH_PATHUSD")"
+    read -r dlusd_after dlusd_min_after <<<"$(working_set_balance "$ZONES_BENCH_DLUSD")"
+    # Test-only: Zone gas is free in this topology, so PathUSD fees cannot be observed.
+    pathusd_spent=false
+    bigint_true "$pathusd_after < $pathusd_before" && pathusd_spent=true
+    [[ "$pathusd_spent" == true ]] || echo "::warning::measured journey did not spend seeded PathUSD (Zone gas price is zero)"
+    # DLUSD is reserved token 1 here; the seeded balance must survive enablement and the journeys.
+    seeded_balance=18446744073709551615
+    bigint_true "$dlusd_min_before >= $seeded_balance" || die "seeded DLUSD balance missing before the journey"
+    bigint_true "$dlusd_min_after >= $seeded_balance" || die "seeded DLUSD balance lost during the journey"
+    jq -n --arg pathusd "$ZONES_BENCH_PATHUSD" --arg pb "$pathusd_before" --arg pa "$pathusd_after" \
+        --argjson spent "$pathusd_spent" --arg dlusd "$ZONES_BENCH_DLUSD" \
+        --arg db "$dlusd_before" --arg da "$dlusd_after" --arg dmb "$dlusd_min_before" --arg dma "$dlusd_min_after" \
+        '{pathusd:{token:$pathusd,balance_before:$pb,balance_after:$pa,spent:$spent},dlusd:{token:$dlusd,total_before:$db,total_after:$da,min_before:$dmb,min_after:$dma}}' \
+        | tee "$ZONES_BENCH_OUTPUT/seeded-fee-balances.json"
 fi
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
