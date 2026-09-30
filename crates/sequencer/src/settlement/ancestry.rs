@@ -252,8 +252,29 @@ fn resolve(
 pub(crate) mod test_utils {
     use super::*;
     use alloy_consensus::Header as ConsensusHeader;
+    use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
+    use alloy_transport::mock::Asserter;
     use tempo_alloy::rpc::TempoHeaderResponse;
+
+    pub(crate) fn mock_l1(asserter: Asserter) -> DynProvider<TempoNetwork> {
+        ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter)
+            .erased()
+    }
+
+    pub(crate) fn push_headers(asserter: &Asserter, headers: &[TempoHeaderResponse]) {
+        for header in headers {
+            asserter.push_success(header);
+        }
+    }
+
+    pub(crate) fn encoded_headers(headers: &[TempoHeaderResponse]) -> Vec<Bytes> {
+        headers
+            .iter()
+            .map(|header| Bytes::from(alloy_rlp::encode(&header.inner.inner)))
+            .collect()
+    }
 
     /// RPC header response for `number` with the given parent, plus its hash.
     pub(crate) fn mock_l1_header(number: u64, parent_hash: B256) -> (TempoHeaderResponse, B256) {
@@ -281,12 +302,12 @@ pub(crate) mod test_utils {
     }
 
     /// Parent-linked mock responses for `from..=to`.
-    pub(crate) fn mock_l1_chain(from: u64, to: u64) -> Vec<(TempoHeaderResponse, B256)> {
+    pub(crate) fn mock_l1_chain(from: u64, to: u64) -> Vec<TempoHeaderResponse> {
         let mut parent_hash = B256::ZERO;
         (from..=to)
             .map(|number| {
-                let header = mock_l1_header(number, parent_hash);
-                parent_hash = header.1;
+                let (header, hash) = mock_l1_header(number, parent_hash);
+                parent_hash = hash;
                 header
             })
             .collect()
@@ -295,21 +316,14 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use super::{test_utils::mock_l1_chain, *};
-    use alloy_provider::ProviderBuilder;
+    use super::{test_utils::*, *};
     use alloy_transport::mock::Asserter;
     use proptest::prelude::*;
 
     fn mocked_loader() -> (AncestryLoader, Asserter) {
         let asserter = Asserter::new();
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        (AncestryLoader::with_capacity(provider, 4), asserter)
-    }
-
-    fn encoded(header: &tempo_alloy::rpc::TempoHeaderResponse) -> Bytes {
-        Bytes::from(alloy_rlp::encode(&header.inner.inner))
+        let loader = AncestryLoader::with_capacity(mock_l1(asserter.clone()), 4);
+        (loader, asserter)
     }
 
     fn synthetic_ancestry(from: u64, payloads: &[Vec<u8>]) -> Vec<CachedHeader> {
@@ -357,28 +371,23 @@ mod tests {
             let chain = synthetic_ancestry(from, &payloads);
             let to = chain.last().unwrap().number;
             let (cold, _) = resolve(from, to, Vec::new(), chain.clone()).unwrap();
-            let (cached, fetched): (Vec<_>, Vec<_>) = chain
+            // Both cold and partitioned loads must return exactly the range, excluding its base.
+            let expected = chain[1..].iter().map(|header| header.encoded.clone()).collect::<Vec<_>>();
+            prop_assert_eq!(&cold.headers, &expected);
+            prop_assert_eq!(cold.base, BlockNumHash::new(from, chain[0].hash));
+            prop_assert_eq!(cold.anchor, BlockNumHash::new(to, chain.last().unwrap().hash));
+            let mut shuffled = chain.into_iter().zip(order_keys).collect::<Vec<_>>();
+            shuffled.sort_by_key(|(_, order_key)| *order_key);
+            let (cached, fetched): (Vec<_>, Vec<_>) = shuffled
                 .into_iter()
-                .enumerate()
-                .partition(|(index, _)| cache_mask & (1_u128 << index) != 0);
-            let cached = cached.into_iter().map(|(_, header)| header).collect();
-            let mut fetched = fetched
-                .into_iter()
-                .map(|(index, header)| (order_keys[index], header))
-                .collect::<Vec<_>>();
-            fetched.sort_by_key(|(order_key, _)| *order_key);
-            let fetched = fetched.into_iter().map(|(_, header)| header).collect::<Vec<_>>();
-            let mut expected_fetched = fetched
-                .iter()
-                .map(|header| (header.number, header.hash))
-                .collect::<Vec<_>>();
+                .map(|(header, _)| header)
+                .partition(|header| cache_mask & (1_u128 << (header.number - from)) != 0);
+            let identity = |header: &CachedHeader| (header.number, header.hash);
+            let mut expected_fetched = fetched.iter().map(identity).collect::<Vec<_>>();
             expected_fetched.sort_by_key(|(number, _)| *number);
 
             let (partitioned, actual_fetched) = resolve(from, to, cached, fetched).unwrap();
-            let actual_fetched = actual_fetched
-                .iter()
-                .map(|header| (header.number, header.hash))
-                .collect::<Vec<_>>();
+            let actual_fetched = actual_fetched.iter().map(identity).collect::<Vec<_>>();
             prop_assert_eq!(partitioned, cold);
             prop_assert_eq!(actual_fetched, expected_fetched);
         }
@@ -426,23 +435,6 @@ mod tests {
                 "out-of-range header was accepted"
             );
         }
-
-        #[test]
-        fn ancestry_resolution_returns_exact_range_without_base(
-            (from, payloads, _) in ancestry_case(),
-        ) {
-            let chain = synthetic_ancestry(from, &payloads);
-            let to = chain.last().unwrap().number;
-            let expected = chain[1..]
-                .iter()
-                .map(|header| header.encoded.clone())
-                .collect::<Vec<_>>();
-
-            let (resolved, _) = resolve(from, to, Vec::new(), chain.clone()).unwrap();
-            prop_assert_eq!(resolved.headers, expected);
-            prop_assert_eq!(resolved.base, BlockNumHash::new(from, chain[0].hash));
-            prop_assert_eq!(resolved.anchor, BlockNumHash::new(to, chain.last().unwrap().hash));
-        }
     }
 
     #[test]
@@ -455,10 +447,10 @@ mod tests {
     async fn empty_range_returns_base_as_anchor() {
         let (loader, asserter) = mocked_loader();
         let chain = mock_l1_chain(10, 10);
-        asserter.push_success(&chain[0].0);
+        push_headers(&asserter, &chain);
 
         let ancestry = loader.load(10, 10, |_| Ok(())).await.unwrap();
-        assert_eq!(ancestry.base, BlockNumHash::new(10, chain[0].1));
+        assert_eq!(ancestry.base, BlockNumHash::new(10, chain[0].inner.hash));
         assert_eq!(ancestry.anchor, ancestry.base);
         assert!(ancestry.headers.is_empty());
     }
@@ -466,10 +458,10 @@ mod tests {
     #[tokio::test]
     async fn misnumbered_response_is_rejected_and_not_cached() {
         let (loader, asserter) = mocked_loader();
-        let chain = mock_l1_chain(10, 11);
+        let (header, _) = mock_l1_header(11, B256::ZERO);
         // The request for block 10 is answered with block 11.
-        asserter.push_success(&chain[1].0);
-        asserter.push_success(&chain[1].0);
+        asserter.push_success(&header);
+        asserter.push_success(&header);
 
         let error = loader.load(10, 11, |_| Ok(())).await.unwrap_err();
         assert!(
@@ -484,70 +476,39 @@ mod tests {
     async fn broken_chain_is_not_cached() {
         let (loader, asserter) = mocked_loader();
         let chain = mock_l1_chain(10, 11);
-        let (unlinked, _) = test_utils::mock_l1_header(12, B256::repeat_byte(0xff));
-        for (header, _) in &chain {
-            asserter.push_success(header);
-        }
-        asserter.push_success(&unlinked);
+        push_headers(&asserter, &chain);
+        asserter.push_success(&mock_l1_header(12, B256::repeat_byte(0xff)).0);
 
         assert!(loader.load(10, 12, |_| Ok(())).await.is_err());
         assert!(loader.is_empty());
     }
 
     #[tokio::test]
-    async fn cache_fetches_only_new_suffix() {
+    async fn cache_reuses_entries_and_fetches_only_new_suffix() {
         let (loader, asserter) = mocked_loader();
         let chain = mock_l1_chain(10, 15);
+        let oldest = || loader.cache.read().peek_oldest().map(|(number, _)| *number);
 
-        // The initial range fetches its base plus all ancestry headers.
-        for (header, _) in &chain[..5] {
-            asserter.push_success(header);
-        }
+        // Loading five headers into a four-entry cache evicts the base.
+        push_headers(&asserter, &chain[..5]);
         let first = loader.load(10, 14, |_| Ok(())).await.unwrap();
-        assert_eq!(
-            first.headers,
-            chain[1..5]
-                .iter()
-                .map(|(header, _)| encoded(header))
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(first.headers, encoded_headers(&chain[1..5]));
         assert_eq!(loader.cache.read().len(), 4);
+        assert_eq!(oldest(), Some(11));
 
-        // The overlapping range reuses blocks 11..=14 and fetches only block 15.
-        // If the implementation repeats any cached RPC call, the mock has no
-        // additional response queued and the test fails.
-        asserter.push_success(&chain[5].0);
+        // A fully cached range must neither fetch nor promote or replace hits.
+        loader.load(11, 13, |_| Ok(())).await.unwrap();
+        assert_eq!(oldest(), Some(11));
+
+        // Queue only the new suffix: any repeated cached RPC request fails.
+        push_headers(&asserter, &chain[5..]);
         let second = loader.load(11, 15, |_| Ok(())).await.unwrap();
-        assert_eq!(
-            second.headers,
-            chain[2..6]
-                .iter()
-                .map(|(header, _)| encoded(header))
-                .collect::<Vec<_>>()
-        );
-
+        assert_eq!(second.headers, encoded_headers(&chain[2..]));
         let cache = loader.cache.read();
         assert!(cache.peek(&11).is_none());
         for number in 12..=15 {
             assert!(cache.peek(&number).is_some());
         }
-    }
-
-    #[tokio::test]
-    async fn cache_hits_do_not_rewrite_entries() {
-        let (loader, asserter) = mocked_loader();
-        for (header, _) in mock_l1_chain(10, 13) {
-            asserter.push_success(&header);
-        }
-
-        let oldest =
-            |loader: &AncestryLoader| loader.cache.read().peek_oldest().map(|(number, _)| *number);
-        loader.load(10, 13, |_| Ok(())).await.unwrap();
-        assert_eq!(oldest(&loader), Some(10));
-
-        // Resolving a fully cached range must not promote or replace every hit.
-        loader.load(10, 12, |_| Ok(())).await.unwrap();
-        assert_eq!(oldest(&loader), Some(10));
         assert!(asserter.read_q().is_empty());
     }
 }

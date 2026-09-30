@@ -1296,8 +1296,9 @@ fn witness_size(witness: &BatchWitness) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settlement::ancestry::test_utils::{mock_l1_chain, mock_l1_header};
-    use alloy_provider::{Provider as _, ProviderBuilder};
+    use crate::settlement::ancestry::test_utils::{
+        mock_l1, mock_l1_chain, mock_l1_header, push_headers,
+    };
     use alloy_transport::mock::Asserter;
     use zone_rpc::types::ZoneExecutionWitness;
     use zone_spf::{
@@ -1524,77 +1525,47 @@ mod tests {
         }
     }
 
-    fn mocked_l1_provider() -> DynProvider<TempoNetwork> {
-        ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(Asserter::new())
-            .erased()
-    }
-
     #[tokio::test]
-    async fn exact_direct_anchor_uses_committed_hash_without_tip_lookup() {
-        let hash = B256::repeat_byte(0x42);
-        let anchor = resolve_exact_anchor(
-            &AncestryLoader::new(mocked_l1_provider()),
-            10,
-            hash,
-            ShadowProofAnchor { number: 10, hash },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(anchor.block_number(10), 10);
-        assert_eq!(anchor.block_hash(), hash);
-        assert!(anchor.ancestry_headers().is_empty());
-    }
-
-    #[tokio::test]
-    async fn exact_direct_anchor_rejects_different_committed_hash() {
-        let result = resolve_exact_anchor(
-            &AncestryLoader::new(mocked_l1_provider()),
-            10,
-            B256::repeat_byte(0x42),
-            ShadowProofAnchor {
-                number: 10,
-                hash: B256::repeat_byte(0x43),
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn exact_anchor_rejects_number_before_checkpoint() {
-        let result = resolve_exact_anchor(
-            &AncestryLoader::new(mocked_l1_provider()),
-            10,
-            B256::repeat_byte(0x42),
-            ShadowProofAnchor {
-                number: 9,
-                hash: B256::repeat_byte(0x41),
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
+    async fn exact_anchor_checks_committed_identity_without_tip_lookup() {
+        let checkpoint_hash = B256::repeat_byte(0x42);
+        for (number, hash, message) in [
+            (10, checkpoint_hash, None),
+            (10, B256::repeat_byte(0x43), Some("checkpoint hash")),
+            (9, B256::repeat_byte(0x41), Some("invalid ancestry range")),
+        ] {
+            let result = resolve_exact_anchor(
+                &AncestryLoader::new(mock_l1(Asserter::new())),
+                10,
+                checkpoint_hash,
+                ShadowProofAnchor { number, hash },
+            )
+            .await;
+            match message {
+                Some(message) => {
+                    let error = result.unwrap_err();
+                    assert!(error.to_string().contains(message), "{error}");
+                }
+                None => {
+                    let anchor = result.unwrap();
+                    assert_eq!(anchor.block_number(10), 10);
+                    assert_eq!(anchor.block_hash(), checkpoint_hash);
+                    assert!(anchor.ancestry_headers().is_empty());
+                }
+            }
+        }
     }
 
     #[tokio::test]
     async fn exact_ancestry_checks_endpoints_before_caching() {
         let chain = mock_l1_chain(10, 12);
-        let (base_hash, anchor_hash) = (chain[0].1, chain[2].1);
+        let (base_hash, anchor_hash) = (chain[0].inner.hash, chain[2].inner.hash);
         for (checkpoint_hash, submitted_hash, message) in [
             (B256::repeat_byte(0x42), anchor_hash, "checkpoint hash"),
             (base_hash, B256::repeat_byte(0x43), "canonical hash"),
         ] {
             let asserter = Asserter::new();
-            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect_mocked_client(asserter.clone())
-                .erased();
-            let ancestry = AncestryLoader::new(provider);
-            for (header, _) in &chain {
-                asserter.push_success(header);
-            }
+            let ancestry = AncestryLoader::new(mock_l1(asserter.clone()));
+            push_headers(&asserter, &chain);
 
             let mut proof_anchor = ShadowProofAnchor {
                 number: 12,
@@ -1608,9 +1579,7 @@ mod tests {
 
             // A valid retry must fetch the range again, not reuse rejected headers.
             proof_anchor.hash = anchor_hash;
-            for (header, _) in &chain {
-                asserter.push_success(header);
-            }
+            push_headers(&asserter, &chain);
             let anchor = resolve_exact_anchor(&ancestry, 10, base_hash, proof_anchor)
                 .await
                 .unwrap();

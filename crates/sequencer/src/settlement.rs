@@ -1757,7 +1757,9 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ancestry::test_utils::{mock_l1_chain, mock_l1_header},
+        ancestry::test_utils::{
+            encoded_headers, mock_l1, mock_l1_chain, mock_l1_header, push_headers,
+        },
         *,
     };
     use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
@@ -1771,12 +1773,6 @@ mod tests {
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{Block, TempoHeader, TempoPrimitives};
     use zone_chainspec::test_utils::set_tempo_fork;
-
-    fn mock_l1(asserter: Asserter) -> DynProvider<TempoNetwork> {
-        ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter)
-            .erased()
-    }
 
     fn test_chain_spec() -> Arc<ZoneChainSpec> {
         Arc::new(ZoneChainSpec {
@@ -2137,59 +2133,41 @@ mod tests {
 
         // Gap 10 exceeds the effective window of 6, so the anchor sits at tip - margin.
         asserter.push_success(&110_u64);
-        asserter.push_success(&chain[6].0); // Fresh anchor read before loading ancestry.
-        for (header, _) in &chain {
-            asserter.push_success(header);
-        }
+        asserter.push_success(&chain[6]); // Fresh anchor read before loading ancestry.
+        push_headers(&asserter, &chain);
         let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
 
         assert_eq!(anchor.block_number(100), 106);
-        assert_eq!(anchor.block_hash(), chain[6].1);
-        assert_eq!(anchor.ancestry_headers().len(), 6);
+        assert_eq!(anchor.block_hash(), chain[6].inner.hash);
+        assert_eq!(anchor.ancestry_headers(), encoded_headers(&chain[1..]));
         assert!(asserter.read_q().is_empty());
 
         // A cached range can become stale either at the anchor or when a new
         // suffix no longer links to it. Both must trigger a cache reset and retry.
         for new_suffix in [false, true] {
-            let asserter = Asserter::new();
-            let submitter = BatchSubmitter::with_anchor_config(
-                Address::ZERO,
-                mock_l1(asserter.clone()),
-                test_chain_spec(),
-                BatchAnchorConfig::new(10, 4).unwrap(),
-            );
-            let old = mock_l1_chain(100, 106);
-            for (header, _) in &old {
-                asserter.push_success(header);
-            }
+            submitter.ancestry.clear();
+            push_headers(&asserter, &chain);
             submitter.ancestry.load(100, 106, |_| Ok(())).await.unwrap();
 
-            let fork_number = 106;
-            let mut fork = old[(fork_number - 100) as usize].0.clone();
-            fork.inner.inner.inner.timestamp += 1;
-            fork.inner.hash = keccak256(alloy_rlp::encode(&fork.inner.inner));
-            let (successor, _) = mock_l1_header(107, fork.inner.hash);
-            let (tip, expected) = if new_suffix {
-                (111_u64, &successor)
-            } else {
-                (110_u64, &fork)
-            };
-            asserter.push_success(&tip);
+            let mut fork = chain.clone();
+            fork[6].inner.inner.inner.timestamp += 1;
+            fork[6].inner.hash = keccak256(alloy_rlp::encode(&fork[6].inner.inner));
+            if new_suffix {
+                fork.push(mock_l1_header(107, fork[6].inner.hash).0);
+            }
+            let expected = fork.last().unwrap();
+            let anchor_number = 100 + fork.len() as u64 - 1;
+            asserter.push_success(&(anchor_number + 4));
             asserter.push_success(expected);
             if new_suffix {
                 asserter.push_success(expected); // First attempt cannot link the suffix.
             }
-            for (header, _) in &old[..(fork_number - 100) as usize] {
-                asserter.push_success(header);
-            }
-            asserter.push_success(&fork);
-            if new_suffix {
-                asserter.push_success(expected);
-            }
+            push_headers(&asserter, &fork); // Retry must fetch the whole canonical range.
 
             let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
             assert_eq!(anchor.block_hash(), expected.inner.hash);
-            assert_eq!(anchor.block_number(100), tip - 4);
+            assert_eq!(anchor.block_number(100), anchor_number);
+            assert_eq!(anchor.ancestry_headers(), encoded_headers(&fork[1..]));
             assert!(asserter.read_q().is_empty());
         }
     }
@@ -2450,9 +2428,7 @@ mod tests {
             .erased();
         let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
 
-        for (header, _) in mock_l1_chain(97, 98) {
-            asserter.push_success(&header);
-        }
+        push_headers(&asserter, &mock_l1_chain(97, 98));
         submitter.ancestry.load(97, 98, |_| Ok(())).await.unwrap();
         assert!(!submitter.ancestry.is_empty());
 
