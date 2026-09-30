@@ -480,8 +480,7 @@ async fn test_finalized_withdrawal_survives_sequencer_restart() -> eyre::Result<
     let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
     let same_block_finalized = outbox
         .BatchFinalized_filter()
-        .from_block(withdrawal_block)
-        .to_block(withdrawal_block)
+        .select(withdrawal_block)
         .query()
         .await?;
     assert_eq!(

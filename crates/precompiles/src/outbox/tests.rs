@@ -667,9 +667,9 @@ fn callback_and_reveal_boundaries_are_enforced() -> eyre::Result<()> {
         ZoneOutboxError::invalid_reveal_to(),
     );
 
-    let valid = Bytes::copy_from_slice(&alloy_primitives::hex!(
+    let valid = alloy_primitives::bytes!(
         "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-    ));
+    );
     harness.request_custom(base(Bytes::new(), valid))?;
     Ok(())
 }

@@ -1946,7 +1946,7 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
-    use alloy_consensus::Header as ConsensusHeader;
+    use alloy_consensus::{Header as ConsensusHeader, Sealable as _};
     use alloy_primitives::{B256, address};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
@@ -2254,7 +2254,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let hash = alloy_primitives::keccak256(alloy_rlp::encode(&header));
+        let hash = header.hash_slow();
         (
             TempoHeaderResponse {
                 inner: RpcHeader {

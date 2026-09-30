@@ -46,7 +46,6 @@ paste = "1.0.15"
 thiserror.workspace = true
 
 [dev-dependencies]
-const-hex.workspace = true
 eyre.workspace = true
 serde.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }

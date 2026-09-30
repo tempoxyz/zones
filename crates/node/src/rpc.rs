@@ -439,10 +439,9 @@ fn spf_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
     let mut history_storage = HashedStorage::default();
     for (number, hash) in state.block_hashes.iter() {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
-        history_storage.storage.insert(
-            keccak256(slot.to_be_bytes::<32>()),
-            U256::from_be_bytes(hash.0),
-        );
+        history_storage
+            .storage
+            .insert(keccak256(slot.to_be_bytes::<32>()), hash.into());
     }
     if !history_storage.storage.is_empty() {
         targets.extend(HashedPostState::from_hashed_storage(
@@ -1627,7 +1626,7 @@ mod tests {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
         assert_eq!(
             storage.storage.get(&keccak256(slot.to_be_bytes::<32>())),
-            Some(&U256::from_be_bytes(hash.0))
+            Some(&hash.into())
         );
     }
 

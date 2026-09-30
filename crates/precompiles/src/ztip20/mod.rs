@@ -750,10 +750,7 @@ mod tests {
             true,
         )?;
         assert!(allowance_result.is_success());
-        assert_eq!(
-            allowance_result.bytes,
-            Bytes::copy_from_slice(&allowance_bytes)
-        );
+        assert_eq!(allowance_result.bytes, Bytes::from(allowance_bytes));
 
         let result = harness.call(
             harness.spender,

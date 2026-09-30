@@ -7,7 +7,6 @@ use alloy::{
     primitives::{Address, address},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
-    sol_types::SolEvent,
 };
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
@@ -240,10 +239,7 @@ impl CreateZone {
             .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
 
         let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ZoneFactory::ZoneCreated>()
             .ok_or_else(|| eyre!("no ZoneCreated event in receipt"))?;
 
         let zone_id = event.zoneId;

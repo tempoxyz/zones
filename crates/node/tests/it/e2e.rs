@@ -813,8 +813,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
     let finalized = outbox
         .BatchFinalized_filter()
-        .from_block(deposit_block)
-        .to_block(deposit_block)
+        .select(deposit_block)
         .query()
         .await?;
     assert_eq!(
@@ -1093,8 +1092,7 @@ async fn test_withdrawal_request_finalizes_same_block() -> eyre::Result<()> {
 
     let requested_logs = outbox
         .WithdrawalRequested_filter()
-        .from_block(withdrawal_block)
-        .to_block(withdrawal_block)
+        .select(withdrawal_block)
         .query()
         .await?;
     assert_eq!(requested_logs.len(), 1);
@@ -1107,8 +1105,7 @@ async fn test_withdrawal_request_finalizes_same_block() -> eyre::Result<()> {
 
     let finalized_logs = outbox
         .BatchFinalized_filter()
-        .from_block(withdrawal_block)
-        .to_block(withdrawal_block)
+        .select(withdrawal_block)
         .query()
         .await?;
     assert_eq!(
@@ -1193,8 +1190,7 @@ async fn test_multiple_withdrawals_finalize_in_one_batch() -> eyre::Result<()> {
 
     let finalized_logs = outbox
         .BatchFinalized_filter()
-        .from_block(withdrawal_block)
-        .to_block(withdrawal_block)
+        .select(withdrawal_block)
         .query()
         .await?;
     assert_eq!(
@@ -1205,8 +1201,7 @@ async fn test_multiple_withdrawals_finalize_in_one_batch() -> eyre::Result<()> {
 
     let requested_logs = outbox
         .WithdrawalRequested_filter()
-        .from_block(withdrawal_block)
-        .to_block(withdrawal_block)
+        .select(withdrawal_block)
         .query()
         .await?;
     assert_eq!(requested_logs.len(), 2);
@@ -1358,8 +1353,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
 
     let finalized_logs = outbox
         .BatchFinalized_filter()
-        .from_block(withdrawal_block)
-        .to_block(withdrawal_block)
+        .select(withdrawal_block)
         .query()
         .await?;
     assert_eq!(
@@ -1370,8 +1364,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
 
     let requested_logs = outbox
         .WithdrawalRequested_filter()
-        .from_block(withdrawal_block)
-        .to_block(withdrawal_block)
+        .select(withdrawal_block)
         .query()
         .await?;
     let (requested, requested_log) = &requested_logs[0];

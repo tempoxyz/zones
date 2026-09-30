@@ -31,11 +31,10 @@ reth-storage-api.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-network.workspace = true
-alloy-primitives.workspace = true
+alloy-primitives = { workspace = true, features = ["k256"] }
 alloy-provider = { workspace = true, features = ["ws"] }
 alloy-rpc-client.workspace = true
 alloy-rpc-types-eth.workspace = true
-alloy-signer.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
 

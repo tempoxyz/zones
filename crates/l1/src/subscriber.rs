@@ -1186,9 +1186,7 @@ where
                         logs.push(log.inner.clone());
                     }
                     invalidated.insert(address);
-                    if let Some(address) =
-                        portal_event_cache_invalidation_address(log.topics().first())
-                    {
+                    if let Some(address) = portal_event_cache_invalidation_address(log.topic0()) {
                         invalidated.insert(address);
                     }
                     portal_events

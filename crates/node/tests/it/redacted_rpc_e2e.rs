@@ -16,7 +16,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
 };
 use alloy_eips::eip2718::Encodable2718;
-use alloy_provider::ProviderBuilder;
+use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
 use alloy_signer::SignerSync;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolError};
@@ -48,20 +48,6 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 
-alloy::sol! {
-    interface IMulticall3 {
-        struct Call {
-            address target;
-            bytes callData;
-        }
-
-        function aggregate(Call[] memory calls)
-            external
-            payable
-            returns (uint256 blockNumber, bytes[] memory returnData);
-    }
-}
-
 fn corrupt_token_hex(token: &str) -> String {
     let mut bytes = hex::decode(token).expect("token hex should decode");
     let idx = usize::from(bytes.len() > 1);
@@ -70,7 +56,7 @@ fn corrupt_token_hex(token: &str) -> String {
 }
 
 fn address_topic(address: Address) -> String {
-    format!("{:#x}", B256::left_padding_from(address.as_slice()))
+    format!("{:#x}", address.into_word())
 }
 
 fn signed_sponsored_raw_transaction(
@@ -102,7 +88,7 @@ fn signed_sponsored_raw_transaction(
     );
     let envelope: TempoTxEnvelope = signed.into();
 
-    Ok(format!("0x{}", hex::encode(envelope.encoded_2718())))
+    Ok(hex::encode_prefixed(envelope.encoded_2718()))
 }
 
 fn assert_filter_not_found_error(response: &serde_json::Value) {
@@ -686,7 +672,7 @@ async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
         policyId: ALLOW_ALL_POLICY_ID,
         user: user.address(),
     };
-    let data = format!("0x{}", hex::encode(call.abi_encode()));
+    let data = hex::encode_prefixed(call.abi_encode());
     let operator_provider = ctx.zone.provider();
     let operator_registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &operator_provider);
 
@@ -773,9 +759,9 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
     let balance_call = PrecompileTip20::balanceOfCall { account: owner };
-    let balance_data = format!("0x{}", hex::encode(balance_call.abi_encode()));
+    let balance_data = hex::encode_prefixed(balance_call.abi_encode());
     let allowance_call = PrecompileTip20::allowanceCall { owner, spender };
-    let allowance_data = format!("0x{}", hex::encode(allowance_call.abi_encode()));
+    let allowance_data = hex::encode_prefixed(allowance_call.abi_encode());
 
     let outsider_balance = ctx
         .call_as_user(
@@ -820,7 +806,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
                 {
                     "from": format!("{:#x}", ctx.sequencer_signer.address()),
                     "to": format!("{PATH_USD_ADDRESS:#x}"),
-                    "data": format!("0x{}", hex::encode(balance_call.abi_encode())),
+                    "data": hex::encode_prefixed(balance_call.abi_encode()),
                 },
                 "latest"
             ]),
@@ -838,7 +824,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
                 {
                     "from": format!("{:#x}", ctx.sequencer_signer.address()),
                     "to": format!("{PATH_USD_ADDRESS:#x}"),
-                    "data": format!("0x{}", hex::encode(allowance_call.abi_encode())),
+                    "data": hex::encode_prefixed(allowance_call.abi_encode()),
                 },
                 "latest"
             ]),
@@ -870,14 +856,14 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
             "eth_call",
             json!([{
                 "to": format!("{PATH_USD_ADDRESS:#x}"),
-                "data": format!("0x{}", hex::encode(&calldata)),
+                "data": hex::encode_prefixed(&calldata),
             }, "latest"]),
             &outsider_signer,
         )
         .await?;
     let outsider_error = outsider["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        outsider_error.contains(&format!("0x{}", hex::encode(Unauthorized::SELECTOR))),
+        outsider_error.contains(&hex::encode_prefixed(Unauthorized::SELECTOR)),
         "non-owner nonces(owner) should revert with Unauthorized(): {outsider}"
     );
 
@@ -886,7 +872,7 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
             "eth_call",
             json!([{
                 "to": format!("{PATH_USD_ADDRESS:#x}"),
-                "data": format!("0x{}", hex::encode(&calldata)),
+                "data": hex::encode_prefixed(&calldata),
             }, "latest"]),
             &owner_signer,
         )
@@ -913,7 +899,7 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
             "eth_call",
             json!([{
                 "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
-                "data": format!("0x{}", hex::encode(multicall.abi_encode())),
+                "data": hex::encode_prefixed(multicall.abi_encode()),
             }, "latest"]),
             &outsider_signer,
         )
@@ -942,7 +928,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
         token: ZONE_TOKEN_ADDRESS,
         owner,
     };
-    let refunds_data = format!("0x{}", hex::encode(refunds_call.abi_encode()));
+    let refunds_data = hex::encode_prefixed(refunds_call.abi_encode());
 
     let outsider_refunds = ctx
         .call_as_user(
@@ -960,7 +946,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let outsider_error = outsider_refunds["error"]["message"]
         .as_str()
         .expect("non-owner refund read should return an RPC error message");
-    let unauthorized_selector = format!("0x{}", hex::encode(Unauthorized::SELECTOR));
+    let unauthorized_selector = hex::encode_prefixed(Unauthorized::SELECTOR);
     assert!(
         outsider_error.contains("Unauthorized") && outsider_error.contains(&unauthorized_selector),
         "the ZoneInbox getter must reject a direct non-owner refund read with Unauthorized(): {outsider_refunds}"
@@ -972,7 +958,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
             json!([
                 {
                     "to": format!("{ZONE_INBOX_ADDRESS:#x}"),
-                    "data": format!("0x{}", hex::encode(refunds_call.abi_encode())),
+                    "data": hex::encode_prefixed(refunds_call.abi_encode()),
                 },
                 "latest"
             ]),
@@ -1003,7 +989,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
             json!([
                 {
                     "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
-                    "data": format!("0x{}", hex::encode(multicall.abi_encode())),
+                    "data": hex::encode_prefixed(multicall.abi_encode()),
                 },
                 "latest"
             ]),
@@ -1063,7 +1049,7 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
                 json!([
                     {
                         "to": format!("{target:#x}"),
-                        "data": format!("0x{}", hex::encode(&calldata)),
+                        "data": hex::encode_prefixed(&calldata),
                     },
                     "latest"
                 ]),
@@ -1072,7 +1058,7 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
             .await?;
         let direct_error = direct["error"]["message"].as_str().unwrap_or_default();
         assert!(
-            direct_error.contains(&format!("0x{}", hex::encode(Unauthorized::SELECTOR))),
+            direct_error.contains(&hex::encode_prefixed(Unauthorized::SELECTOR)),
             "outsider direct {label} should revert with Unauthorized(): {direct}"
         );
 
@@ -1082,7 +1068,7 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
                 json!([
                     {
                         "to": format!("{target:#x}"),
-                        "data": format!("0x{}", hex::encode(&calldata)),
+                        "data": hex::encode_prefixed(&calldata),
                     },
                     "latest"
                 ]),
@@ -1106,7 +1092,7 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
                 json!([
                     {
                         "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
-                        "data": format!("0x{}", hex::encode(multicall.abi_encode())),
+                        "data": hex::encode_prefixed(multicall.abi_encode()),
                     },
                     "latest"
                 ]),

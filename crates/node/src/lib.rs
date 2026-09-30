@@ -23,7 +23,7 @@ pub mod version;
 
 pub use engine::{EngineExit, ProductionPermit, ZoneEngine};
 pub use node::{
-    ProverRuntime, ZoneExecutorBuilder, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
-    ZoneShadowProverAddOnsConfig,
+    ZoneExecutorBuilder, ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig,
+    ZoneSequencerAddOnsConfig,
 };
 pub use version::init_version_metadata;
