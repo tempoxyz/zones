@@ -149,47 +149,45 @@ impl GenerateZoneGenesis {
         deploy_arachnid_create2_factory(&mut evm);
         deploy_permit2(&mut evm)?;
 
-        // Required for fee token transfer checks.
-        println!("Initializing TIP403 registry");
-        with_genesis_storage(&mut evm, || TIP403Registry::new().initialize())?;
-
-        println!("Creating pathUSD fee token at {PATH_USD_ADDRESS}");
-        create_path_usd_token(&mut evm)?;
-
-        let default_fee_token = self.default_fee_token;
-        println!("Initializing fee manager with default fee token {default_fee_token}");
         with_genesis_storage(&mut evm, || {
-            ZoneFeeManager::new()
-                .initialize(default_fee_token)
-                .expect("Could not init fee manager")
-        });
+            // Required for fee token transfer checks.
+            println!("Initializing TIP403 registry");
+            TIP403Registry::new().initialize()?;
 
-        println!("Initializing stablecoin exchange");
-        with_genesis_storage(&mut evm, || StablecoinDEX::new().initialize())?;
+            println!("Creating pathUSD fee token at {PATH_USD_ADDRESS}");
+            create_path_usd_token()?;
 
-        println!("Initializing nonce manager");
-        with_genesis_storage(&mut evm, || NonceManager::new().initialize())?;
+            let default_fee_token = self.default_fee_token;
+            println!("Initializing fee manager with default fee token {default_fee_token}");
+            ZoneFeeManager::new().initialize(default_fee_token)?;
 
-        println!("Initializing account keychain");
-        with_genesis_storage(&mut evm, || AccountKeychain::new().initialize())?;
+            println!("Initializing stablecoin exchange");
+            StablecoinDEX::new().initialize()?;
 
-        println!("Initializing TIP-1028 ReceivePolicyGuard");
-        with_genesis_storage(&mut evm, || ReceivePolicyGuard::new().initialize())?;
+            println!("Initializing nonce manager");
+            NonceManager::new().initialize()?;
 
-        // TIP-1060 bookkeeping writes StorageCredits from the EVM handler even when no
-        // transaction calls it. Keeping the account non-empty prevents EIP-161 from dropping
-        // the sequential transition while the sparse-trie state hook observes its storage.
-        println!("Initializing TIP-1060 StorageCredits");
-        with_genesis_storage(&mut evm, || StorageCredits::new().initialize())?;
+            println!("Initializing account keychain");
+            AccountKeychain::new().initialize()?;
 
-        println!("Initializing native TempoState at {TEMPO_STATE_ADDRESS}");
-        with_genesis_storage(&mut evm, || NativeTempoState::new().initialize(&header_rlp))?;
+            println!("Initializing TIP-1028 ReceivePolicyGuard");
+            ReceivePolicyGuard::new().initialize()?;
 
-        println!("Initializing native ZoneInbox at {ZONE_INBOX_ADDRESS}");
-        with_genesis_storage(&mut evm, || NativeZoneInbox::new().initialize())?;
+            // TIP-1060 bookkeeping writes StorageCredits from the EVM handler even when no
+            // transaction calls it. Keeping the account non-empty prevents EIP-161 from dropping
+            // the sequential transition while the sparse-trie state hook observes its storage.
+            println!("Initializing TIP-1060 StorageCredits");
+            StorageCredits::new().initialize()?;
 
-        println!("Initializing native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
-        with_genesis_storage(&mut evm, || NativeZoneOutbox::new().initialize())?;
+            println!("Initializing native TempoState at {TEMPO_STATE_ADDRESS}");
+            NativeTempoState::new().initialize(&header_rlp)?;
+
+            println!("Initializing native ZoneInbox at {ZONE_INBOX_ADDRESS}");
+            NativeZoneInbox::new().initialize()?;
+
+            println!("Initializing native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
+            NativeZoneOutbox::new().initialize()
+        })?;
 
         let native_state = evm.ctx_mut().journaled_state.finalize();
         evm.db_mut().commit(native_state);
@@ -444,35 +442,33 @@ fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> GenesisEvm {
 /// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
 /// Without this, user transactions on the zone revert with `InvalidFeeToken`.
 /// ZoneInbox is the fixed token admin; the configured zone admin receives no token roles.
-fn create_path_usd_token(evm: &mut GenesisEvm) -> eyre::Result<()> {
-    with_genesis_storage(evm, || {
-        TIP20Factory::new().create_token_reserved_address(
-            PATH_USD_ADDRESS,
-            "pathUSD",
-            "pathUSD",
-            "USD",
-            Address::ZERO,
-            ZONE_INBOX_ADDRESS,
-        )?;
+fn create_path_usd_token() -> tempo_precompiles::error::Result<()> {
+    TIP20Factory::new().create_token_reserved_address(
+        PATH_USD_ADDRESS,
+        "pathUSD",
+        "pathUSD",
+        "USD",
+        Address::ZERO,
+        ZONE_INBOX_ADDRESS,
+    )?;
 
-        let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
-        // Allow address(0) to mint (system transactions use sender=0)
-        token.grant_role_internal(Address::ZERO, ISSUER_ROLE)?;
-        // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
-        token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
-        // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
-        token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
+    let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+    // Allow address(0) to mint (system transactions use sender=0)
+    token.grant_role_internal(Address::ZERO, ISSUER_ROLE)?;
+    // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
+    token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
+    // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
+    token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
 
-        // Set a large supply cap
-        token.set_supply_cap(
-            ZONE_INBOX_ADDRESS,
-            ITIP20::setSupplyCapCall {
-                newSupplyCap: U256::from(u128::MAX),
-            },
-        )?;
+    // Set a large supply cap
+    token.set_supply_cap(
+        ZONE_INBOX_ADDRESS,
+        ITIP20::setSupplyCapCall {
+            newSupplyCap: U256::from(u128::MAX),
+        },
+    )?;
 
-        Ok(())
-    })
+    Ok(())
 }
 
 #[cfg(test)]
