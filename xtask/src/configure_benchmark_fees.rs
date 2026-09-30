@@ -8,11 +8,12 @@ use alloy::{
     network::{EthereumWallet, ReceiptResponse as _},
     primitives::Address,
     providers::ProviderBuilder,
-    signers::local::PrivateKeySigner,
 };
 use eyre::{WrapErr as _, ensure};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZonePortal};
+
+use crate::zone_utils::parse_private_key;
 
 const DEFAULT_ZONE_GAS_RATE: u128 = 1;
 const DEFAULT_BOUNCEBACK_GAS: u64 = 300_000;
@@ -66,11 +67,8 @@ impl ConfigureBenchmarkFees {
         // for it, so it cannot be placed in the process argument list by this command.
         let key = std::env::var("SEQUENCER_KEY")
             .wrap_err("SEQUENCER_KEY must be set in the environment")?;
-        let signer: PrivateKeySigner = key
-            .strip_prefix("0x")
-            .unwrap_or(&key)
-            .parse()
-            .wrap_err("SEQUENCER_KEY is not a valid private key")?;
+        let signer =
+            parse_private_key(&key).wrap_err("SEQUENCER_KEY is not a valid private key")?;
         let sequencer = signer.address();
 
         let l1 = ProviderBuilder::new_with_network::<TempoNetwork>()

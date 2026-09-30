@@ -4,6 +4,7 @@ use alloy::{
     primitives::{Address, B256, U256},
     providers::Provider,
     rpc::types::Filter,
+    signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
 use eyre::{WrapErr as _, eyre};
@@ -182,6 +183,13 @@ pub(crate) fn normalize_http_rpc(rpc_url: &str) -> String {
         .replace("ws://", "http://")
 }
 
+pub(crate) fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
+    Ok(private_key
+        .strip_prefix("0x")
+        .unwrap_or(private_key)
+        .parse()?)
+}
+
 pub(crate) fn check(receipt: &impl ReceiptResponse, label: &str) -> eyre::Result<()> {
     if !receipt.status() {
         return Err(eyre!("{label} reverted"));
@@ -345,4 +353,19 @@ pub(crate) async fn wait_for_withdrawal_processed<P: Provider<TempoNetwork>>(
     Err(eyre!(
         "timeout waiting for WithdrawalProcessed(to={to}, token={token}, amount={amount}, callbackSuccess={callback_success})"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_private_key;
+
+    #[test]
+    fn parses_prefixed_and_unprefixed_private_keys() {
+        let key = "1111111111111111111111111111111111111111111111111111111111111111";
+
+        assert_eq!(
+            parse_private_key(key).unwrap().to_bytes(),
+            parse_private_key(&format!("0x{key}")).unwrap().to_bytes()
+        );
+    }
 }

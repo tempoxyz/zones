@@ -21,7 +21,7 @@ use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
 use tempo_precompiles::TIP20_FACTORY_ADDRESS;
 use tempo_zone_contracts::{ZonePortal, ZonePortal::Role as PortalRole};
 
-use crate::zone_utils::check;
+use crate::zone_utils::{check, parse_private_key};
 
 alloy::sol! {
     #[sol(rpc)]
@@ -906,10 +906,7 @@ async fn grant_authority_unwrapper<P: Provider<TempoNetwork>>(
 fn signer_from_env(name: &str) -> eyre::Result<PrivateKeySigner> {
     let key =
         std::env::var(name).wrap_err_with(|| format!("{name} must be set in the environment"))?;
-    key.strip_prefix("0x")
-        .unwrap_or(&key)
-        .parse()
-        .wrap_err_with(|| format!("{name} is not a valid private key"))
+    parse_private_key(&key).wrap_err_with(|| format!("{name} is not a valid private key"))
 }
 
 async fn create_reserve_ledger<P: Provider<TempoNetwork>>(

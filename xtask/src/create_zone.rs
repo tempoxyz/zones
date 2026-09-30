@@ -6,7 +6,6 @@ use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
     primitives::{Address, address},
     providers::{Provider, ProviderBuilder},
-    signers::local::PrivateKeySigner,
 };
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
@@ -23,7 +22,7 @@ use zone_primitives::constants::zone_chain_id;
 use crate::{
     generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
     genesis_forks::GenesisForkArgs,
-    zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only},
+    zone_utils::{MODERATO_ZONE_FACTORY, parse_private_key, write_owner_only},
 };
 
 #[derive(Debug, clap::Parser)]
@@ -158,11 +157,7 @@ impl CreateZone {
             );
         }
 
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let signer: PrivateKeySigner = key_str.parse()?;
+        let signer = parse_private_key(&self.private_key)?;
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)

@@ -8,13 +8,14 @@ use alloy::{
     primitives::{Address, B256, Bytes, address},
     providers::{Provider, ProviderBuilder},
     rpc::types::Filter,
-    signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::{DepositPayload, IZoneInbox, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
+
+use crate::zone_utils::{L1_EXPLORER, parse_private_key};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct Deposit {
@@ -53,11 +54,7 @@ pub(crate) struct Deposit {
 
 impl Deposit {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let signer: PrivateKeySigner = key_str.parse()?;
+        let signer = parse_private_key(&self.private_key)?;
         let sender = signer.address();
         let to = self.to.unwrap_or(sender);
         let wallet = EthereumWallet::from(signer);
@@ -128,7 +125,7 @@ impl Deposit {
         }
 
         println!("Deposit sent! (block {block_number})");
-        println!("Explorer: https://explore.moderato.tempo.xyz/tx/{tx_hash}");
+        println!("Explorer: {L1_EXPLORER}/{tx_hash}");
 
         // Wait for L2 processing if zone RPC is provided
         if let (Some(zone_rpc), Some(from_block)) = (&self.zone_rpc_url, l2_from_block) {

@@ -23,6 +23,8 @@ use tempo_primitives::{
 use tempo_zone_contracts::{DepositPayload, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
+use crate::zone_utils::parse_private_key;
+
 #[derive(Debug, clap::Parser)]
 pub(crate) struct SpamDeposits {
     /// Tempo L1 RPC URL.
@@ -67,11 +69,7 @@ impl SpamDeposits {
         let start = Instant::now();
 
         // Parse whale key & create provider
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let whale: PrivateKeySigner = key_str.parse()?;
+        let whale = parse_private_key(&self.private_key)?;
         let whale_addr = whale.address();
         let wallet = EthereumWallet::from(whale);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()

@@ -4,12 +4,13 @@ use alloy::{
     network::{EthereumWallet, ReceiptResponse as _},
     primitives::Address,
     providers::{DynProvider, Provider as _, ProviderBuilder},
-    signers::local::PrivateKeySigner,
 };
 use eyre::{WrapErr as _, ensure};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_zone_contracts::{ZonePortal, ZonePortal::Role};
 use zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY;
+
+use crate::zone_utils::parse_private_key;
 
 #[derive(Debug, clap::Args)]
 struct PortalAccessArgs {
@@ -179,8 +180,7 @@ async fn connect(
     DynProvider<TempoNetwork>,
     u64,
 )> {
-    let key = args.admin_key.strip_prefix("0x").unwrap_or(&args.admin_key);
-    let signer: PrivateKeySigner = key.parse().wrap_err("ADMIN_KEY is not valid")?;
+    let signer = parse_private_key(&args.admin_key).wrap_err("ADMIN_KEY is not valid")?;
     let signer_address = signer.address();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .wallet(EthereumWallet::from(signer))

@@ -3,7 +3,6 @@ use alloy::{
     primitives::{Address, Bytes, TxKind},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
-    signers::local::PrivateKeySigner,
     sol_types::SolValue,
 };
 use eyre::{WrapErr as _, eyre};
@@ -12,7 +11,7 @@ use tempo_alloy::TempoNetwork;
 
 use crate::zone_utils::{
     L1_EXPLORER, MODERATO_ZONE_FACTORY, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check,
-    normalize_http_rpc,
+    normalize_http_rpc, parse_private_key,
 };
 
 #[derive(Debug, clap::Parser)]
@@ -54,11 +53,7 @@ impl DeployRouter {
             .or(zone_metadata.get_optional_address("zoneFactory")?)
             .unwrap_or(MODERATO_ZONE_FACTORY);
 
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let signer: PrivateKeySigner = key_str.parse()?;
+        let signer = parse_private_key(&self.private_key)?;
         let deployer = signer.address();
         let wallet = EthereumWallet::from(signer);
         let http_rpc = normalize_http_rpc(&self.l1_rpc_url);

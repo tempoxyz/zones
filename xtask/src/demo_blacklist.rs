@@ -58,7 +58,7 @@
 //!   for a couple of L1 blocks.
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
+    network::EthereumWallet,
     primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
     rpc::types::Filter,
@@ -79,7 +79,9 @@ use tempo_zone_contracts::{
 };
 use zone_precompiles::ecies::encrypt_deposit;
 
-const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
+use crate::zone_utils::{
+    L1_EXPLORER, check, normalize_http_rpc, parse_private_key, wait_for_token_enabled,
+};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct DemoBlacklist {
@@ -125,11 +127,7 @@ pub(crate) struct DemoBlacklist {
 
 impl DemoBlacklist {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let signer: PrivateKeySigner = key_str.parse()?;
+        let signer = parse_private_key(&self.private_key)?;
         let admin = signer.address();
         let wallet = EthereumWallet::from(signer);
 
@@ -151,17 +149,11 @@ impl DemoBlacklist {
                         .unwrap_or_else(|| "the matching generated/<name>/zone.json".to_string())
                 )
             })?;
-        let portal_admin_key = portal_admin_key_str
-            .strip_prefix("0x")
-            .unwrap_or(&portal_admin_key_str);
-        let portal_admin_signer: PrivateKeySigner = portal_admin_key.parse()?;
+        let portal_admin_signer = parse_private_key(&portal_admin_key_str)?;
         let portal_admin = portal_admin_signer.address();
         let portal_admin_wallet = EthereumWallet::from(portal_admin_signer);
 
-        let http_rpc = self
-            .l1_rpc_url
-            .replace("wss://", "https://")
-            .replace("ws://", "http://");
+        let http_rpc = normalize_http_rpc(&self.l1_rpc_url);
 
         let l1 = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
@@ -323,7 +315,7 @@ impl DemoBlacklist {
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
 
         println!("  Waiting for zone to pick up the new token...");
-        wait_for_token_enabled(&l2, token_addr).await?;
+        wait_for_token_enabled(&l2, 1, token_addr).await?;
         println!("  Token available on zone!");
         println!();
 
@@ -666,14 +658,6 @@ fn read_zone_json(path: &std::path::Path) -> eyre::Result<serde_json::Value> {
     serde_json::from_str(&contents).wrap_err_with(|| format!("failed parsing {}", path.display()))
 }
 
-/// Verify a transaction receipt succeeded, returning an error with `label` context if it reverted.
-fn check(receipt: &impl ReceiptResponse, label: &str) -> eyre::Result<()> {
-    if !receipt.status() {
-        return Err(eyre!("{label} reverted"));
-    }
-    Ok(())
-}
-
 /// Send a deposit through the portal.
 ///
 /// Fetches the sequencer's current encryption public key, encrypts the
@@ -742,32 +726,6 @@ async fn get_l2_balance<P: Provider<TempoNetwork>>(
         .call()
         .await
         .unwrap_or_default())
-}
-
-/// Poll L2 for a `TokenEnabled` event matching the given token address.
-///
-/// Times out after 60 seconds (120 polls × 500ms).
-async fn wait_for_token_enabled<P: Provider<TempoNetwork>>(
-    l2: &P,
-    token: Address,
-) -> eyre::Result<()> {
-    let filter = Filter::new()
-        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
-        .event_signature(IZoneInbox::TokenEnabled::SIGNATURE_HASH)
-        .from_block(1);
-
-    for _ in 0..120 {
-        let logs = l2.get_logs(&filter).await.unwrap_or_default();
-        for log in &logs {
-            if let Ok(event) = IZoneInbox::TokenEnabled::decode_log(&log.inner)
-                && event.data.token == token
-            {
-                return Ok(());
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    Err(eyre!("timeout waiting for TokenEnabled event on L2"))
 }
 
 /// Poll L2 for the deposit terminal event.
