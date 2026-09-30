@@ -1,8 +1,8 @@
 use super::*;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Bytes, address, keccak256};
-use alloy_sol_types::{SolCall, SolInterface, SolValue};
+use alloy_primitives::{Bytes, address};
+use alloy_sol_types::{SolCall, SolInterface};
 use revm::precompile::{PrecompileHalt, PrecompileResult, PrecompileStatus};
 use tempo_precompiles::{
     storage::{StorageCtx, StorageKey},
@@ -44,10 +44,9 @@ impl Harness {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
         let l1 = MockL1Reader::default();
-        let sequencer_membership_slot = keccak256((SEQUENCER, portal::slots::ROLE).abi_encode());
         l1.insert(
             PORTAL,
-            sequencer_membership_slot.into(),
+            SEQUENCER.mapping_slot(portal::slots::ROLE),
             ANCHOR,
             U256::from(u8::from(Role::Sequencer)),
         );
@@ -207,9 +206,12 @@ impl Harness {
     }
 
     fn set_role(&self, account: Address, role: Role) {
-        let slot = keccak256((account, portal::slots::ROLE).abi_encode());
-        self.l1
-            .insert(PORTAL, slot.into(), ANCHOR, U256::from(u8::from(role)));
+        self.l1.insert(
+            PORTAL,
+            account.mapping_slot(portal::slots::ROLE),
+            ANCHOR,
+            U256::from(u8::from(role)),
+        );
     }
 
     fn set_token_enabled(&self, enabled: bool) {

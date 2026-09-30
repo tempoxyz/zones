@@ -21,14 +21,10 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
-use tempo_zone_contracts::{TempoState as TempoStateAbi, TempoStateError};
+use tempo_zone_contracts::{StaticCallNotAllowed, TempoState as TempoStateAbi, TempoStateError};
 use zone_primitives::constants::{
     MAX_TEMPO_HEADERS_PER_ZONE_BLOCK, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
 };
-
-alloy_sol_types::sol! {
-    error StaticCallNotAllowed();
-}
 
 #[contract(addr = TEMPO_STATE_ADDRESS)]
 pub struct TempoState {

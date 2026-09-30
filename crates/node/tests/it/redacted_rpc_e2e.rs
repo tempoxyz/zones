@@ -8,7 +8,7 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, now_secs, start_zone_with_redacted_rpc,
+    DEFAULT_TIMEOUT, TIP20_TX_GAS, l1_dev_signer, now_secs, start_zone_with_redacted_rpc,
     start_zone_with_redacted_rpc_l1, start_zone_with_redacted_rpc_l1_with_encryption,
 };
 use alloy::{
@@ -18,7 +18,6 @@ use alloy::{
 use alloy_eips::eip2718::Encodable2718;
 use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
 use alloy_signer::SignerSync;
-use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolError};
 use futures::{SinkExt, StreamExt};
 use p256::ecdsa::SigningKey as P256SigningKey;
@@ -728,9 +727,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
 
     let mut ctx = start_zone_with_redacted_rpc().await?;
 
-    let owner_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let owner_signer = l1_dev_signer();
     let owner = owner_signer.address();
     let spender_signer = PrivateKeySigner::random();
     let spender = spender_signer.address();
@@ -1274,9 +1271,7 @@ async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let mut ctx = start_zone_with_redacted_rpc().await?;
-    let owner_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let owner_signer = l1_dev_signer();
     let outsider_signer = PrivateKeySigner::random();
     let spender = PrivateKeySigner::random().address();
 

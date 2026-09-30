@@ -633,7 +633,7 @@ mod tests {
         assert!(result.is_revert());
         assert_eq!(
             result.bytes,
-            Bytes::from(TIP20Error::uninitialized().selector().to_vec())
+            Bytes::from(TIP20Error::uninitialized().selector())
         );
 
         Ok(())
@@ -645,7 +645,7 @@ mod tests {
 
         let balance_of = harness.call(
             harness.alice,
-            Bytes::from(ITIP20::balanceOfCall::SELECTOR.to_vec()),
+            ITIP20::balanceOfCall::SELECTOR.into(),
             100_000,
             true,
         )?;
@@ -654,7 +654,7 @@ mod tests {
 
         let transfer = harness.call(
             harness.alice,
-            Bytes::from(ITIP20::transferCall::SELECTOR.to_vec()),
+            ITIP20::transferCall::SELECTOR.into(),
             TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;

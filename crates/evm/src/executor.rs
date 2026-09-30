@@ -347,7 +347,10 @@ mod tests {
         TempoAdvanced,
     };
     use zone_chainspec::ZoneChainSpec;
-    use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
+    use zone_precompiles::{
+        tempo_state::{TEMPO_BLOCK_NUMBER_SLOT, slots::TEMPO_BLOCK_HASH},
+        test_utils::MockL1Reader,
+    };
     use zone_primitives::constants::{TEMPO_STATE_ADDRESS, zone_chain_id};
 
     use crate::ZoneEvmFactory;
@@ -906,7 +909,7 @@ mod tests {
             ..Default::default()
         };
         let mut db = CacheDB::new(EmptyDB::default());
-        db.insert_account_storage(TEMPO_STATE_ADDRESS, U256::ZERO, genesis_hash.into())
+        db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_HASH, genesis_hash.into())
             .unwrap();
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
             .unwrap();

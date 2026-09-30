@@ -284,15 +284,13 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
 #[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Result<()> {
     use alloy_provider::ProviderBuilder;
-    use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
     use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
     use tempo_contracts::precompiles::{
         ITIP20, ITIP403Registry::PolicyType, TIP_FEE_MANAGER_ADDRESS,
     };
 
     use crate::utils::{
-        PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
-        seed_raw_tip403_token_policy,
+        PolicySeed, TIP20_TX_GAS, seed_raw_tip403_policy, seed_raw_tip403_token_policy, signer_at,
     };
 
     reth_tracing::init_test_tracing();
@@ -312,10 +310,7 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
         .map_err(|_| eyre::eyre!("cluster must have three nodes"))?;
 
     // Alice funds the transfer; Bob becomes blacklisted at the next L1 anchor.
-    let alice_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .index(1)?
-        .build()?;
+    let alice_signer = signer_at(1);
     let alice = alice_signer.address();
     let bob = address!("0x0000000000000000000000000000000000000B0B");
 
@@ -855,11 +850,7 @@ async fn test_large_deposit_batch() -> eyre::Result<()> {
 
     // Build 10 deposits to different recipients in one L1 block
     let recipients: Vec<Address> = (0..num_deposits)
-        .map(|i| {
-            let mut addr_bytes = [0u8; 20];
-            addr_bytes[19] = (i + 1) as u8;
-            Address::from(addr_bytes)
-        })
+        .map(|i| Address::with_last_byte((i + 1) as u8))
         .collect();
     let deposits: Vec<_> = recipients
         .iter()

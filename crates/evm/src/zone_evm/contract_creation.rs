@@ -71,7 +71,7 @@ mod tests {
     type TestDb = CacheDB<EmptyDB>;
     type TestAdaptedDb = L1OverlayDB<TestDb, TestL1>;
 
-    const TEST_DEPLOYER: Address = Address::new([0x42; 20]);
+    const TEST_DEPLOYER: Address = Address::repeat_byte(0x42);
 
     fn test_create<const IS_CREATE2: bool>(
         context: ZoneInstructionCtx<'_, TestAdaptedDb>,

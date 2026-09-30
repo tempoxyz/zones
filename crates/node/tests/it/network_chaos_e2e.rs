@@ -13,8 +13,8 @@ use tempo_primitives::transaction::calc_gas_balance_spending;
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 
 use crate::utils::{
-    RealP2pCluster, TcpChaosProxy, ZoneAccount, poll_until, start_real_p2p_cluster_with_l1_proxy,
-    start_real_p2p_cluster_with_per_node_l1_proxies,
+    RealP2pCluster, TcpChaosProxy, ZoneAccount, batch_count, poll_until,
+    start_real_p2p_cluster_with_l1_proxy, start_real_p2p_cluster_with_per_node_l1_proxies,
 };
 
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -243,17 +243,6 @@ struct OutageAssetFlow {
     deposit_block: u64,
     withdrawal_hash: alloy::primitives::B256,
     withdrawal_fee: u128,
-}
-
-async fn batch_count(
-    portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
-) -> eyre::Result<usize> {
-    Ok(portal
-        .BatchSubmitted_1_filter()
-        .from_block(0)
-        .query()
-        .await?
-        .len())
 }
 
 async fn wait_for_settled_height(

@@ -788,9 +788,9 @@ fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
     let mode = VerifierMode::try_from(proof_bundle.verifier_config.as_ref())?;
     ensure!(
         mode == VerifierMode::NitroV1,
-        "remote prover returned unsupported verifier config 0x{}; expected 0x{}",
-        alloy_primitives::hex::encode(&proof_bundle.verifier_config),
-        alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
+        "remote prover returned unsupported verifier config {}; expected {}",
+        alloy_primitives::hex::encode_prefixed(&proof_bundle.verifier_config),
+        alloy_primitives::hex::encode_prefixed(NITRO_VERIFIER_CONFIG_V1),
     );
     mode.validate_proof_shape(&proof_bundle.proof)?;
     Ok(())

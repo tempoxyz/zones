@@ -1,6 +1,6 @@
 use super::*;
 use crate::{abi::DepositType, subscriber::L1SubscriberError};
-use alloy_consensus::{Header, ReceiptWithBloom, Sealable as _};
+use alloy_consensus::{Header, ReceiptWithBloom, Sealable as _, TxReceipt as _};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
 use alloy_sol_types::SolEvent;
@@ -685,8 +685,8 @@ fn assert_tempo_header_fixture_rejected(value: &str) {
 fn assert_tempo_header_rejected(input: &[u8]) {
     assert!(
         alloy_rlp::decode_exact::<TempoHeader>(input).is_err(),
-        "TempoHeader should reject malformed RLP input 0x{}",
-        const_hex::encode(input)
+        "TempoHeader should reject malformed RLP input {}",
+        const_hex::encode_prefixed(input)
     );
 }
 
@@ -1788,21 +1788,15 @@ fn make_receipt_with_logs(
     block_hash: B256,
     logs: Vec<Log>,
 ) -> TempoTransactionReceipt {
-    let mut bloom = Bloom::ZERO;
-    for log in &logs {
-        bloom.accrue_log(&log.inner);
-    }
     TempoTransactionReceipt {
         inner: TransactionReceipt {
-            inner: ReceiptWithBloom::new(
-                TempoReceipt {
-                    tx_type: TempoTxType::Legacy,
-                    success: true,
-                    cumulative_gas_used: 21_000,
-                    logs,
-                },
-                bloom,
-            ),
+            inner: TempoReceipt {
+                tx_type: TempoTxType::Legacy,
+                success: true,
+                cumulative_gas_used: 21_000,
+                logs,
+            }
+            .into_with_bloom(),
             transaction_hash: B256::with_last_byte(0xaa),
             transaction_index: Some(0),
             block_hash: Some(block_hash),

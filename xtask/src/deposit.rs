@@ -5,13 +5,14 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, B256, Bytes, address},
+    primitives::{Address, B256, Bytes},
     providers::{Provider, ProviderBuilder},
     rpc::types::Filter,
     sol_types::SolEvent,
 };
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
+use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{DepositPayload, IZoneInbox, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
@@ -32,7 +33,7 @@ pub(crate) struct Deposit {
     private_key: String,
 
     /// TIP-20 token address to deposit.
-    #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     token: Address,
 
     /// Amount to deposit.

@@ -46,7 +46,7 @@ use crate::{
     prover_config::active_l1_hardfork,
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
-use alloy_eips::BlockHashOrNumber;
+use alloy_eips::{BlockHashOrNumber, eip2935::HISTORY_SERVE_WINDOW};
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
@@ -110,9 +110,6 @@ impl std::error::Error for BatchSubmitError {
         }
     }
 }
-
-/// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
-const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
@@ -249,7 +246,7 @@ impl BatchAnchorConfig {
 impl Default for BatchAnchorConfig {
     fn default() -> Self {
         Self {
-            history_window: DEFAULT_EIP2935_HISTORY_WINDOW,
+            history_window: HISTORY_SERVE_WINDOW as u64,
             safety_margin: DEFAULT_EIP2935_SAFETY_MARGIN,
         }
     }
@@ -3136,7 +3133,7 @@ mod tests {
     fn resolve_hash_mismatch_skipped() {
         let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
         let withdrawals = vec![w0];
-        let wrong_hash = B256::from([0xabu8; 32]);
+        let wrong_hash = B256::repeat_byte(0xab);
 
         let mut events = BTreeMap::new();
         events.insert(5, test_batch_event(wrong_hash));
@@ -3201,7 +3198,7 @@ mod tests {
     #[test]
     fn resolve_empty_withdrawals_vec_skipped() {
         let mut events = BTreeMap::new();
-        events.insert(5, test_batch_event(B256::from([0x11u8; 32])));
+        events.insert(5, test_batch_event(B256::repeat_byte(0x11)));
 
         let mut slot_withdrawals = BTreeMap::new();
         slot_withdrawals.insert(5, vec![]);
@@ -3230,7 +3227,7 @@ mod tests {
         let withdrawals = vec![w];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
         // head_slot_hash doesn't match any tail of the withdrawal list
-        let corrupted_hash = B256::from([0xdeu8; 32]);
+        let corrupted_hash = B256::repeat_byte(0xde);
 
         let mut events = BTreeMap::new();
         events.insert(5, test_batch_event(full_hash));

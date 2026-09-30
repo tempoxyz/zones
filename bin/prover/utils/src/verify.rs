@@ -79,9 +79,7 @@ async fn call_verifier(
         .raw_request("eth_call".into(), params)
         .await
         .context("native verifier eth_call failed")?;
-    let mut expected = [0u8; 32];
-    expected[31] = 1;
-    if result.as_ref() != expected {
+    if result.as_ref() != B256::with_last_byte(1) {
         bail!("native verifier did not return ABI-encoded true: {result}");
     }
     Ok(())
@@ -119,17 +117,16 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let mut success = [0u8; 32];
-        success[31] = 1;
+        let success = B256::with_last_byte(1);
         let mut noncanonical = success;
         noncanonical[0] = 1;
         for (bytes, valid) in [
-            (Bytes::from(success.to_vec()), true),
+            (Bytes::from(success), true),
             (Bytes::from(vec![0; 32]), false),
             (Bytes::new(), false),
             (Bytes::from(vec![1]), false),
             (Bytes::from(vec![2; 32]), false),
-            (Bytes::from(noncanonical.to_vec()), false),
+            (Bytes::from(noncanonical), false),
             (Bytes::from(success[1..].to_vec()), false),
             (Bytes::from([success.as_slice(), &[0]].concat()), false),
         ] {

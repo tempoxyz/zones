@@ -18,7 +18,7 @@ use zone_sequencer::{encryption_key_identity, prove_encryption_key_possession};
 use super::{
     config::{ExpectedEncryptionKey, SharedAdminArgs, format_duration, parse_nonzero_duration},
     invariants::{
-        evaluate_base_invariants, portal_sequencer_coverage_invariant,
+        ensure_invariants, evaluate_base_invariants, portal_sequencer_coverage_invariant,
         required_decryption_keys_invariant,
     },
     secret_file::{
@@ -526,19 +526,6 @@ fn ensure_registration_coverage(view: &ClusterView) -> eyre::Result<()> {
             &view.nodes,
         )],
     )
-}
-
-fn ensure_invariants(
-    context: &str,
-    invariants: &[super::invariants::InvariantResult],
-) -> eyre::Result<()> {
-    let failed = invariants
-        .iter()
-        .filter(|result| result.required_failed())
-        .map(|result| format!("{}: {}", result.name, result.detail))
-        .collect::<Vec<_>>();
-    ensure!(failed.is_empty(), "{context}: {}", failed.join("; "));
-    Ok(())
 }
 
 fn identity_from_signer(signer: &PrivateKeySigner) -> eyre::Result<KeyIdentity> {

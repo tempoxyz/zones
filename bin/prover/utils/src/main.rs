@@ -6,7 +6,7 @@ use std::{
 };
 
 use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
-use alloy_eips::{BlockHashOrNumber, eip2718::Encodable2718 as _};
+use alloy_eips::{BlockHashOrNumber, eip2718::Encodable2718 as _, eip2935::HISTORY_SERVE_WINDOW};
 use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -40,7 +40,6 @@ use zone_spf::{
 mod verifier_request;
 mod verify;
 
-const EIP2935_HISTORY_WINDOW: u64 = 8191;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 const RPC_CONCURRENCY: usize = 8;
 const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -1220,7 +1219,7 @@ async fn tempo_anchor(
         bail!("Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}");
     }
     let gap = tip - checkpoint_number;
-    if gap < EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MARGIN {
+    if gap < HISTORY_SERVE_WINDOW as u64 - EIP2935_SAFETY_MARGIN {
         return Ok((
             checkpoint_number,
             checkpoint.hash_slow(),

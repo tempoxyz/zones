@@ -1039,7 +1039,7 @@ mod tests {
             "effectiveGasPrice": "0x0",
             "contractAddress": null,
             "logs": [],
-            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "logsBloom": format!("{:#x}", alloy_primitives::Bloom::ZERO),
             "status": "0x1",
             "type": "0x0",
             "feePayer": Address::repeat_byte(0x77),

@@ -190,7 +190,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
                 ),
                 "number": "0x42",
                 "parentHash": format!("{:#x}", alloy_primitives::B256::ZERO),
-                "logsBloom": format!("0x{}", "0".repeat(512)),
+                "logsBloom": format!("{:#x}", alloy_primitives::Bloom::ZERO),
                 "gasUsed": "0x0",
                 "size": "0x0",
                 "transactionsRoot": format!("{:#x}", alloy_primitives::B256::ZERO),
