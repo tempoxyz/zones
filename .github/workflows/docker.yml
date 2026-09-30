@@ -160,11 +160,32 @@ jobs:
           genesis_sha=$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)
           echo "Embedding Tempo devnet genesis sha256:${genesis_sha}"
 
+      - name: Configure persistent intermediate layer cache
+        env:
+          WRITE_BUILD_CACHE: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          targets = ["chef", "prover-chef", "tempo-zone", "tempo-zone-xtask",
+                     "tempo-zone-prover-utils", "tempo-zone-prover-enclave",
+                     "tempo-zone-prover", "tempo-zone-prover-eif-builder"]
+          cache = {"target": {}}
+          for target in targets:
+              ref = f"{os.environ['REGISTRY']}/tempo-zone-buildcache:{target}"
+              entry = {"cache-from": [f"type=registry,ref={ref}"]}
+              if os.environ["WRITE_BUILD_CACHE"] == "true":
+                  entry["cache-to"] = [f"type=registry,ref={ref},mode=max"]
+              cache["target"][target] = entry
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "zones-buildcache.json"), "w") as f:
+              json.dump(cache, f)
+          PYTHON
+
       - name: Build and push Docker images
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
           files: |
             docker/docker-bake.hcl
+            ${{ runner.temp }}/zones-buildcache.json
             ${{ steps.meta-tempo-zone.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-prover-utils.outputs.bake-file }}
@@ -206,7 +227,9 @@ jobs:
       - name: Load tempo-zone-prover EIF inputs
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          files: docker/docker-bake.hcl
+          files: |
+            docker/docker-bake.hcl
+            ${{ runner.temp }}/zones-buildcache.json
           targets: ${{ steps.eif_builder.outputs.hit == 'true' && 'tempo-zone-prover-enclave' || 'prover-eif-inputs' }}
           set: |
             tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
@@ -268,6 +291,7 @@ jobs:
         with:
           files: |
             docker/docker-bake.hcl
+            ${{ runner.temp }}/zones-buildcache.json
             ${{ steps.meta-tempo-zone-prover.outputs.bake-file }}
           targets: tempo-zone-prover
           set: |
