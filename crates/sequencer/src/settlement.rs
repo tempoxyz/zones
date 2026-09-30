@@ -46,7 +46,7 @@ use crate::{
     prover_config::active_l1_hardfork,
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
-use alloy_eips::BlockHashOrNumber;
+use alloy_eips::{BlockHashOrNumber, eip2935::HISTORY_SERVE_WINDOW};
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
@@ -110,9 +110,6 @@ impl std::error::Error for BatchSubmitError {
         }
     }
 }
-
-/// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
-const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
@@ -249,7 +246,7 @@ impl BatchAnchorConfig {
 impl Default for BatchAnchorConfig {
     fn default() -> Self {
         Self {
-            history_window: DEFAULT_EIP2935_HISTORY_WINDOW,
+            history_window: HISTORY_SERVE_WINDOW as u64,
             safety_margin: DEFAULT_EIP2935_SAFETY_MARGIN,
         }
     }

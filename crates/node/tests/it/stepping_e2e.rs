@@ -9,6 +9,7 @@ use crate::utils::{
     L1TestNode, ZoneTestNode, poll_until, spawn_sequencer, spawn_sequencer_with_config,
 };
 use alloy::providers::Provider;
+use alloy_eips::eip2935::HISTORY_SERVE_WINDOW;
 use alloy_rpc_types_eth::BlockId;
 use alloy_sol_types::SolCall;
 use std::time::Duration;
@@ -17,11 +18,9 @@ use tempo_zone_contracts::{
 };
 use zone_sequencer::BatchAnchorConfig;
 
-/// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
-const EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
-const EIP2935_EFFECTIVE_WINDOW: u64 = EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MARGIN;
-const EXTENDED_GAP_BLOCKS: u64 = EIP2935_HISTORY_WINDOW + EIP2935_EFFECTIVE_WINDOW + 64;
+const EIP2935_EFFECTIVE_WINDOW: u64 = HISTORY_SERVE_WINDOW as u64 - EIP2935_SAFETY_MARGIN;
+const EXTENDED_GAP_BLOCKS: u64 = HISTORY_SERVE_WINDOW as u64 + EIP2935_EFFECTIVE_WINDOW + 64;
 
 const SHORT_EIP2935_HISTORY_WINDOW: u64 = 10;
 const SHORT_EIP2935_SAFETY_MARGIN: u64 = 4;
@@ -275,7 +274,7 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
 
     let l1_tip = l1.provider().get_block_number().await?;
     eyre::ensure!(
-        l1_tip.saturating_sub(first_step_tempo) > EIP2935_HISTORY_WINDOW,
+        l1_tip.saturating_sub(first_step_tempo) > HISTORY_SERVE_WINDOW as u64,
         "test precondition not met: first boundary tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
         l1_tip.saturating_sub(first_step_tempo),
     );

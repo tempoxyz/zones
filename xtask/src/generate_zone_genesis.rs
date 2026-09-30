@@ -39,17 +39,15 @@ use tempo_precompiles::{
 };
 use tempo_primitives::TempoHeader;
 use tempo_revm::TempoBlockEnv;
-use tempo_zone_contracts::ZonePortal;
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+};
 use zone_precompiles::{
     TempoState as NativeTempoState, ZoneFeeManager, ZoneInbox as NativeZoneInbox,
     ZoneOutbox as NativeZoneOutbox,
 };
 
 use crate::zone_utils::find_zone_deployment_block;
-
-const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
-const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
-const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 

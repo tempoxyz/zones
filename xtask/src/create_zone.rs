@@ -4,7 +4,7 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, address},
+    primitives::Address,
     providers::{Provider, ProviderBuilder},
 };
 use alloy_rpc_types_eth::BlockId;
@@ -13,9 +13,9 @@ use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP403Registry;
-use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use tempo_zone_contracts::{
-    ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
+    MAX_SEQUENCERS, ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
 };
 use zone_primitives::constants::zone_chain_id;
 
@@ -40,7 +40,7 @@ pub(crate) struct CreateZone {
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
-    #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     initial_token: Address,
 
     /// Enable account allowlist enforcement. Membership is retained while disabled.
@@ -100,9 +100,6 @@ pub(crate) struct CreateZone {
     #[command(flatten)]
     forks: GenesisForkArgs,
 }
-
-/// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
-const MAX_SEQUENCERS: usize = 8;
 
 impl CreateZone {
     fn factory_params(&self) -> ZoneFactory::CreateZoneParams {
@@ -363,6 +360,7 @@ impl CreateZone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::address;
     use clap::Parser;
 
     #[test]

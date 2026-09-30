@@ -16,6 +16,7 @@ use eyre::{Context as _, eyre};
 use std::{collections::BTreeMap, num::NonZeroU64, time::Instant};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20;
+use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_primitives::transaction::Call;
 use tempo_zone_contracts::{DepositPayload, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
@@ -49,7 +50,7 @@ pub(crate) struct SpamDeposits {
     amount: u128,
 
     /// TIP-20 token address to deposit.
-    #[arg(long, default_value = "0x20C0000000000000000000000000000000000000")]
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     token: Address,
 
     /// Seconds into the future for the valid_after timestamp.
