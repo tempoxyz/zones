@@ -1,3 +1,4 @@
+// Benchmark-only source edit to exercise compiler cache invalidation.
 use std::{future::Future, io, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use alloy_genesis::Genesis;

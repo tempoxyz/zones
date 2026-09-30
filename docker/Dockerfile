@@ -20,7 +20,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=zones-
         --bin tempo-zone --features "jemalloc" \
     && RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
     cargo build --locked --profile ${RUST_PROFILE} \
-        --bin tempo-xtask
+        --bin tempo-xtask \
+    && if [ -n "$VERGEN_GIT_SHA" ]; then \
+         /app/target/${RUST_PROFILE}/tempo-zone --version | grep -F "$VERGEN_GIT_SHA"; \
+       fi
 
 # Solidity contracts compiled for shared runtimes, routers, and zone genesis artifacts.
 # Requires the crates/contracts/lib submodules to be checked out.
