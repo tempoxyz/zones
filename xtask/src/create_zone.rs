@@ -3,7 +3,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
+    network::primitives::ReceiptResponse,
     primitives::Address,
     providers::{Provider, ProviderBuilder},
 };
@@ -155,9 +155,8 @@ impl CreateZone {
         }
 
         let signer = parse_private_key(&self.private_key)?;
-        let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&self.l1_rpc_url)
             .await?;
 

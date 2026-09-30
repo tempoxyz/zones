@@ -5,7 +5,7 @@
 //! same block.
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
+    network::primitives::ReceiptResponse,
     primitives::{Address, B256, Bytes, TxKind, U256},
     providers::{Provider, ProviderBuilder},
     signers::{SignerSync, local::PrivateKeySigner},
@@ -69,9 +69,8 @@ impl SpamDeposits {
         // Parse whale key & create provider
         let whale = parse_private_key(&self.private_key)?;
         let whale_addr = whale.address();
-        let wallet = EthereumWallet::from(whale);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(whale)
             .connect(&self.l1_rpc_url)
             .await?;
 
@@ -117,9 +116,8 @@ impl SpamDeposits {
 
         println!("Approving portal for all signers...");
         for (i, signer) in signers.iter().enumerate() {
-            let w = EthereumWallet::from(signer.clone());
             let p = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .wallet(w)
+                .wallet(signer.clone())
                 .connect(&self.l1_rpc_url)
                 .await?;
             let token = ITIP20::new(self.token, &p);

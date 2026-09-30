@@ -1,7 +1,7 @@
 //! Updates ZonePortal closed-loop enforcement and membership.
 
 use alloy::{
-    network::{EthereumWallet, ReceiptResponse as _},
+    network::ReceiptResponse as _,
     primitives::Address,
     providers::{DynProvider, Provider as _, ProviderBuilder},
 };
@@ -183,7 +183,7 @@ async fn connect(
     let signer = parse_private_key(&args.admin_key).wrap_err("ADMIN_KEY is not valid")?;
     let signer_address = signer.address();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(EthereumWallet::from(signer))
+        .wallet(signer)
         .connect(&args.l1_rpc_url)
         .await
         .wrap_err("failed connecting to Tempo L1 RPC")?

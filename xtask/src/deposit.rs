@@ -4,7 +4,7 @@
 //! recipient and memo are hidden from on-chain observers.
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
+    network::primitives::ReceiptResponse,
     primitives::{Address, B256, Bytes},
     providers::{Provider, ProviderBuilder},
     rpc::types::Filter,
@@ -58,9 +58,8 @@ impl Deposit {
         let signer = parse_private_key(&self.private_key)?;
         let sender = signer.address();
         let to = self.to.unwrap_or(sender);
-        let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&self.l1_rpc_url)
             .await?;
 

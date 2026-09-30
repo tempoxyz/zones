@@ -3,7 +3,6 @@
 use std::{collections::HashSet, fmt, path::PathBuf, time::Duration};
 
 use alloy::{
-    network::EthereumWallet,
     primitives::{Address, B256},
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
@@ -359,9 +358,8 @@ impl Register {
         let (tx_hash, submitted) = match registration_action(old_key, latest_key, new_key)? {
             RegistrationAction::Submit => {
                 progress("Submitting setSequencerEncryptionKey...");
-                let wallet = EthereumWallet::from(tx_signer.clone());
                 let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                    .wallet(wallet)
+                    .wallet(tx_signer.clone())
                     .connect(&finalized.config.l1_rpc_url)
                     .await?;
                 let tx_hash = zone_sequencer::register_encryption_key(

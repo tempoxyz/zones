@@ -4,7 +4,7 @@
 //! public key, constructs the proof-of-possession signature, and submits it to
 //! the portal contract.
 
-use alloy::{network::EthereumWallet, primitives::Address, providers::ProviderBuilder};
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::WrapErr as _;
 use tempo_alloy::TempoNetwork;
 use zone_sequencer::register_encryption_key;
@@ -41,9 +41,8 @@ impl SetEncryptionKey {
                 .unwrap_or(&self.private_key),
         )?;
 
-        let wallet = EthereumWallet::from(transaction_signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(transaction_signer)
             .connect(&self.l1_rpc_url)
             .await?;
 

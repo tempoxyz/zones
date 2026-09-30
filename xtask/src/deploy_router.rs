@@ -1,5 +1,5 @@
 use alloy::{
-    network::{EthereumWallet, TransactionBuilder},
+    network::TransactionBuilder,
     primitives::Address,
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
@@ -55,11 +55,10 @@ impl DeployRouter {
 
         let signer = parse_private_key(&self.private_key)?;
         let deployer = signer.address();
-        let wallet = EthereumWallet::from(signer);
         let http_rpc = normalize_http_rpc(&self.l1_rpc_url);
 
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&http_rpc)
             .await?;
         provider

@@ -3,7 +3,7 @@
 use std::{fmt, path::PathBuf, time::Duration};
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse as _},
+    network::primitives::ReceiptResponse as _,
     primitives::{Address, B256},
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
@@ -143,9 +143,8 @@ impl Replace {
         simulate(&latest, signer.address(), &latest_proposed).await?;
 
         progress("Submitting setSequencerSet...");
-        let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&latest.config.l1_rpc_url)
             .await
             .wrap_err("failed connecting to Tempo L1 RPC")?;

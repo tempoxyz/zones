@@ -1,7 +1,7 @@
 //! Deploy and configure the non-secret L1 fixtures used by the private-Zone benchmark.
 
 use alloy::{
-    network::{EthereumWallet, TransactionBuilder, primitives::ReceiptResponse},
+    network::{TransactionBuilder, primitives::ReceiptResponse},
     primitives::{Address, Uint, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
@@ -241,13 +241,13 @@ impl DeployNeobankFixtures {
         let portal_admin = signer_from_env("PORTAL_ADMIN_KEY")?;
         let portal_admin_address = portal_admin.address();
         let deployer_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(deployer))
+            .wallet(deployer)
             .connect(&self.l1_rpc_url)
             .await
             .wrap_err("failed connecting fixture deployer to Tempo L1")?;
         let admin_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .with_expiring_nonces()
-            .wallet(EthereumWallet::from(portal_admin))
+            .wallet(portal_admin)
             .connect(&self.l1_rpc_url)
             .await
             .wrap_err("failed connecting portal admin to Tempo L1")?;

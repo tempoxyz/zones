@@ -58,7 +58,6 @@
 //!   for a couple of L1 blocks.
 
 use alloy::{
-    network::EthereumWallet,
     primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
     rpc::types::Filter,
@@ -129,7 +128,6 @@ impl DemoBlacklist {
     pub(crate) async fn run(self) -> eyre::Result<()> {
         let signer = parse_private_key(&self.private_key)?;
         let admin = signer.address();
-        let wallet = EthereumWallet::from(signer);
 
         let (zone_json_path, zone_json) =
             load_zone_metadata(self.zone_dir.as_deref(), self.portal)?;
@@ -151,19 +149,18 @@ impl DemoBlacklist {
             })?;
         let portal_admin_signer = parse_private_key(&portal_admin_key_str)?;
         let portal_admin = portal_admin_signer.address();
-        let portal_admin_wallet = EthereumWallet::from(portal_admin_signer);
 
         let http_rpc = normalize_http_rpc(&self.l1_rpc_url);
 
         let l1 = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&http_rpc)
             .await?;
         l1.client()
             .set_poll_interval(std::time::Duration::from_secs(1));
 
         let l1_portal_admin = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(portal_admin_wallet)
+            .wallet(portal_admin_signer)
             .connect(&http_rpc)
             .await?;
         l1_portal_admin
@@ -544,9 +541,8 @@ impl DemoBlacklist {
         println!();
 
         // Target pays L2 gas in pathUSD (deposited in step 6b).
-        let target_wallet = EthereumWallet::from(target_signer);
         let l2_target = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(target_wallet)
+            .wallet(target_signer)
             .connect(&self.zone_rpc_url)
             .await?;
 

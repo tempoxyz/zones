@@ -4,11 +4,7 @@
 //! can be initialized immediately on Tempo L1. The outbox rate is optional because the sequencer
 //! needs Zone fee-token balance before it can submit the Zone transaction.
 
-use alloy::{
-    network::{EthereumWallet, ReceiptResponse as _},
-    primitives::Address,
-    providers::ProviderBuilder,
-};
+use alloy::{network::ReceiptResponse as _, primitives::Address, providers::ProviderBuilder};
 use eyre::{WrapErr as _, ensure};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZonePortal};
@@ -72,7 +68,7 @@ impl ConfigureBenchmarkFees {
         let sequencer = signer.address();
 
         let l1 = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(signer.clone()))
+            .wallet(signer.clone())
             .connect(&self.l1_rpc_url)
             .await
             .wrap_err("failed connecting to Tempo L1 RPC")?;
@@ -142,7 +138,7 @@ impl ConfigureBenchmarkFees {
         if let (Some(zone_rpc_url), Some(tempo_gas_rate)) = (self.zone_rpc_url, self.tempo_gas_rate)
         {
             let zone = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .wallet(EthereumWallet::from(signer))
+                .wallet(signer)
                 .connect(&zone_rpc_url)
                 .await
                 .wrap_err("failed connecting to Zone RPC")?;
