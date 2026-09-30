@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: weekly
     labels:
-      - "A-dependencies"
+      - "dependencies"
     commit-message:
       prefix: "chore(deps)"
     open-pull-requests-limit: 1
@@ -22,8 +22,8 @@ updates:
     schedule:
       interval: weekly
     labels:
-      - "A-dependencies"
-      - "A-ci"
+      - "dependencies"
+      - "github_actions"
     commit-message:
       prefix: "chore(ci)"
     open-pull-requests-limit: 1
@@ -40,7 +40,7 @@ updates:
     schedule:
       interval: weekly
     labels:
-      - "A-dependencies"
+      - "dependencies"
     commit-message:
       prefix: "chore(docker)"
     open-pull-requests-limit: 1
