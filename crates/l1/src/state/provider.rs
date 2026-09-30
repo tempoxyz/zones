@@ -13,7 +13,6 @@
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
-use alloy_rpc_types_eth::BlockId;
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use std::num::NonZeroU32;
@@ -248,8 +247,7 @@ impl L1StateProvider {
 
     /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
     async fn fetch_slot(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
-        let block_id = BlockId::number(block_number);
-        let value: U256 = self.provider.get_storage_at(address, slot.into()).block_id(block_id).await.map_err(|e| {
+        let value: U256 = self.provider.get_storage_at(address, slot.into()).number(block_number).await.map_err(|e| {
             warn!(%address, %slot, block_number, %e, "eth_getStorageAt RPC call failed");
             eyre::eyre!("eth_getStorageAt failed for address={address} slot={slot} block={block_number}: {e}")
         })?;

@@ -268,16 +268,16 @@ where
 fn notification_tip<N: NodePrimitives>(notification: &ExExNotification<N>) -> Option<BlockNumHash> {
     match notification {
         ExExNotification::ChainCommitted { new } | ExExNotification::ChainReorged { new, .. } => {
-            let (&number, block) = new.blocks().iter().next_back()?;
-            Some(BlockNumHash::new(number, block.hash()))
+            new.blocks()
+                .values()
+                .next_back()
+                .map(|block| block.num_hash())
         }
-        ExExNotification::ChainReverted { old } => {
-            let (&number, block) = old.blocks().iter().next()?;
-            Some(BlockNumHash::new(
-                number.saturating_sub(1),
-                block.header().parent_hash(),
-            ))
-        }
+        ExExNotification::ChainReverted { old } => old
+            .blocks()
+            .values()
+            .next()
+            .map(|block| block.header().parent_num_hash()),
     }
 }
 
@@ -404,10 +404,7 @@ where
     P::ChainSpec: TempoHardforks,
 {
     let VerificationContext { config, metrics } = context;
-    let number = block.number();
-    let hash = block.hash();
-    let parent_hash = block.parent_hash();
-    let zone = BlockRef::new(number, hash);
+    let zone = BlockRef::from(block.num_hash());
     let fail = |error| BlockError::Finding { zone, error };
     let l2 = collect_l2_block_evidence(block.body().transactions(), receipts, zone.into())
         .map_err(fail)?;
@@ -430,7 +427,7 @@ where
     let candidate = CandidateTransition::derive(
         prior,
         zone,
-        BlockRef::new(number.saturating_sub(1), parent_hash),
+        block.header().parent_num_hash().into(),
         tempo.into(),
         &block_effects,
     )

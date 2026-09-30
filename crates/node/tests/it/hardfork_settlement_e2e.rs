@@ -560,7 +560,7 @@ async fn recovery_witness(
             anchor_block_hash: alloy_consensus::Sealable::hash_slow(&final_header),
             expected_withdrawal_batch_index: 3,
         },
-        parent_header: parent.header.as_ref().clone(),
+        parent_header: parent.header.inner.into_consensus(),
         zone_blocks: blocks,
         zone_state_witness: ZoneStateWitness {
             node_pool: zone_nodes.into_values().collect(),

@@ -6,7 +6,7 @@ use alloy::{
     primitives::{Address, B256, U64, U256},
     providers::{Provider, ProviderBuilder},
 };
-use alloy_rpc_types_eth::BlockId;
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
 use eyre::{Context as _, ensure, eyre};
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
@@ -446,7 +446,7 @@ pub(crate) async fn query_common_blocks(
                     let block: Option<RpcBlock> = provider
                         .raw_request(
                             "eth_getBlockByNumber".into(),
-                            (format!("0x{height:x}"), false),
+                            (BlockNumberOrTag::Number(height), false),
                         )
                         .await?;
                     block.ok_or_else(|| eyre!("block {height} not found"))
