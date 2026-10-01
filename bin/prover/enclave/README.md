@@ -10,7 +10,7 @@ The server listens on AF_VSOCK port `5000` by default, or on TCP port `5000` whe
 enabled. Each connection carries one request and one response, then closes. A frame consists of a
 four-byte, big-endian payload length followed by a CBOR payload.
 
-Requests use the serde representation of `zone_prover::VerifyRequest` with protocol version `2`.
+Requests use the serde representation of `zone_prover::VerifyRequest` with protocol version `1`.
 The witness's byte-heavy fields are encoded as CBOR byte strings rather than human-readable hex.
 Decoding is schema-driven and rejects unknown, duplicate, or trailing request data. The prover
 accepts chain IDs compiled into Tempo plus custom genesis files configured by the enclave operator
@@ -42,7 +42,8 @@ TCP mode is intended for development of framing, chain validation, and SPF error
 binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
 outside an enclave ends with `attestation_unavailable` rather than an unattested success response.
 Set `SPF_TEMPO_GENESIS` or pass `--tempo-genesis` with a directory containing trusted Tempo genesis
-JSON files. Files are loaded in filename order. Each custom chain ID must be unique and cannot
+JSON files. Only files with a `.json` extension are loaded, in filename order; other files are
+ignored. Each custom chain ID must be unique and cannot
 override a built-in Tempo network.
 
 ## Images and EIF
