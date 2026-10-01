@@ -40,8 +40,8 @@ These are dependencies, not evidence of this goal's completion.
 Draft deliverables published so far:
 
 - [TIP-1125 bounded native execution](https://github.com/tempoxyz/tempo/pull/8068).
-- [EVM2 transaction context for precompile calls](https://github.com/alloy-rs/evm2/pull/523).
-- [Reth dependency alignment](https://github.com/paradigmxyz/reth/pull/27642),
+- [EVM2 transaction context and shared reentry dispatch](https://github.com/alloy-rs/evm2/pull/523).
+- [Reth native call context and shared dispatch](https://github.com/paradigmxyz/reth/pull/27642),
   based on its existing `codex/excise-revm` branch.
 
 Tempo contains a bounded dependency-call adapter and transaction-owned reservation
@@ -49,6 +49,13 @@ scope. Its tests exercise caller/origin preservation, static context, delegated
 code, execution/state gas, rollback, recoverable dependency failures, and
 non-replenishment across native roots. Native portal/vault dispatch and payment
 admission are not yet implemented; these helpers alone do not pass E02/E03.
+
+Tempo and Zones generate the complete portal bindings from one ABI definition,
+including historical overloads, while Zones retains its local RPC helpers.
+The [finding ledger](evidence/NATIVE_EXECUTION_FINDINGS.md) records the reproduced
+EVM2 provider aliasing violation, its shared-dispatch fix and Miri regressions,
+and the local sequencer proof-mode correction. These findings are implementation
+self-review; they do not substitute for the remaining protocol reviews.
 
 The [real bridge baseline](evidence/EVM2_BRIDGE_BASELINE.md) records successful
 public transfer, encrypted deposit, private balance, restart, withdrawal payout,
@@ -174,6 +181,9 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | Work | State | Evidence |
 | --- | --- | --- |
 | Repository/upstream inventory | Started | Tempo #7871, Zones #1463, TIP-1084 #6559; local Earn invariants inspected |
-| Compatible EVM2 baseline | In progress | Tempo worktree on `dan/evm2-native-payments`; initial compilation running |
+| Compatible EVM2 baseline | Partial | Real bridge receipts and backing reconciliation; NoProof mode, no scheduled native activation |
+| Shared native context and paid child work | Partial | Tempo adapter and reservation regressions; native portal/vault entrypoints remain open |
+| Shared portal ABI | Implemented groundwork | Tempo ABI macro reused by Zones; historical selector/event tests |
+| Native reentry provider safety | Reproduced finding fixed | EVM2 #523 Miri before/after; downstream shared dispatch aligned |
 | E01–I01 | Open | No passing result recorded |
-| Draft TIPs / implementation PRs | Open | No new PR produced yet |
+| Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, EVM2 #523, Reth #27642; remaining full implementation PRs open |
