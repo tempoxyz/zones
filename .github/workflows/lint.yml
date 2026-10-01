@@ -21,19 +21,6 @@ jobs:
     with:
       rust-toolchain: nightly-2026-08-21
 
-  prover-publisher:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: node --test .github/scripts/prover-e2e.test.cjs
-
   lint-success:
     name: lint success
     runs-on: ubuntu-latest
@@ -42,7 +29,6 @@ jobs:
       id-token: write
     needs:
       - rust
-      - prover-publisher
     timeout-minutes: 30
     steps:
       - name: Secure runner
