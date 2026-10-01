@@ -301,9 +301,10 @@ jobs:
             tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
             tempo-zone-prover-enclave.contexts.tempo-genesis=.tempo-genesis
             tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
+            tempo-zone-prover-eif-builder.no-cache=${{ github.event_name == 'schedule' }}
           project: 0c6tg19qsp
           load: true
-          no-cache: ${{ github.event_name == 'schedule' }}
+          # Compilation was already refreshed in the first Bake call.
           pull: ${{ github.event_name == 'schedule' }}
 
       - name: Publish EIF builder cache
