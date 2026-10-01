@@ -345,10 +345,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Bind measurements to this build and genesis
+        env:
+          PROVER_BINARY_SHA256: ${{ steps.compiled.outputs.binary_sha }}
         run: |
           jq -n --arg sha "$GITHUB_SHA" --arg attempt "$GITHUB_RUN_ATTEMPT" \
             --arg genesis_sha256 "$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)" \
-            --arg binary_sha256 "${{ steps.compiled.outputs.binary_sha }}" \
+            --arg binary_sha256 "$PROVER_BINARY_SHA256" \
             '{sha: $sha, attempt: $attempt, genesis_sha256: $genesis_sha256, binary_sha256: $binary_sha256}' \
             > target/tempo-zone-prover-eif/identity.json
 
