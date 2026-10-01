@@ -558,7 +558,7 @@ Deposits can fail because the zone-side mint reverts (including a TIP-403 policy
 
 - **Encrypted deposit.** Two failure modes, both of which unconditionally bounce back (no zone-side mint is attempted as a fallback):
   - **Invalid encryption.** The Chaum-Pedersen proof, AES-GCM tag, or decrypted plaintext length check fails during [Onchain Decryption Verification](#onchain-decryption-verification). There is no well-defined recipient on the zone in this case, so the zone does not try to mint to the depositor; it bounces back immediately.
-  - **Valid decryption, mint reverts.** `TIP20.mint(decryptedTo, amount)` reverts (for example, because a TIP-403 policy active on the zone forbids minting to the decrypted recipient, or a custom TIP-20 `mint` reverts for some token-specific reason). The deposit bounces back.
+  - **Valid decryption, mint reverts.** The decrypted recipient fails the token's TIP-403 `Recipient` role, or `TIP20.mint(decryptedTo, amount)` reverts (for example, because the `MintRecipient` role forbids the recipient, or a custom TIP-20 `mint` reverts for some token-specific reason). The deposit bounces back. A deposit credits funds already escrowed on Tempo rather than issuing new supply, so the zone applies the same `Recipient` check that a Tempo transfer to `decryptedTo` would; for compound policies, blocking an address only as a recipient is enough to bounce its deposits.
 
 Because the deposit entry point requires a non-zero `tempoRefundRecipient`, every user-initiated deposit has a refund target and the deposit queue never stalls on a failed mint or invalid encryption.
 
@@ -900,7 +900,7 @@ Zones inherit compliance policies from Tempo automatically. Token issuers set tr
 
 The zone has a `TIP403Registry` deployed at the same address as on Tempo. This contract is read-only and does not support writing policies. Its read methods execute Tempo's registry logic over raw L1 policy storage at the finalized `TempoState.tempoBlockNumber` anchor.
 
-Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorized(policyId, to)` before executing. If either check fails, the transfer reverts.
+Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorized(policyId, to)` before executing. If either check fails, the transfer reverts. Inbox mints (deposits, withdrawal bounce-backs, and refund claims) check the recipient's `Recipient` role in addition to the `MintRecipient` role enforced by `TIP20.mint`.
 
 ### Policy Inheritance
 

@@ -26,7 +26,7 @@ use tempo_precompiles::{
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
     tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
-    tip403_registry::TIP403Registry,
+    tip403_registry::{AuthRole, TIP403Registry},
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
@@ -281,9 +281,16 @@ impl ZoneInbox {
             }
         };
 
+        // Inbox mints credit funds already escrowed on Tempo rather than issue new supply, so the
+        // recipient must pass the token's TIP-403 `Recipient` role, as a Tempo transfer would.
+        // Upstream `mint` separately enforces `MintRecipient`.
+        //
         // TODO: Resolve virtual addresses through `AddressRegistry`precompile once it activates.
-        let can_receive = TIP403Registry::new()
-            .validate_receive_policy(token, ZONE_INBOX_ADDRESS, to)
+        let can_receive = TIP20Token::from_address(token)
+            .and_then(|token| token.ensure_authorized_as(&[(to, AuthRole::recipient())]))
+            .and_then(|_| {
+                TIP403Registry::new().validate_receive_policy(token, ZONE_INBOX_ADDRESS, to)
+            })
             .map(|reason| reason.is_none())
             .or_else(ensure_logic_err)?;
 
