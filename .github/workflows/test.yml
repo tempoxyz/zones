@@ -114,10 +114,10 @@ jobs:
           compression-level: 0
 
   test:
-    name: test (${{ matrix.partition }}/4)
+    name: test (${{ matrix.partition }}/4, threads-required ${{ matrix.threads }})
     runs-on: depot-ubuntu-latest-16
     needs: build-test-artifacts
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -125,6 +125,7 @@ jobs:
       fail-fast: false
       matrix:
         partition: [1, 2, 3, 4]
+        threads: [4, 8]
     steps:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
@@ -150,11 +151,19 @@ jobs:
 
       - name: Run test shard
         run: |
-          cargo-nextest nextest run \
-            --archive-file nextest-archive.tar.zst \
-            --workspace-remap "$GITHUB_WORKSPACE" \
-            --profile ci \
-            --partition hash:${{ matrix.partition }}/4
+          sed -i 's/^threads-required = .*/threads-required = ${{ matrix.threads }}/' .config/nextest.toml
+          grep -n threads-required .config/nextest.toml
+          status=0
+          for i in 1 2 3 4 5; do
+            echo "::group::iteration $i"
+            cargo-nextest nextest run \
+              --archive-file nextest-archive.tar.zst \
+              --workspace-remap "$GITHUB_WORKSPACE" \
+              --profile ci \
+              --partition hash:${{ matrix.partition }}/4 || status=1
+            echo "::endgroup::"
+          done
+          exit $status
 
   test-success:
     name: test success
