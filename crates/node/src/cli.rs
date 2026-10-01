@@ -22,8 +22,7 @@ use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
     ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
-    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
-    state_bloat::InitZoneFromBinaryDump,
+    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS, state_bloat::InitZoneFromBinaryDump,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
