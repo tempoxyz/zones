@@ -163,6 +163,16 @@ jobs:
       - name: Configure persistent intermediate layer cache
         env:
           WRITE_BUILD_CACHE: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          WRITE_PR_BUILD_CACHE: >-
+            ${{ github.repository == 'tempoxyz/zones' &&
+                github.event_name == 'pull_request' &&
+                github.event.pull_request.base.ref == 'main' &&
+                github.event.pull_request.head.repo.full_name == github.repository }}
+          READ_PR_BUILD_CACHE: >-
+            ${{ github.repository == 'tempoxyz/zones' &&
+                (github.event_name == 'pull_request' ||
+                 github.event_name == 'merge_group' ||
+                 github.event_name == 'workflow_dispatch') }}
         run: |
           python3 - <<'PYTHON'
           import json, os
@@ -172,9 +182,17 @@ jobs:
           cache = {"target": {}}
           for target in targets:
               ref = f"{os.environ['REGISTRY']}/tempo-zone-buildcache:{target}"
+              pr_ref = f"{ref}-pr-main"
               entry = {"cache-from": [f"type=registry,ref={ref}"]}
+              # PRs warm a separate rolling cache without replacing the main cache.
+              # Queue and dispatched devnet builds consume both. Concurrent PRs
+              # may replace this best-effort cache; BuildKit validates input keys.
+              if os.environ["READ_PR_BUILD_CACHE"] == "true":
+                  entry["cache-from"].append(f"type=registry,ref={pr_ref}")
               if os.environ["WRITE_BUILD_CACHE"] == "true":
                   entry["cache-to"] = [f"type=registry,ref={ref},mode=max"]
+              elif os.environ["WRITE_PR_BUILD_CACHE"] == "true":
+                  entry["cache-to"] = [f"type=registry,ref={pr_ref},mode=max"]
               cache["target"][target] = entry
           with open(os.path.join(os.environ["RUNNER_TEMP"], "zones-buildcache.json"), "w") as f:
               json.dump(cache, f)
