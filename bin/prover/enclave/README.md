@@ -82,8 +82,8 @@ TCP mode is intended for development of framing, chain validation, and SPF error
 binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
 outside an enclave ends with `attestation_unavailable` rather than an unattested success response.
 Set `SPF_TEMPO_GENESIS` or pass `--tempo-genesis` with a directory containing trusted Tempo genesis
-JSON files. Only files with a `.json` extension are loaded, in filename order; other files are
-ignored. Each custom chain ID must be unique and cannot override a built-in Tempo network.
+JSON files. Files are loaded in filename order. Each custom chain ID must be unique and cannot
+override a built-in Tempo network.
 
 ## Verifier configurations
 
