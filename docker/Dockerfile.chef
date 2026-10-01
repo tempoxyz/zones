@@ -21,7 +21,8 @@ RUN apt-get update \
     mold \
     && rm -rf /var/lib/apt/lists/*
 
-ENV RUSTC_WRAPPER=sccache \
+ENV CARGO_INCREMENTAL=0 \
+    RUSTC_WRAPPER=sccache \
     SCCACHE_DIR=/sccache \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang
 

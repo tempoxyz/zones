@@ -133,3 +133,11 @@ target "tempo-zone-xtask" {
   inherits = ["_common", "docker-metadata"]
   target = "tempo-zone-xtask"
 }
+
+# Compile without genesis or exporting the large builder filesystem. The final
+# enclave target reuses this exact stage after the devnet genesis is available.
+target "tempo-zone-prover-compiled" {
+  inherits = ["tempo-zone-prover-enclave"]
+  target = "builder"
+  output = ["type=cacheonly"]
+}
