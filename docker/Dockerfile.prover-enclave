@@ -9,6 +9,12 @@ ARG CACHE_FAMILY=prover
 
 ARG RUST_PROFILE=release
 
+# jemalloc's configure otherwise detects these from the build host's CPU and
+# kernel, which changes the enclave binary and therefore its PCRs.
+ENV JEMALLOC_SYS_WITH_LG_VADDR=48 \
+    JEMALLOC_SYS_WITH_LG_PAGE=12 \
+    JEMALLOC_SYS_WITH_LG_HUGEPAGE=21
+
 COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=zones-${TARGETARCH}-${RUST_PROFILE}-${CACHE_FAMILY}-registry \
@@ -22,9 +28,16 @@ FROM scratch AS tempo-genesis
 
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
 
-WORKDIR /data
 COPY --from=builder /app/target/release/tempo-zone-prover-enclave /usr/local/bin/tempo-zone-prover-enclave
 COPY --from=tempo-genesis / /etc/tempo/genesis/
+
+# Nitro hashes file modification times into PCR2, so every path written by
+# this stage gets a fixed timestamp instead of the build or download time.
+RUN mkdir /data \
+    && find /data /etc/tempo /usr/local/bin/tempo-zone-prover-enclave -exec touch -h -d @0 {} + \
+    && touch -h -d @0 /etc /usr/local/bin
+
+WORKDIR /data
 
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/tempo-zone-prover-enclave", "--tempo-genesis", "/etc/tempo/genesis"]
