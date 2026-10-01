@@ -5,10 +5,6 @@ variable "VERGEN_GIT_SHA" {
   default = ""
 }
 
-variable "VERGEN_GIT_SHA_SHORT" {
-  default = ""
-}
-
 target "chef" {
   dockerfile = "docker/Dockerfile.chef"
   context = "."
@@ -31,7 +27,6 @@ target "_common" {
     RUST_PROFILE = "profiling"
     EXTRA_RUSTFLAGS = "-C force-frame-pointers=yes"
     VERGEN_GIT_SHA = "${VERGEN_GIT_SHA}"
-    VERGEN_GIT_SHA_SHORT = "${VERGEN_GIT_SHA_SHORT}"
   }
   platforms = ["linux/amd64"]
 }

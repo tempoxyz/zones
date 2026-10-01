@@ -14,15 +14,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cargo_builder = Cargo::builder().features(true).target_triple(true).build();
     emitter.add_instructions(&cargo_builder)?;
 
-    let git_builder = Git2::builder()
-        .describe(false, true, None)
-        .dirty(true)
-        .sha(false)
-        .build();
-    emitter.add_instructions(&git_builder)?;
+    // Container builds attach revision metadata after compilation. Do not discover
+    // or embed the checkout revision in that mode, including through vergen.
+    println!("cargo:rerun-if-env-changed=ZONE_STAMP_REVISION");
+    println!("cargo:rustc-check-cfg=cfg(zone_stamped_revision)");
+    let stamp_revision = env::var("ZONE_STAMP_REVISION").is_ok_and(|value| value == "1");
+    if stamp_revision {
+        if env::var("CARGO_CFG_TARGET_OS")? != "linux" {
+            return Err("revision stamping requires a Linux ELF binary".into());
+        }
+        println!("cargo:rustc-cfg=zone_stamped_revision");
+    } else {
+        let git_builder = Git2::builder()
+            .describe(false, true, None)
+            .dirty(true)
+            .sha(false)
+            .build();
+        emitter.add_instructions(&git_builder)?;
+    }
 
     emitter.emit_and_set()?;
-    let sha = env::var("VERGEN_GIT_SHA").or_else(|_| env::var("ZONE_GIT_SHA"))?;
+    let sha = if stamp_revision {
+        "unavailable".to_owned()
+    } else {
+        env::var("VERGEN_GIT_SHA").or_else(|_| env::var("ZONE_GIT_SHA"))?
+    };
     println!("cargo:rustc-env=VERGEN_GIT_SHA={sha}");
     let sha_short = &sha[0..7];
 
