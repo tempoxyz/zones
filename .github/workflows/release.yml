@@ -103,6 +103,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: resolve-release
     if: ${{ github.event.inputs.dry_run != 'true' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
@@ -144,6 +147,9 @@ jobs:
     outputs:
       asset_artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
       - name: Check out resolved commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -202,9 +208,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     outputs:
       binary_sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
       - name: Check out resolved commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -245,7 +255,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
       - name: Download canonical Linux x86_64 release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -324,6 +338,12 @@ jobs:
           archive_name="${binary_name}.tar.gz"
           archive_checksum_name="${archive_name}.sha256"
           binary_checksum_name="${binary_name}.sha256"
+          mapfile -d '' candidate_assets < <(find "$CANDIDATE_ASSET_DIR" -type f -print0)
+          if [[ ${#candidate_assets[@]} -ne 3 ]]; then
+            failure="candidate artifact must contain only the archive and its two checksums"
+            echo "$failure" >&2
+            exit 1
+          fi
           mapfile -t archive_paths < <(find "$CANDIDATE_ASSET_DIR" -type f -name "$archive_name" -print)
           if [[ ${#archive_paths[@]} -ne 1 ]]; then
             failure="candidate artifact does not contain exactly one $archive_name"
@@ -506,25 +526,31 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.build-linux-x86_64-release.outputs.asset_artifact_id }}
-          path: artifacts
+          path: artifacts/canonical
 
-      - name: Download other release assets
+      - name: Download Linux ARM release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: tempo-zone-aarch64-*
-          path: artifacts
-          merge-multiple: true
+          name: tempo-zone-aarch64-unknown-linux-gnu
+          path: artifacts/aarch64-unknown-linux-gnu
+
+      - name: Download macOS ARM release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tempo-zone-aarch64-apple-darwin
+          path: artifacts/aarch64-apple-darwin
 
       - name: Download Linux x86_64 verification manifest
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: tempo-zone-linux-x86_64-reproducible-verification
-          path: artifacts
+          path: artifacts/verification
 
       - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.resolve-release.outputs.version }}
+          COMMIT_SHA: ${{ needs.resolve-release.outputs.commit_sha }}
         run: |
           set -euo pipefail
 
@@ -533,9 +559,38 @@ jobs:
             prerelease="--prerelease"
           fi
 
-          mapfile -d '' assets < <(find artifacts -type f -print0 | sort -z)
-          (( ${#assets[@]} > 0 )) || {
-            echo "No verified release assets were downloaded" >&2
+          assets=()
+          add_asset() {
+            local directory="$1" name="$2"
+            local -a matches
+            mapfile -d '' matches < <(find "$directory" -type f -name "$name" -print0)
+            [[ ${#matches[@]} -eq 1 ]] || {
+              echo "Expected exactly one release asset: $name" >&2
+              exit 1
+            }
+            assets+=("${matches[0]}")
+          }
+          binary_name="tempo-zone-${VERSION}-x86_64-unknown-linux-gnu"
+          add_asset artifacts/canonical "${binary_name}.tar.gz"
+          add_asset artifacts/canonical "${binary_name}.tar.gz.sha256"
+          add_asset artifacts/canonical "${binary_name}.sha256"
+          for target in aarch64-unknown-linux-gnu aarch64-apple-darwin; do
+            binary_name="tempo-zone-${VERSION}-${target}"
+            add_asset "artifacts/$target" "${binary_name}.tar.gz"
+            add_asset "artifacts/$target" "${binary_name}.tar.gz.sha256"
+          done
+          add_asset artifacts/verification tempo-zone-linux-x86_64-verification.json
+
+          # Re-read and peel the remote tag after the builds, including annotated
+          # tags, so a moved tag cannot label binaries from another commit.
+          tag_object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq '.object')"
+          while [[ "$(jq -r '.type' <<< "$tag_object")" == tag ]]; do
+            tag_sha="$(jq -r '.sha' <<< "$tag_object")"
+            tag_object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha" --jq '.object')"
+          done
+          [[ "$(jq -r '.type' <<< "$tag_object")" == commit && \
+              "$(jq -r '.sha' <<< "$tag_object")" == "$COMMIT_SHA" ]] || {
+            echo "Release tag $VERSION no longer resolves to verified commit $COMMIT_SHA" >&2
             exit 1
           }
 
