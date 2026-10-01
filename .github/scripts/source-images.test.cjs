@@ -29,7 +29,6 @@ test('identical source across devnets skips compilation and pins the same images
   const second = prepare({...env, GITHUB_SHA: 'd'.repeat(40)}, commands({head: 'd'.repeat(40)}));
   assert.equal(first.outputs.build_required, 'false');
   assert.deepEqual(first.bake.group['source-images'].targets, []);
-  assert.deepEqual(first.bake.group.compile.targets, ['tempo-zone-prover-compiled']);
   assert.deepEqual(first.plan.images, second.plan.images);
   assert.equal(first.outputs.source_sha, source);
 });
@@ -37,7 +36,6 @@ test('identical source across devnets skips compilation and pins the same images
 test('a partial cache miss builds only the missing source image', () => {
   const result = prepare(env, commands({missing: ['tempo-zone-xtask']}));
   assert.equal(result.outputs.build_required, 'true');
-  assert.deepEqual(result.bake.group.compile.targets, ['tempo-zone-xtask', 'tempo-zone-prover-compiled']);
   assert.deepEqual(result.bake.group['source-images'].targets, ['tempo-zone-xtask']);
   assert.deepEqual(result.bake.target['tempo-zone-xtask'].tags, [`ghcr.io/tempoxyz/tempo-zone-xtask:source-${source}`]);
   assert.equal(result.bake.target['tempo-zone-xtask'].labels['org.opencontainers.image.revision'], source);
@@ -63,7 +61,6 @@ test('ordinary CI still builds, and PR metadata publishes only candidate tags', 
     const result = prepare({...env, SOURCE_SHA: '', GITHUB_EVENT_NAME: event}, () => { throw new Error('unexpected lookup'); });
     assert.equal(result.outputs.source_sha, child);
     assert.equal(result.bake.group['source-images'].targets.length, 3);
-    assert.deepEqual(result.bake.group.compile.targets, [...result.bake.group['source-images'].targets, 'tempo-zone-prover-compiled']);
     for (const image of result.plan.images) {
       assert.deepEqual(result.bake.target[image.name], event === 'pull_request'
         ? {tags: [image.ref], labels: {'org.opencontainers.image.revision': child}} : {});

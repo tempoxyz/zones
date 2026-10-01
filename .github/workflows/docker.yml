@@ -226,7 +226,9 @@ jobs:
             ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-prover-utils.outputs.bake-file }}
             ${{ runner.temp }}/source-images-bake.json
-          targets: compile
+          targets: |
+            source-images
+            tempo-zone-prover-compiled
           project: 0c6tg19qsp
           # Export only the executable for the later genesis packaging step.
           set: |

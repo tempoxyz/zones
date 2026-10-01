@@ -52,11 +52,7 @@ function prepare(env, run = command) {
   }
   return {
     plan: {source, run: env.GITHUB_SHA, images},
-    // Depot cannot execute an empty group when every source image is cached.
-    bake: {group: {
-      'source-images': {targets: missing},
-      compile: {targets: [...missing, 'tempo-zone-prover-compiled']},
-    }, target},
+    bake: {group: {'source-images': {targets: missing}}, target},
     outputs: {source_sha: source, source_short_sha: source.slice(0, 7), build_required: String(missing.length > 0)},
   };
 }
