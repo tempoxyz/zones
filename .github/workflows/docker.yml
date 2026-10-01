@@ -230,8 +230,10 @@ jobs:
             source-images
             tempo-zone-prover-compiled
           project: 0c6tg19qsp
-          # Explicit outputs leave the compile-only target cache-only.
+          # Export only the executable for the later genesis packaging step.
           set: |
+            tempo-zone-prover-compiled.target=compiled
+            tempo-zone-prover-compiled.output=type=local,dest=target/prover-compiled
             tempo-zone.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) }}
             tempo-zone-xtask.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) }}
             tempo-zone-prover-utils.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) }}
@@ -249,10 +251,13 @@ jobs:
         run: node .github/scripts/source-images.cjs alias
 
       - name: Mark compilation complete
-        if: inputs.defer_genesis
+        id: compiled
         run: |
+          binary_sha=$(sha256sum target/prover-compiled/tempo-zone-prover-enclave | cut -d' ' -f1)
+          echo "binary_sha=$binary_sha" >> "$GITHUB_OUTPUT"
           jq -n --arg sha "$GITHUB_SHA" --arg attempt "$GITHUB_RUN_ATTEMPT" \
-            '{sha: $sha, attempt: $attempt}' > "$RUNNER_TEMP/compilation.json"
+            --arg binary_sha256 "$binary_sha" \
+            '{sha: $sha, attempt: $attempt, binary_sha256: $binary_sha256}' > "$RUNNER_TEMP/compilation.json"
 
       - name: Upload compilation marker
         if: inputs.defer_genesis
@@ -299,6 +304,10 @@ jobs:
           targets: ${{ steps.eif_builder.outputs.hit == 'true' && 'tempo-zone-prover-enclave' || 'prover-eif-inputs' }}
           set: |
             tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
+            tempo-zone-prover-enclave.dockerfile=docker/Dockerfile.prover-package
+            tempo-zone-prover-enclave.contexts.chef=.
+            tempo-zone-prover-enclave.contexts.prover-binary=target/prover-compiled
+            tempo-zone-prover-enclave.args.PROVER_BINARY_SHA256=${{ steps.compiled.outputs.binary_sha }}
             tempo-zone-prover-enclave.contexts.tempo-genesis=.tempo-genesis
             tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
             tempo-zone-prover-eif-builder.no-cache=${{ github.event_name == 'schedule' }}
@@ -357,7 +366,8 @@ jobs:
         run: |
           jq -n --arg sha "$GITHUB_SHA" --arg attempt "$GITHUB_RUN_ATTEMPT" \
             --arg genesis_sha256 "$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)" \
-            '{sha: $sha, attempt: $attempt, genesis_sha256: $genesis_sha256}' \
+            --arg binary_sha256 "${{ steps.compiled.outputs.binary_sha }}" \
+            '{sha: $sha, attempt: $attempt, genesis_sha256: $genesis_sha256, binary_sha256: $binary_sha256}' \
             > target/tempo-zone-prover-eif/identity.json
 
       - name: Upload tempo-zone-prover PCR measurements

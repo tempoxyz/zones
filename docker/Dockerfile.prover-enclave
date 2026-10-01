@@ -18,6 +18,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=zones-
     cargo build --locked --profile ${RUST_PROFILE} --bin tempo-zone-prover-enclave \
     && /app/target/${RUST_PROFILE}/tempo-zone-prover-enclave --help >/dev/null
 
+# CI can export just the executable and package it with genesis afterward.
+FROM scratch AS compiled
+COPY --from=builder /app/target/release/tempo-zone-prover-enclave /tempo-zone-prover-enclave
+
 FROM scratch AS tempo-genesis
 
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
