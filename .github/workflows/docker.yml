@@ -1,4 +1,5 @@
 name: Docker Build
+run-name: "Docker comparison: ${{ inputs.comparison_label || 'validation' }}"
 
 on:
   push:
@@ -10,6 +11,17 @@ on:
   merge_group:
   workflow_dispatch:
     inputs:
+      comparison_mode:
+        description: "Node Dockerfile for this isolated no-publish comparison"
+        type: choice
+        options:
+          - baseline
+          - stamped
+        required: true
+      comparison_label:
+        description: "Benchmark variant and warm-up/rebuild label"
+        type: string
+        required: true
       nightly:
         description: "Tag nightly"
         type: boolean
@@ -57,6 +69,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
           submodules: recursive
 
       - uses: tempoxyz/gh-actions/vendor/depot/setup-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
@@ -162,8 +175,14 @@ jobs:
 
       - name: Configure persistent intermediate layer cache
         env:
-          WRITE_BUILD_CACHE: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          WRITE_BUILD_CACHE: 'false'
+          COMPARISON_MODE: ${{ inputs.comparison_mode }}
         run: |
+          # Temporary validation branch: identical source and workflow for both
+          # variants, with only the node Dockerfile selected differently.
+          if [[ "$COMPARISON_MODE" == baseline ]]; then
+            git show 344ff78573e6cfc35c8c551b4dc39b042121fc2b:docker/Dockerfile > "$RUNNER_TEMP/baseline.Dockerfile"
+          fi
           python3 - <<'PYTHON'
           import json, os
           targets = ["chef", "prover-chef", "tempo-zone", "tempo-zone-xtask",
@@ -173,6 +192,8 @@ jobs:
           for target in targets:
               ref = f"{os.environ['REGISTRY']}/tempo-zone-buildcache:{target}"
               entry = {"cache-from": [f"type=registry,ref={ref}"]}
+              if target in ["tempo-zone", "tempo-zone-xtask"] and os.environ["COMPARISON_MODE"] == "baseline":
+                  entry["dockerfile"] = os.path.join(os.environ["RUNNER_TEMP"], "baseline.Dockerfile")
               if os.environ["WRITE_BUILD_CACHE"] == "true":
                   entry["cache-to"] = [f"type=registry,ref={ref},mode=max"]
               cache["target"][target] = entry
@@ -191,7 +212,7 @@ jobs:
             ${{ steps.meta-tempo-zone-prover-utils.outputs.bake-file }}
           targets: default
           project: 0c6tg19qsp
-          push: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
+          push: false
           # Scheduled builds refresh moving external tools and base images. All
           # commit/tag/manual builds can safely reuse Depot's content-addressed
           # layer cache and will still invalidate layers when inputs change.
@@ -240,10 +261,7 @@ jobs:
           pull: ${{ github.event_name == 'schedule' }}
 
       - name: Publish EIF builder cache
-        if: >-
-          steps.eif_builder.outputs.hit != 'true' &&
-          github.repository == 'tempoxyz/zones' &&
-          github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        if: false
         env:
           BUILDER_REF: ${{ steps.eif_builder.outputs.ref }}
         run: |
@@ -299,10 +317,7 @@ jobs:
             tempo-zone-prover.args.NITRO_PCR1=${{ steps.prover_measurements.outputs.pcr1 }}
             tempo-zone-prover.args.NITRO_PCR2=${{ steps.prover_measurements.outputs.pcr2 }}
           project: 0c6tg19qsp
-          push: >-
-            ${{ github.repository == 'tempoxyz/zones' &&
-                github.event_name != 'pull_request' &&
-                github.event_name != 'merge_group' }}
+          push: false
           no-cache: ${{ github.event_name == 'schedule' }}
           pull: ${{ github.event_name == 'schedule' }}
 
@@ -314,10 +329,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish Zones CI event
-        if: >-
-          github.repository == 'tempoxyz/zones' &&
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main'
+        if: false
         shell: bash
         env:
           EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
