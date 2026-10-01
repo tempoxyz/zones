@@ -23,7 +23,7 @@ on:
         type: string
         default: "https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json"
       source_sha:
-        description: "Original candidate SHA for an identical-tree devnet commit"
+        description: "Deprecated compatibility input; ignored (images are built from the checked-out commit)"
         type: string
         default: ""
   workflow_call:
@@ -38,7 +38,7 @@ on:
         type: string
         default: "https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json"
       source_sha:
-        description: "Original candidate SHA for an identical-tree devnet commit"
+        description: "Deprecated compatibility input; ignored (images are built from the checked-out commit)"
         required: false
         type: string
         default: ""
@@ -75,12 +75,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-          fetch-depth: 2
 
       - uses: tempoxyz/gh-actions/vendor/depot/setup-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-
-      - name: Test source image reuse
-        run: node --test .github/scripts/source-images.test.cjs
 
       - name: Docker metadata for tempo-zone
         id: meta-tempo-zone
@@ -99,7 +95,6 @@ jobs:
             type=edge,branch=main
             type=sha,prefix=sha-
             type=ref,event=pr
-            type=raw,value=source-${{ github.sha }}
 
       - name: Docker metadata for tempo-zone-xtask
         id: meta-tempo-zone-xtask
@@ -118,7 +113,6 @@ jobs:
             type=edge,branch=main
             type=sha,prefix=sha-
             type=ref,event=pr
-            type=raw,value=source-${{ github.sha }}
 
       - name: Docker metadata for tempo-zone-prover
         id: meta-tempo-zone-prover
@@ -155,7 +149,6 @@ jobs:
             type=edge,branch=main
             type=sha,prefix=sha-
             type=ref,event=pr
-            type=raw,value=source-${{ github.sha }}
 
       - name: Log in to Container Registry
         if: github.repository == 'tempoxyz/zones'
@@ -167,12 +160,6 @@ jobs:
 
       - id: shortsha
         run: echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve source images
-        id: source_images
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-        run: node .github/scripts/source-images.cjs prepare
 
       - name: Configure persistent intermediate layer cache
         env:
@@ -216,7 +203,7 @@ jobs:
             echo "hit=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Compile all binaries and publish source images
+      - name: Compile all binaries and publish images
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
           files: |
@@ -225,30 +212,25 @@ jobs:
             ${{ steps.meta-tempo-zone.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-prover-utils.outputs.bake-file }}
-            ${{ runner.temp }}/source-images-bake.json
           targets: |
-            source-images
+            default
             tempo-zone-prover-compiled
           project: 0c6tg19qsp
           # Export only the executable for the later genesis packaging step.
           set: |
             tempo-zone-prover-compiled.target=compiled
             tempo-zone-prover-compiled.output=type=local,dest=target/prover-compiled
-            tempo-zone.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) }}
-            tempo-zone-xtask.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) }}
-            tempo-zone-prover-utils.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) }}
+            tempo-zone.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
+            tempo-zone-xtask.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
+            tempo-zone-prover-utils.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
           # Scheduled builds refresh moving external tools and base images. All
           # commit/tag/manual builds can safely reuse Depot's content-addressed
           # layer cache and will still invalidate layers when inputs change.
           no-cache: ${{ github.event_name == 'schedule' }}
           pull: ${{ github.event_name == 'schedule' }}
         env:
-          VERGEN_GIT_SHA: ${{ steps.source_images.outputs.source_sha }}
-          VERGEN_GIT_SHA_SHORT: ${{ steps.source_images.outputs.source_short_sha }}
-
-      - name: Alias source images for this devnet
-        if: inputs.source_sha != ''
-        run: node .github/scripts/source-images.cjs alias
+          VERGEN_GIT_SHA: ${{ github.sha }}
+          VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
 
       - name: Mark compilation complete
         id: compiled
