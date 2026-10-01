@@ -35,6 +35,28 @@ substitute an easier workflow for an acceptance gate.
 
 These are dependencies, not evidence of this goal's completion.
 
+## Current delivery evidence
+
+Draft deliverables published so far:
+
+- [TIP-1125 bounded native execution](https://github.com/tempoxyz/tempo/pull/8068).
+- [EVM2 transaction context for precompile calls](https://github.com/alloy-rs/evm2/pull/523).
+- [Reth dependency alignment](https://github.com/paradigmxyz/reth/pull/27642),
+  based on its existing `codex/excise-revm` branch.
+
+Tempo contains a bounded dependency-call adapter and transaction-owned reservation
+scope. Its tests exercise caller/origin preservation, static context, delegated
+code, execution/state gas, rollback, recoverable dependency failures, and
+non-replenishment across native roots. Native portal/vault dispatch and payment
+admission are not yet implemented; these helpers alone do not pass E02/E03.
+
+The [real bridge baseline](evidence/EVM2_BRIDGE_BASELINE.md) records successful
+public transfer, encrypted deposit, private balance, restart, withdrawal payout,
+canonical settlement receipts and exact backing reconciliation. It uses the
+explicit temporary NoProof mode. Real execution-proof settlement, historical
+replay, scheduled native activation/migration and mixed Earn/Zone throughput
+remain open. No full acceptance gate in the table has passed.
+
 ## Protocol requirements
 
 | ID | Required outcome | Passing evidence |
