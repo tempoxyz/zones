@@ -65,7 +65,9 @@ jobs:
         id: meta-tempo-zone
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          images: ${{ env.REGISTRY }}/tempo-zone
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone
+            docker.io/tempoxyz/tempo-zone
           bake-target: tempo-zone
           tags: |
             type=schedule,pattern=nightly
@@ -83,7 +85,9 @@ jobs:
         id: meta-tempo-zone-xtask
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          images: ${{ env.REGISTRY }}/tempo-zone-xtask
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone-xtask
+            docker.io/tempoxyz/tempo-zone-xtask
           bake-target: tempo-zone-xtask
           tags: |
             type=schedule,pattern=nightly
@@ -101,7 +105,9 @@ jobs:
         id: meta-tempo-zone-prover
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          images: ${{ env.REGISTRY }}/tempo-zone-prover
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone-prover
+            docker.io/tempoxyz/tempo-zone-prover
           bake-target: tempo-zone-prover
           tags: |
             type=schedule,pattern=nightly
@@ -119,7 +125,9 @@ jobs:
         id: meta-tempo-zone-prover-utils
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          images: ${{ env.REGISTRY }}/tempo-zone-prover-utils
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone-prover-utils
+            docker.io/tempoxyz/tempo-zone-prover-utils
           bake-target: tempo-zone-prover-utils
           tags: |
             type=schedule,pattern=nightly
@@ -140,6 +148,13 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: github.repository == 'tempoxyz/zones'
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          username: ${{ secrets.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
       - id: shortsha
         run: echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
