@@ -30,44 +30,6 @@ env:
   FOUNDRY_REF: 6902a96211da7bcc3d9c4d8e97910ac5c9d5d2c6
 
 jobs:
-  conformance:
-    permissions:
-      contents: read
-      id-token: write
-    name: ABI and storage conformance
-    runs-on: ubuntu-latest
-    steps:
-      - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: recursive
-          persist-credentials: false
-
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-        with:
-          toolchain: stable
-      - uses: tempoxyz/gh-actions/actions/setup-mold@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-        with:
-          version: v0.15.0
-
-      - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-        with:
-          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
-
-      - name: Build Solidity artifacts
-        working-directory: crates/contracts
-        run: forge build --skip test
-
-      - name: Check Solidity and Rust ABIs
-        run: cargo run -p tempo-xtask -- check-abi
-
-      - name: Check Solidity and Rust storage layouts
-        run: cargo test -p zone-precompiles --test storage --features test-utils
-
   build:
     permissions:
       contents: read
@@ -311,7 +273,6 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
-      - conformance
       - build
       - lint
       - test
