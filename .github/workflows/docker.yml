@@ -70,7 +70,7 @@ jobs:
       inputs.reproducible_verify == true &&
       github.repository == 'tempoxyz/zones' &&
       github.ref == 'refs/heads/main'
-    uses: tempoxyz/gh-actions/.github/workflows/reproducible-image-verify.yml@5e789f13f8434b76ac105b49e15f696569e23734 # main
+    uses: tempoxyz/gh-actions/.github/workflows/reproducible-image-verify.yml@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
     permissions:
       contents: read
       packages: write
