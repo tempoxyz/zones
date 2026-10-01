@@ -1,23 +1,21 @@
 use alloy::{
-    network::EthereumWallet,
-    primitives::{Address, B256, Bytes, U256, keccak256},
+    primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
-    signers::{Signer, local::PrivateKeySigner},
-    sol,
-    sol_types::SolValue,
+    signers::local::PrivateKeySigner,
 };
 use eyre::{WrapErr as _, eyre};
-use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
 use std::{path::PathBuf, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
-    IRolesAuth, ITIP20 as TIP20Token, ITIP20Factory as TIP20Factory,
+    IRolesAuth, IStablecoinDEX as StablecoinDEX, ITIP20 as TIP20Token,
+    ITIP20Factory as TIP20Factory,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
 use tempo_zone_contracts::{
     DepositPayload, IZoneOutbox, SwapAndDepositRouterCallback, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use zone_precompiles::ecies::encrypt_deposit;
+use zone_sequencer::{encryption_key_identity, register_encryption_key};
 
 use crate::zone_utils::{
     ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
@@ -30,15 +28,6 @@ const DEX_LIQUIDITY_MULTIPLIER: u128 = 3;
 const NONCE_CONFLICT_RETRIES: u32 = 5;
 const PATHUSD_HEADROOM: u128 = 10_000_000;
 const WITHDRAWAL_TX_GAS: u64 = 1_000_000;
-
-sol! {
-    #[sol(rpc)]
-    contract StablecoinDEX {
-        function createPair(address base) external returns (bytes32 key);
-        function place(address token, uint128 amount, bool isBid, int16 tick) external returns (uint128 orderId);
-        function quoteSwapExactAmountIn(address tokenIn, address tokenOut, uint128 amountIn) external view returns (uint128 amountOut);
-    }
-}
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct DemoSwapAndDeposit {
@@ -131,25 +120,22 @@ impl DemoSwapAndDeposit {
         let faucet_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect(&http_rpc)
             .await?;
-        let operator_wallet = EthereumWallet::from(operator_signer);
         let l1 = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(operator_wallet)
+            .wallet(operator_signer)
             .connect(&http_rpc)
             .await?;
         l1.client()
             .set_poll_interval(std::time::Duration::from_secs(1));
 
-        let sequencer_wallet = EthereumWallet::from(sequencer_signer);
         let l1_seq = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(sequencer_wallet)
+            .wallet(sequencer_signer)
             .connect(&http_rpc)
             .await?;
         l1_seq
             .client()
             .set_poll_interval(std::time::Duration::from_secs(1));
-        let admin_wallet = EthereumWallet::from(admin_signer);
         let l1_admin = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(admin_wallet)
+            .wallet(admin_signer)
             .connect(&http_rpc)
             .await?;
         l1_admin
@@ -160,7 +146,7 @@ impl DemoSwapAndDeposit {
             .connect(&self.zone_rpc_url)
             .await?;
         let l2_operator = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(parse_private_key(&self.private_key)?))
+            .wallet(parse_private_key(&self.private_key)?)
             .connect(&self.zone_rpc_url)
             .await?;
 
@@ -474,7 +460,7 @@ async fn configure_and_mint_demo_token<P: Provider<TempoNetwork>>(
     check(&receipt, "setSupplyCap")?;
 
     let receipt = IRolesAuth::new(token, l1)
-        .grantRole(*ISSUER_ROLE, admin)
+        .grantRole(ISSUER_ROLE, admin)
         .send_sync()
         .await
         .wrap_err("grantRole failed")?;
@@ -701,7 +687,8 @@ async fn ensure_sequencer_encryption_key<P: Provider<TempoNetwork>>(
     portal_address: Address,
     sequencer_private_key: &str,
 ) -> eyre::Result<(ZonePortal::sequencerEncryptionKeyReturn, U256)> {
-    let (expected_x, expected_y_parity) = derive_encryption_public_key(sequencer_private_key)
+    let (expected_x, expected_y_parity, _) = parse_private_key(sequencer_private_key)
+        .and_then(|signer| encryption_key_identity(&signer))
         .wrap_err("failed to derive the sequencer encryption public key from SEQUENCER_KEY")?;
     let key_count = portal
         .encryptionKeyCount()
@@ -749,40 +736,10 @@ async fn register_sequencer_encryption_key<P: Provider<TempoNetwork>>(
     portal_address: Address,
     sequencer_private_key: &str,
 ) -> eyre::Result<()> {
-    let (x, y_parity) = derive_encryption_public_key(sequencer_private_key)
-        .wrap_err("failed to derive the sequencer encryption public key")?;
     let signer = parse_private_key(sequencer_private_key)?;
-    let message = keccak256((portal_address, x, U256::from(y_parity)).abi_encode());
-    let sig = signer
-        .sign_hash(&message)
+    let tx_hash = register_encryption_key(portal.provider(), portal_address, &signer)
         .await
-        .wrap_err("failed to sign the encryption key proof-of-possession")?;
-    let pop_v = sig.v() as u8 + 27;
-    let pop_r = B256::from(sig.r().to_be_bytes::<32>());
-    let pop_s = B256::from(sig.s().to_be_bytes::<32>());
-
-    let receipt = portal
-        .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
-        .send_sync()
-        .await
-        .wrap_err("failed to send setSequencerEncryptionKey")?;
-    check(&receipt, "setSequencerEncryptionKey")?;
-    println!(
-        "  Sequencer encryption key registered on L1  [tx: {}]",
-        receipt.transaction_hash
-    );
+        .wrap_err("failed to register the sequencer encryption key")?;
+    println!("  Sequencer encryption key registered on L1  [tx: {tx_hash}]");
     Ok(())
-}
-
-fn derive_encryption_public_key(sequencer_private_key: &str) -> eyre::Result<(B256, u8)> {
-    let key_str = sequencer_private_key
-        .strip_prefix("0x")
-        .unwrap_or(sequencer_private_key);
-    let enc_key = k256::SecretKey::from_slice(&const_hex::decode(key_str)?)?;
-    let scalar: Scalar = *enc_key.to_nonzero_scalar();
-    let pub_point = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
-    let encoded = pub_point.to_encoded_point(true);
-    let x = B256::from_slice(encoded.x().unwrap().as_slice());
-    let y_parity = encoded.as_bytes()[0];
-    Ok((x, y_parity))
 }

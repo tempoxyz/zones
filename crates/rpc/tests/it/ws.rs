@@ -190,7 +190,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
                 ),
                 "number": "0x42",
                 "parentHash": format!("{:#x}", alloy_primitives::B256::ZERO),
-                "logsBloom": format!("0x{}", "0".repeat(512)),
+                "logsBloom": format!("{:#x}", alloy_primitives::Bloom::ZERO),
                 "gasUsed": "0x0",
                 "size": "0x0",
                 "transactionsRoot": format!("{:#x}", alloy_primitives::B256::ZERO),
@@ -314,13 +314,7 @@ impl TestContext {
         let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, issued_at, expires_at);
         let sig = self.signer.sign_hash_sync(&digest).expect("signing failed");
 
-        let mut blob = Vec::with_capacity(65 + fields.len());
-        blob.extend_from_slice(&sig.r().to_be_bytes::<32>());
-        blob.extend_from_slice(&sig.s().to_be_bytes::<32>());
-        blob.push(sig.v() as u8);
-        blob.extend_from_slice(&fields);
-
-        alloy_primitives::hex::encode(&blob)
+        alloy_primitives::hex::encode([sig.as_rsy().as_slice(), &fields].concat())
     }
 
     fn ws_url(&self) -> String {

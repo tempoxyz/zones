@@ -247,8 +247,8 @@ async fn discover_creation(
         Filter::new()
             .address(ZONE_FACTORY_ADDRESS)
             .event_signature(ZoneFactory::ZoneCreated::SIGNATURE_HASH)
-            .topic1(B256::from(U256::from(config.zone_id)))
-            .topic2(config.portal_address.into_word())
+            .topic1(U256::from(config.zone_id))
+            .topic2(config.portal_address)
             .from_block(start)
             .to_block(start.saturating_add(LOG_QUERY_BLOCKS - 1).min(head))
     });

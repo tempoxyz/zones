@@ -1,7 +1,6 @@
 //! Zone transaction policies shared by pool admission and block execution.
 
 use alloy_primitives::Address;
-use revm::context::Transaction;
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
 
 /// Validates transaction policies enforced by the Zone EVM.
@@ -32,9 +31,7 @@ pub fn validate_transaction(
 }
 
 fn contract_creation_deployer(tx: &TempoTxEnv) -> Option<Address> {
-    let creates = match tx.tempo_tx_env.as_ref() {
-        Some(aa) => aa.aa_calls.iter().any(|call| call.to.is_create()),
-        None => tx.kind().is_create(),
-    };
-    creates.then_some(tx.caller)
+    tx.calls()
+        .any(|(kind, _)| kind.is_create())
+        .then_some(tx.caller)
 }

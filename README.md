@@ -61,6 +61,9 @@ Older Anvil builds only add Tempo fields to Ethereum headers at the RPC layer.
 The dev command rejects those builds because Zones require canonical Tempo block
 hashes and parent links.
 
+For Amp orbs, [local portals](.amp/README.md) provide a zone devnet, TIDX, and
+Tempo Explorer through `.amp/services.yaml`.
+
 ### Deploying a Zone
 
 ```bash
@@ -75,6 +78,15 @@ The `deploy-zone` command generates admin and sequencer keypairs, funds them on 
 # Start/restart a zone after initial deployment
 just zone-up my-zone
 ```
+
+### Custom L1 fork schedules
+
+For custom L1 chain IDs, `node` and `re-execute` use the fork schedule in the
+supplied Zone genesis without inheriting the binary's DEV defaults. Include the
+intended Ethereum and Tempo fork activations when generating genesis; omitted
+Tempo forks remain inactive. `ZONE_L1_DEV_CHAIN_IDS` is ignored and can be removed
+after upgrading to a binary with this behavior. Mainnet, Moderato, and local
+development chain IDs 1337/31337 retain their existing parent-schedule inheritance.
 
 ### Depositing into a Zone
 

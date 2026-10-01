@@ -3,26 +3,26 @@
 #![allow(clippy::too_many_arguments)]
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, address, keccak256},
+    network::primitives::ReceiptResponse,
+    primitives::Address,
     providers::{Provider, ProviderBuilder},
-    signers::local::PrivateKeySigner,
-    sol_types::SolEvent,
 };
-use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_chainspec::{cli::TempoHardforkArgs, spec::TEMPO_T0_BASE_FEE};
 use tempo_contracts::precompiles::ITIP403Registry;
-use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use tempo_zone_contracts::{
-    ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
+    MAX_SEQUENCERS, ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
 };
 use zone_primitives::constants::zone_chain_id;
 
-use crate::zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only};
+use crate::{
+    generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
+    zone_utils::{MODERATO_ZONE_FACTORY, parse_private_key, write_owner_only},
+};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct CreateZone {
@@ -39,7 +39,7 @@ pub(crate) struct CreateZone {
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
-    #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     initial_token: Address,
 
     /// Enable account allowlist enforcement. Membership is retained while disabled.
@@ -95,10 +95,10 @@ pub(crate) struct CreateZone {
     /// Genesis block gas limit for the zone L2.
     #[arg(long, default_value_t = 30_000_000)]
     gas_limit: u64,
-}
 
-/// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
-const MAX_SEQUENCERS: usize = 8;
+    #[command(flatten)]
+    forks: TempoHardforkArgs,
+}
 
 impl CreateZone {
     fn factory_params(&self) -> ZoneFactory::CreateZoneParams {
@@ -153,14 +153,9 @@ impl CreateZone {
             );
         }
 
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let signer: PrivateKeySigner = key_str.parse()?;
-        let wallet = EthereumWallet::from(signer);
+        let signer = parse_private_key(&self.private_key)?;
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&self.l1_rpc_url)
             .await?;
 
@@ -202,19 +197,6 @@ impl CreateZone {
             ));
         }
 
-        // Anchor before createZone so the zone replays the creation block and its
-        // initial TokenEnabled event during L1 backfill.
-        let anchor_block_number = provider.get_block_number().await?;
-        let anchor_header = provider
-            .get_header_by_number(anchor_block_number.into())
-            .await?
-            .ok_or_else(|| eyre!("anchor header {anchor_block_number} not found"))?
-            .inner
-            .inner;
-        let mut genesis_header_rlp = Vec::new();
-        anchor_header.encode(&mut genesis_header_rlp);
-        let anchor_hash = keccak256(&genesis_header_rlp);
-
         println!("Admin: {}", self.admin);
         println!("Sequencers: {:?}", self.sequencers);
         println!("Threshold: {}", self.threshold);
@@ -248,10 +230,7 @@ impl CreateZone {
             .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
 
         let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ZoneFactory::ZoneCreated>()
             .ok_or_else(|| eyre!("no ZoneCreated event in receipt"))?;
 
         let zone_id = event.zoneId;
@@ -294,18 +273,23 @@ impl CreateZone {
         );
         println!("Sequencer set version: {sequencer_set_version}");
 
+        println!("Waiting for creation block {creation_block} to finalize...");
+        let anchor =
+            wait_for_finalized_pre_creation_anchor(&provider, portal, creation_block).await?;
         println!(
-            "Using pre-creation block {} (hash: {anchor_hash}) as genesis anchor",
-            anchor_header.inner.number
+            "Using pre-creation block {} (hash: {}) as genesis anchor",
+            anchor.block_number, anchor.hash
         );
 
-        let header_rlp_hex = const_hex::encode(&genesis_header_rlp);
+        let header_rlp_hex = const_hex::encode(&anchor.rlp);
 
         let genesis_cmd = crate::generate_zone_genesis::GenerateZoneGenesis {
             output: self.output.clone(),
             chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
+            tempo_portal: None,
+            l1_rpc_url: None,
             default_fee_token: self.initial_token,
             tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
@@ -313,6 +297,7 @@ impl CreateZone {
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
+            forks: self.forks,
         };
         genesis_cmd.run().await?;
 
@@ -332,7 +317,7 @@ impl CreateZone {
             "sequencers": self.sequencers.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "sequencerThreshold": self.threshold,
             "sequencerSetVersion": sequencer_set_version,
-            "tempoAnchorBlock": anchor_header.inner.number,
+            "tempoAnchorBlock": anchor.block_number,
             "zoneFactory": format!("{}", self.zone_factory),
             "rpcUrl": self.rpc_url,
         });
@@ -359,7 +344,7 @@ impl CreateZone {
         if !self.rpc_url.is_empty() {
             println!("  RPC URL: {}", self.rpc_url);
         }
-        println!("  Tempo anchor block: {}", anchor_header.inner.number);
+        println!("  Tempo anchor block: {}", anchor.block_number);
         println!(
             "  Genesis written to: {}",
             self.output.join("genesis.json").display()
@@ -373,6 +358,8 @@ impl CreateZone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::address;
+    use clap::Parser;
 
     #[test]
     fn factory_params_install_the_requested_quorum_atomically() {
@@ -397,10 +384,42 @@ mod tests {
             private_key: String::new(),
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
+            forks: TempoHardforkArgs::default(),
         };
 
         let params = command.factory_params();
         assert_eq!(params.sequencers, sequencers);
         assert_eq!(params.threshold, 2);
+    }
+
+    #[test]
+    fn parses_genesis_fork_overrides() {
+        let command = CreateZone::try_parse_from([
+            "create-zone",
+            "--output",
+            "/tmp/zone",
+            "--admin",
+            "0x1000000000000000000000000000000000000001",
+            "--sequencer",
+            "0x1000000000000000000000000000000000000001",
+            "--private-key",
+            "unused",
+            "--t12-time",
+            "0",
+            "--t13-time",
+            "9223372036854775807",
+            "--t14-time",
+            "18446744073709551615",
+        ])
+        .unwrap();
+        let mut config = alloy::genesis::ChainConfig::default();
+        command.forks.write_to(&mut config);
+        assert_eq!(config.extra_fields["t4Time"], serde_json::json!(0));
+        assert_eq!(config.extra_fields["t12Time"], serde_json::json!(0));
+        assert_eq!(
+            config.extra_fields["t13Time"],
+            serde_json::json!(9223372036854775807u64)
+        );
+        assert_eq!(config.extra_fields["t14Time"], serde_json::json!(u64::MAX));
     }
 }

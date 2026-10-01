@@ -1,9 +1,9 @@
 //! Guarded one-for-one replacement of a ZonePortal sequencer member.
 
-use std::{collections::BTreeSet, fmt, path::PathBuf, time::Duration};
+use std::{fmt, path::PathBuf, time::Duration};
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse as _},
+    network::primitives::ReceiptResponse as _,
     primitives::{Address, B256},
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
@@ -16,7 +16,7 @@ use zone_p2p::ZoneManifest;
 
 use super::{
     config::{SharedAdminArgs, format_duration, parse_nonzero_duration},
-    invariants::evaluate_base_invariants,
+    invariants::{address_set, ensure_invariants, evaluate_base_invariants},
     secret_file::read_private_key_file,
     snapshot::{ClusterView, PortalSnapshot, read_portal_snapshot},
 };
@@ -143,9 +143,8 @@ impl Replace {
         simulate(&latest, signer.address(), &latest_proposed).await?;
 
         progress("Submitting setSequencerSet...");
-        let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&latest.config.l1_rpc_url)
             .await
             .wrap_err("failed connecting to Tempo L1 RPC")?;
@@ -341,21 +340,10 @@ fn ensure_healthy(view: &ClusterView) -> eyre::Result<()> {
         None,
         None,
     );
-    let failed = invariants
-        .iter()
-        .filter(|result| result.required_failed())
-        .map(|result| format!("{}: {}", result.name, result.detail))
-        .collect::<Vec<_>>();
-    ensure!(
-        failed.is_empty(),
-        "cluster preflight failed; refusing sequencer-set replacement: {}",
-        failed.join("; ")
-    );
-    Ok(())
-}
-
-fn address_set(addresses: &[Address]) -> BTreeSet<Address> {
-    addresses.iter().copied().collect()
+    ensure_invariants(
+        "cluster preflight failed; refusing sequencer-set replacement",
+        &invariants,
+    )
 }
 
 fn report(

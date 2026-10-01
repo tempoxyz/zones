@@ -36,6 +36,16 @@ impl InvariantResult {
     }
 }
 
+pub(crate) fn ensure_invariants(context: &str, invariants: &[InvariantResult]) -> eyre::Result<()> {
+    let failed = invariants
+        .iter()
+        .filter(|result| result.required_failed())
+        .map(|result| format!("{}: {}", result.name, result.detail))
+        .collect::<Vec<_>>();
+    eyre::ensure!(failed.is_empty(), "{context}: {}", failed.join("; "));
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct InvariantInputs<'a> {
     pub config: &'a EffectiveConfig,
@@ -1628,7 +1638,7 @@ address = "node-c.example:9200"
         );
         let second = test_node_snapshot(
             "second",
-            with_manifest(test_sequencer_info(false, true), 1, 7, B256::from([1; 32])),
+            with_manifest(test_sequencer_info(false, true), 1, 7, B256::repeat_byte(1)),
         );
 
         let result = loaded_manifest_agreement_invariant(1, 7, &[first, second]);

@@ -36,6 +36,7 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
+use revm::context::result::HaltReason;
 use std::{
     collections::HashSet,
     fmt,
@@ -46,7 +47,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork};
 use tempo_evm::{
     FeeTokenResolver, TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig,
-    TempoEvmError, TempoHaltReason, TempoNextBlockEnvAttributes, TempoStateAccess,
+    TempoEvmError, TempoNextBlockEnvAttributes, TempoStateAccess,
     evm::{TempoEvm, TempoEvmFactory},
 };
 use tempo_payload_types::TempoExecutionData;
@@ -56,7 +57,7 @@ use tempo_primitives::{
 };
 use tempo_revm::TempoTxEnv;
 use tempo_zone_contracts as _;
-use zone_chainspec::{ZoneChainSpec, ZoneHardforks};
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -64,7 +65,6 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 /// Zone EVM factory that adapts caller databases and registers the zone-native precompiles.
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
-    chain_spec: Arc<ZoneChainSpec>,
     l1_reader: L1,
     portal_address: Address,
 }
@@ -73,10 +73,9 @@ impl<L1> ZoneEvmFactory<L1>
 where
     L1: L1StorageReader,
 {
-    /// Creates a factory with the canonical Zone chain spec, L1 reader, and portal address.
-    pub fn new(chain_spec: Arc<ZoneChainSpec>, l1_reader: L1, portal_address: Address) -> Self {
+    /// Creates a factory with the L1 reader and portal address.
+    pub fn new(l1_reader: L1, portal_address: Address) -> Self {
         Self {
-            chain_spec,
             l1_reader,
             portal_address,
         }
@@ -86,21 +85,13 @@ where
         &self,
         evm: TempoEvm<L1OverlayDB<DB, L1>, I>,
         l1: L1State<L1>,
-        zone_hardfork: zone_hardfork::ZoneHardfork,
     ) -> TempoEvm<L1OverlayDB<DB, L1>, I> {
         let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new());
         let cfg = evm.ctx().cfg.clone();
         let actions = StorageActions::disabled();
         let non_creditable_slots = evm.non_creditable_slots();
         let (_, _, precompiles) = evm.components_mut();
-        extend_zone_precompiles(
-            precompiles,
-            &cfg,
-            zone_hardfork,
-            l1,
-            actions,
-            non_creditable_slots,
-        );
+        extend_zone_precompiles(precompiles, &cfg, l1, actions, non_creditable_slots);
         evm
     }
 }
@@ -113,7 +104,7 @@ where
     type Context<DB: Database> = TempoCtx<L1OverlayDB<DB, L1>>;
     type Tx = <TempoEvmFactory as EvmFactory>::Tx;
     type Error<DBError: DBErrorMarker> = <TempoEvmFactory as EvmFactory>::Error<DBError>;
-    type HaltReason = TempoHaltReason;
+    type HaltReason = HaltReason;
     type Spec = tempo_chainspec::hardfork::TempoHardfork;
     type BlockEnv = TempoBlockEnv;
     type Precompiles = PrecompilesMap;
@@ -123,16 +114,10 @@ where
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
-        let zone_hardfork = self
-            .chain_spec
-            .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
         let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input);
-        ZoneEvm::new(
-            self.register_precompiles(evm, l1, zone_hardfork),
-            zone_hardfork,
-        )
+        ZoneEvm::new(self.register_precompiles(evm, l1))
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -141,16 +126,10 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let zone_hardfork = self
-            .chain_spec
-            .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
         let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        ZoneEvm::new(
-            self.register_precompiles(evm, l1, zone_hardfork),
-            zone_hardfork,
-        )
+        ZoneEvm::new(self.register_precompiles(evm, l1))
     }
 }
 
@@ -242,7 +221,7 @@ where
 {
     /// Creates a Zone EVM config from the node's canonical, composed chain specification.
     pub fn new(chain_spec: Arc<ZoneChainSpec>, l1_provider: L1, portal_address: Address) -> Self {
-        let zone_factory = ZoneEvmFactory::new(chain_spec.clone(), l1_provider, portal_address);
+        let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
         let tempo_chain_spec = chain_spec.inner.clone();
         let inner = TempoEvmConfig::new(tempo_chain_spec);
         let block_assembler = ZoneBlockAssembler::new(chain_spec.clone());
@@ -320,7 +299,7 @@ where
     type ExecutionCtx<'a> = TempoBlockExecutionCtx<'a>;
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type TxExecutionResult = ZoneTxResult<TempoHaltReason, TempoTxType>;
+    type TxExecutionResult = ZoneTxResult<HaltReason, TempoTxType>;
     type Executor<'a, DB: StateDB, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>> =
         ZoneBlockExecutor<'a, DB, I, L1>;
 
@@ -397,14 +376,12 @@ where
                     .as_ref()
                     .map(|withdrawals| Cow::Borrowed(withdrawals.as_slice())),
                 extra_data: block.header().extra_data().clone(),
-                tx_count_hint: Some(block.body().transactions.len()),
+                tx_count_hint: Some(block.transaction_count()),
                 slot_number: block.slot_number(),
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,
-            validator_set: None,
             consensus_context: block.header().consensus_context,
-            subblock_fee_recipients: Default::default(),
         })
     }
 
@@ -432,9 +409,7 @@ where
         &self,
         payload: &'a TempoExecutionData,
     ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
-        let mut context = self.context_for_block(&payload.block)?;
-        context.validator_set = payload.validator_set.clone();
-        Ok(context)
+        self.context_for_block(&payload.block)
     }
 
     fn tx_iterator_for_payload(
@@ -495,10 +470,10 @@ pub struct TempoStorageRead {
 mod tests {
     use super::*;
 
-    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
-    use alloy_rlp::Encodable;
-    use alloy_sol_types::{SolCall, SolValue};
-    use reth_chainspec::{EthChainSpec, ForkCondition};
+    use alloy_consensus::Sealable as _;
+    use alloy_primitives::{B256, U256, address};
+    use alloy_sol_types::SolCall;
+    use reth_chainspec::EthChainSpec;
     use revm::{
         context::result::ExecutionResult,
         database::{CacheDB, EmptyDB},
@@ -512,18 +487,21 @@ mod tests {
         zone_factory::ZonePortalStorage,
     };
     use tempo_zone_contracts::IZoneInbox;
-    use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
+    use zone_precompiles::{
+        tempo_state::{TEMPO_BLOCK_NUMBER_SLOT, slots::TEMPO_BLOCK_HASH},
+        test_utils::MockL1Reader,
+    };
     use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, zone_chain_id};
 
     #[test]
-    fn l1_storage_recorder_deduplicates_successful_reads_without_block_numbers() {
+    fn l1_storage_recorder_deduplicates_successful_reads() {
         let account = Address::repeat_byte(0xaa);
         let slot = B256::repeat_byte(0xbb);
         let value = B256::repeat_byte(0xcc);
         let reader = RecordingL1StorageReader::new(MockL1Reader::returning(value));
 
         assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
-        assert_eq!(reader.read_l1_storage(account, slot, 11).unwrap(), value);
+        assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
         assert_eq!(
             reader.take_reads(),
             HashSet::from_iter([TempoStorageRead { account, slot }])
@@ -544,14 +522,18 @@ mod tests {
         let reader = MockL1Reader::default();
 
         reader.seed_active_sequencer(portal, CHILD, sequencer);
-        let token_enablement_hash =
-            keccak256((B256::ZERO, token, "Adversarial Token", "ADV", "USD").abi_encode_params());
+        let enabled_token = IZoneInbox::EnabledToken {
+            token,
+            name: "Adversarial Token".into(),
+            symbol: "ADV".into(),
+            currency: "USD".into(),
+        };
         let portal_storage = ZonePortalStorage::new(portal);
         reader.insert(
             portal,
             portal_storage.token_enablement_hash.slot(),
             CHILD,
-            U256::from_be_bytes(token_enablement_hash.0),
+            enabled_token.hash_with_previous(B256::ZERO).into(),
         );
 
         let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
@@ -561,9 +543,7 @@ mod tests {
         reader.insert(TIP403_REGISTRY_ADDRESS, policy_slot, CHILD, child_policy);
 
         let genesis = TempoHeader::default();
-        let mut genesis_rlp = Vec::new();
-        genesis.encode(&mut genesis_rlp);
-        let genesis_hash = keccak256(&genesis_rlp);
+        let genesis_hash = genesis.hash_slow();
         let child = TempoHeader {
             inner: alloy_consensus::Header {
                 parent_hash: genesis_hash,
@@ -572,16 +552,9 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut child_rlp = Vec::new();
-        child.encode(&mut child_rlp);
-
         let mut db = CacheDB::new(EmptyDB::default());
-        db.insert_account_storage(
-            TEMPO_STATE_ADDRESS,
-            U256::ZERO,
-            U256::from_be_bytes(genesis_hash.0),
-        )
-        .unwrap();
+        db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_HASH, genesis_hash.into())
+            .unwrap();
         db.insert_account_storage(
             TEMPO_STATE_ADDRESS,
             TEMPO_BLOCK_NUMBER_SLOT,
@@ -589,28 +562,16 @@ mod tests {
         )
         .unwrap();
 
-        let mut zone_genesis = tempo_chainspec::spec::DEV.genesis().clone();
-        zone_genesis.config.chain_id =
-            zone_chain_id(tempo_chainspec::spec::DEV.chain().id(), 1).unwrap();
-        let factory = ZoneEvmFactory::new(
-            Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap()),
-            reader.clone(),
-            portal,
-        );
+        let factory = ZoneEvmFactory::new(reader.clone(), portal);
         let mut env = EvmEnv::<TempoHardfork, TempoBlockEnv>::default();
         env.block_env.inner.timestamp = U256::from(child.inner.timestamp);
         env.block_env.timestamp_millis_part = child.timestamp_millis_part;
         let mut evm = factory.create_evm(db, env);
         let calldata = IZoneInbox::advanceTempoCall {
-            header: Bytes::from(child_rlp),
+            header: alloy_rlp::encode(&child).into(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
-            enabledTokens: vec![IZoneInbox::EnabledToken {
-                token,
-                name: "Adversarial Token".into(),
-                symbol: "ADV".into(),
-                currency: "USD".into(),
-            }],
+            enabledTokens: vec![enabled_token],
         }
         .abi_encode();
 
@@ -626,16 +587,8 @@ mod tests {
 
         let requests = reader.storage_requests();
         let portal = ZonePortalStorage::new(portal);
-        let child_policy_request = (
-            TIP403_REGISTRY_ADDRESS,
-            B256::from(policy_slot.to_be_bytes()),
-            CHILD,
-        );
-        let parent_policy_request = (
-            TIP403_REGISTRY_ADDRESS,
-            B256::from(policy_slot.to_be_bytes()),
-            PARENT,
-        );
+        let child_policy_request = (TIP403_REGISTRY_ADDRESS, B256::from(policy_slot), CHILD);
+        let parent_policy_request = (TIP403_REGISTRY_ADDRESS, B256::from(policy_slot), PARENT);
         assert!(!reader.requested(CHILD, &portal.role[sequencer]));
         assert!(!reader.requested(PARENT, &portal.role[sequencer]));
         assert!(requests.contains(&child_policy_request));
@@ -650,29 +603,36 @@ mod tests {
             .config
             .extra_fields
             .retain(|name, _| !name.ends_with("Time"));
-        genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 1).unwrap();
+        genesis.config.chain_id = zone_chain_id(MODERATO.chain_id(), 1).unwrap();
         let composed = Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap());
         let activation_timestamp = TempoHardfork::VARIANTS
             .iter()
-            .find_map(|&hardfork| match MODERATO.tempo_fork_activation(hardfork) {
-                ForkCondition::Timestamp(timestamp) if timestamp > 0 => Some(timestamp),
-                _ => None,
-            })
+            .filter_map(|&hardfork| MODERATO.tempo_fork_activation(hardfork).as_timestamp())
+            .find(|&timestamp| timestamp > 0)
             .expect("Moderato must have a post-genesis Tempo hardfork");
-        let header = TempoHeader {
-            inner: alloy_consensus::Header {
-                timestamp: activation_timestamp,
+        let config = ZoneEvmConfig::new(composed, MockL1Reader::default(), Address::ZERO);
+        for timestamp in [activation_timestamp - 1, activation_timestamp] {
+            let header = TempoHeader {
+                inner: alloy_consensus::Header {
+                    timestamp,
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        };
+            };
+            let env = config.evm_env(&header).expect("valid EVM environment");
+            let expected = MODERATO.tempo_hardfork_at(timestamp);
+            assert_eq!(env.cfg_env.spec, expected);
 
-        let config = TempoEvmConfig::new(composed.inner.clone());
-        let env = config.evm_env(&header).expect("valid EVM environment");
-
-        assert_eq!(
-            env.cfg_env.spec,
-            MODERATO.tempo_hardfork_at(activation_timestamp)
-        );
+            let evm = config
+                .zone_factory
+                .create_evm(EmptyDB::default(), env.clone());
+            assert_eq!(evm.ctx().cfg.spec, expected);
+            let evm = config.zone_factory.create_evm_with_inspector(
+                EmptyDB::default(),
+                env,
+                NoOpInspector,
+            );
+            assert_eq!(evm.ctx().cfg.spec, expected);
+        }
     }
 }

@@ -69,8 +69,8 @@ pub(crate) mod rpc {
 use crate::abi::{
     Deposit as AbiDeposit, DepositPayload as AbiDepositPayload,
     ZonePortal::{
-        DepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated, TokenEnabled,
-        WithdrawalBounceBack, ZonePortalEvents,
+        DepositMade, LeaderUpdated, PortalPaused, PortalResumed, SequencerEncryptionKeyUpdated,
+        TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
     },
 };
 
@@ -78,6 +78,7 @@ mod block;
 mod deposit;
 mod encryption_keys;
 mod event;
+mod pause;
 mod queue;
 mod subscriber;
 
@@ -93,14 +94,16 @@ pub use event::{
     EnabledToken, EncryptionKeyRotation, L1PortalEvents, LeaderTransition, encryption_key_address,
 };
 pub use ext::{ChainTempoStateExt, TempoStateExt};
+pub use pause::{
+    PORTAL_PAUSE_POLL_INTERVAL, initialize_portal_pause, refresh_portal_pause, watch_portal_pause,
+};
 pub use queue::DepositQueue;
 pub use state::L1StateCache;
 pub use subscriber::{
-    AuthenticatedPortalLogs, L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeadershipSink,
-    MAX_L1_LOOKAHEAD_BLOCKS, verify_receipts_against_header,
+    AuthenticatedPortalLogs, FinalizedBatchSubmission, FinalizedTarget, L1BlockTracker,
+    L1Subscriber, L1SubscriberConfig, L1SubscriberError, LeadershipSink, MAX_L1_LOOKAHEAD_BLOCKS,
+    extract_finalized_batch_submissions, verify_receipts_against_header,
 };
 
 #[cfg(test)]
 pub(crate) use queue::PendingDeposits;
-#[cfg(test)]
-pub(crate) use subscriber::LocalTempoCheckpointReader;

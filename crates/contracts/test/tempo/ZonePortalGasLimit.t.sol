@@ -7,7 +7,7 @@ import {
     ZONE_FACTORY_ADDRESS
 } from "../../src/runtime/interfaces/IZone.sol";
 import { ZonePortal } from "../../src/runtime/tempo/ZonePortal.sol";
-import { Test } from "forge-std/Test.sol";
+import { PortalRuntimeTest } from "../PortalRuntimeTest.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
@@ -42,7 +42,7 @@ contract MockPortalToken {
 
 }
 
-contract ZonePortalGasLimitTest is Test {
+contract ZonePortalGasLimitTest is PortalRuntimeTest {
 
     uint256 internal constant WITHDRAWAL_QUEUE_TAIL_SLOT = 10;
     uint256 internal constant WITHDRAWAL_QUEUE_SLOTS_MAPPING_SLOT = 11;
@@ -56,7 +56,7 @@ contract ZonePortalGasLimitTest is Test {
 
     function setUp() public {
         token = new MockPortalToken();
-        portal = new ZonePortal();
+        portal = _newPortalProxy(1);
         address[] memory sequencers = new address[](1);
         sequencers[0] = address(this);
 

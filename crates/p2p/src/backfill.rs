@@ -11,7 +11,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use crate::{
-    LeadershipSchedule, P2pPeerId, PeerTip,
+    EncodedBlock, LeadershipSchedule, P2pPeerId, PeerTip,
+    capabilities::{ANNOUNCEMENT_INTERVAL, LOCAL_CAPABILITIES_VERSION, PeerCapabilities},
     protocol::{RequestFrame, ResponseFrame},
     routing::{RoutingMembership, RoutingPolicy},
 };
@@ -37,7 +38,7 @@ pub enum BackfillCommand {
     SendBlock {
         peer: P2pPeerId,
         request_id: u64,
-        block: Vec<u8>,
+        block: EncodedBlock,
     },
     /// Finish one response page and advertise the responder's snapshot tip.
     Complete {
@@ -217,6 +218,7 @@ pub(crate) struct BackfillCoordinator<Rq = CommonwareReceiver, Rs = CommonwareRe
     requests: mpsc::Sender<BackfillRequest>,
     responses: mpsc::Sender<BackfillResponse>,
     job: BackfillJob,
+    capabilities: PeerCapabilities,
 }
 
 impl<Rq, Rs> BackfillCoordinator<Rq, Rs>
@@ -228,6 +230,7 @@ where
         local: PublicKey,
         membership: RoutingMembership,
         leadership: LeadershipSchedule,
+        capabilities: PeerCapabilities,
         channels: BackfillRuntimeChannels<Rq, Rs>,
     ) -> Self {
         Self {
@@ -242,12 +245,21 @@ where
             requests: channels.requests,
             responses: channels.responses,
             job: BackfillJob::default(),
+            capabilities,
         }
     }
 
     pub(crate) async fn run(mut self) -> eyre::Result<()> {
+        let mut announcements = tokio::time::interval(ANNOUNCEMENT_INTERVAL);
+        announcements.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = announcements.tick() => {
+                    let frame = ResponseFrame::Capabilities(LOCAL_CAPABILITIES_VERSION).encode().expect("fixed-size announcement");
+                    let _ = self.response_sender.send(
+                        Recipients::Some(self.membership.other_peers(&self.local)), frame, false,
+                    );
+                }
                 command = self.commands.recv() => {
                     let command = command.ok_or_else(|| eyre::eyre!("backfill command channel closed unexpectedly"))?;
                     self.handle_command(command).await?;
@@ -279,6 +291,11 @@ where
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill block addressed to an unknown peer");
                     return Ok(());
                 }
+                let block = if self.capabilities.supports_witnesses(&peer, Instant::now()) {
+                    block.encode()
+                } else {
+                    block.block
+                };
                 let frame = match (ResponseFrame::Block { request_id, block }).encode() {
                     Ok(frame) => frame,
                     Err(err) => {
@@ -416,6 +433,15 @@ where
                 return Ok(());
             }
         };
+        if let ResponseFrame::Capabilities(version) = frame {
+            // Capability advertisements are independent of leadership and outstanding requests.
+            if RoutingPolicy::new(&self.local, &self.membership, &self.leadership)
+                .is_remote_member(&peer)
+            {
+                self.capabilities.announce(peer, version, Instant::now());
+            }
+            return Ok(());
+        }
         let may_accept = RoutingPolicy::new(&self.local, &self.membership, &self.leadership)
             .may_accept_backfill_response(&peer);
         if !may_accept {
@@ -424,6 +450,7 @@ where
         }
         let received_at = Instant::now();
         match frame {
+            ResponseFrame::Capabilities(_) => unreachable!("handled before backfill routing"),
             ResponseFrame::Block { request_id, block } => {
                 if !self.job.record_response(&peer, request_id, received_at) {
                     warn!(target: "zone::p2p", %peer, request_id, "Ignoring unsolicited or stale backfill block");

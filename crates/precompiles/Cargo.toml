@@ -15,7 +15,6 @@ workspace = true
 # zones
 tempo-zone-contracts = { workspace = true, default-features = false }
 zone-primitives = { workspace = true, default-features = false }
-zone-hardfork.workspace = true
 
 # tempo (workspace deps already have default-features = false)
 tempo-chainspec = { workspace = true, default-features = false }
@@ -47,7 +46,6 @@ paste = "1.0.15"
 thiserror.workspace = true
 
 [dev-dependencies]
-const-hex.workspace = true
 eyre.workspace = true
 serde.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }

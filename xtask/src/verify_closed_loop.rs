@@ -1,7 +1,7 @@
 //! Verifies an existing Earn deployment's closed-loop ZonePortal configuration.
 
 use alloy::{
-    primitives::{Address, B256, U256},
+    primitives::{Address, U256},
     providers::{Provider, ProviderBuilder},
 };
 use alloy_rpc_types_eth::BlockId;
@@ -12,7 +12,7 @@ use tempo_zone_contracts::{
     ZONE_FACTORY_ADDRESS, ZoneFactory, ZonePortal, ZonePortal::Role as PortalRole,
 };
 
-use crate::zone_utils::normalize_http_rpc;
+use crate::zone_utils::{find_zone_deployment_block, normalize_http_rpc};
 
 const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
 
@@ -31,11 +31,6 @@ alloy::sol! {
     interface EarnVaultView {
         function asset() external view returns (address);
         function earnShare() external view returns (address);
-    }
-
-    #[sol(rpc)]
-    interface PortalTokenView {
-        function areDepositsActive(address token) external view returns (bool);
     }
 
     #[sol(rpc)]
@@ -164,7 +159,6 @@ impl VerifyClosedLoop {
         }
         println!();
 
-        let portal_tokens = PortalTokenView::new(zone.portal, &provider);
         let vault = EarnVaultView::new(earn_vault, &provider);
         let mut checks = Checks::default();
 
@@ -277,7 +271,7 @@ impl VerifyClosedLoop {
         for token in expected_tokens {
             checks.expect(
                 format!("deposits for token {token} are active"),
-                portal_tokens
+                portal
                     .areDepositsActive(token)
                     .block(snapshot_block_id)
                     .call()
@@ -288,39 +282,6 @@ impl VerifyClosedLoop {
 
         checks.finish()
     }
-}
-
-async fn find_zone_deployment_block<P: Provider<TempoNetwork>>(
-    provider: &P,
-    zone_id: u32,
-    portal: Address,
-    snapshot_block: u64,
-) -> eyre::Result<u64> {
-    let events = ZoneFactory::new(ZONE_FACTORY_ADDRESS, provider)
-        .ZoneCreated_filter()
-        .topic1(B256::from(U256::from(zone_id)))
-        .topic2(portal.into_word())
-        .from_block(0)
-        .to_block(snapshot_block)
-        .chunked()
-        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
-        .query()
-        .await
-        .wrap_err("failed scanning ZoneFactory ZoneCreated events")?;
-
-    ensure!(
-        events.len() == 1,
-        "expected exactly one ZoneCreated event for Zone {zone_id} and portal {portal}, found {}",
-        events.len()
-    );
-    let (event, log) = &events[0];
-    ensure!(
-        event.zoneId == zone_id && event.portal == portal,
-        "ZoneCreated event does not match Zone {zone_id} and portal {portal}"
-    );
-    ensure!(!log.removed, "ZoneCreated query returned a removed log");
-    log.block_number
-        .ok_or_else(|| eyre::eyre!("ZoneCreated log is missing its block number"))
 }
 
 async fn read_role_updates<P: Provider<TempoNetwork>>(
