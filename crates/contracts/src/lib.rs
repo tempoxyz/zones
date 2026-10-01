@@ -129,8 +129,8 @@ mod tests {
 
         println!("\nadvanceTempo calldata length: {}", calldata.len());
         println!(
-            "advanceTempo selector: 0x{}",
-            const_hex::encode(&calldata[..4])
+            "advanceTempo selector: {}",
+            const_hex::encode_prefixed(&calldata[..4])
         );
         println!(
             "advanceTempo full calldata:\n{}",
@@ -167,10 +167,10 @@ mod tests {
 
     #[test]
     fn test_decryption_data_encoding_uses_trimmed_layout() {
-        let shared_secret = B256::from([0x11; 32]);
+        let shared_secret = B256::repeat_byte(0x11);
         let shared_secret_y_parity = 0x02;
-        let proof_s = B256::from([0x33; 32]);
-        let proof_c = B256::from([0x44; 32]);
+        let proof_s = B256::repeat_byte(0x33);
+        let proof_c = B256::repeat_byte(0x44);
 
         let decryption = DecryptionData {
             sharedSecret: shared_secret,
@@ -182,8 +182,7 @@ mod tests {
         };
 
         let encoded = decryption.abi_encode();
-        let mut expected_y_parity_word = [0u8; 32];
-        expected_y_parity_word[31] = shared_secret_y_parity;
+        let expected_y_parity_word = B256::with_last_byte(shared_secret_y_parity);
 
         assert_eq!(
             encoded.len(),
@@ -197,7 +196,7 @@ mod tests {
         );
         assert_eq!(
             &encoded[32..64],
-            expected_y_parity_word,
+            expected_y_parity_word.as_slice(),
             "word 1 is sharedSecretYParity"
         );
         assert_eq!(&encoded[64..96], proof_s.as_slice(), "word 2 is cpProof.s");
@@ -225,7 +224,7 @@ mod tests {
     #[test]
     fn test_router_callback_encoding_matches_tuple() {
         let encrypted = DepositPayload {
-            ephemeralPubkeyX: B256::from([0x22; 32]),
+            ephemeralPubkeyX: B256::repeat_byte(0x22),
             ephemeralPubkeyYParity: 0x02,
             ciphertext: Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]),
             nonce: [0x33; 12].into(),

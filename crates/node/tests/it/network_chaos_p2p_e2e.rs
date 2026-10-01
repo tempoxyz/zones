@@ -15,7 +15,8 @@ use alloy_network::ReceiptResponse as _;
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState, ZONE_TOKEN_ADDRESS, ZonePortal};
 
 use crate::utils::{
-    P2pChaosNetwork, RealP2pCluster, ZoneAccount, poll_until, start_real_p2p_network_chaos_cluster,
+    P2pChaosNetwork, RealP2pCluster, ZoneAccount, batch_count, poll_until,
+    start_real_p2p_network_chaos_cluster,
 };
 
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -217,17 +218,6 @@ async fn wait_for_producer_block(
             .map(|_| height))
     })
     .await
-}
-
-async fn batch_count(
-    portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
-) -> eyre::Result<usize> {
-    Ok(portal
-        .BatchSubmitted_1_filter()
-        .from_block(0)
-        .query()
-        .await?
-        .len())
 }
 
 async fn wait_for_settlement_after(

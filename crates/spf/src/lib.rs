@@ -44,7 +44,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         witness.public_inputs.parent_chain_id,
         witness.public_inputs.zone_id,
     )?;
-    let configured_chain_id = config.chain_spec().chain().id();
+    let configured_chain_id = config.chain_spec().chain_id();
     if configured_chain_id != expected_chain_id {
         return Err(Error::ChainIdMismatch {
             expected: configured_chain_id,
@@ -66,14 +66,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
 
     // Capture the pre-batch deposit state from the parent Zone state. The
     // transition output commits to this exact pair.
-    let previous_processed_hash = B256::from(
-        read_zone_storage(
-            &mut zone_state,
-            ZONE_INBOX_ADDRESS,
-            inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
-        )?
-        .to_be_bytes::<32>(),
-    );
+    let previous_processed_hash = B256::from(read_zone_storage(
+        &mut zone_state,
+        ZONE_INBOX_ADDRESS,
+        inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
+    )?);
     let previous_processed_number = read_zone_storage(
         &mut zone_state,
         ZONE_INBOX_ADDRESS,
@@ -96,18 +93,15 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     let mut tempo_database =
         TempoWitnessDatabase::from_tempo_state_witness(witness.tempo_state_witness)?;
     let (witnessed_tempo_number, witnessed_tempo_hash) = tempo_database.checkpoint();
-    let zone_tempo_hash = B256::from(
-        read_zone_storage(
-            &mut zone_state,
-            TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
-        )?
-        .to_be_bytes::<32>(),
-    );
+    let zone_tempo_hash = B256::from(read_zone_storage(
+        &mut zone_state,
+        TEMPO_STATE_ADDRESS,
+        tempo_state::slots::TEMPO_BLOCK_HASH,
+    )?);
     let zone_tempo_number = read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
-        U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER),
+        tempo_state::slots::TEMPO_BLOCK_NUMBER,
     )?
     .to::<u64>();
     if (zone_tempo_number, zone_tempo_hash) != (witnessed_tempo_number, witnessed_tempo_hash) {
@@ -153,12 +147,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
                 actual: block.number,
             });
         }
-        if block.timestamp < previous_header.timestamp() {
-            return Err(Error::BlockTimestampRegression {
-                previous: previous_header.timestamp(),
-                actual: block.timestamp,
-            });
-        }
+        validate_zone_block_timestamp(block, block_index, &previous_header)?;
 
         validate_system_inputs(block, block_index)?;
         let is_last = block_index + 1 == witness.zone_blocks.len();
@@ -229,14 +218,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // These reads see the final execution overlay rather than just the parent
     // witness. They are the contract state values committed by the batch
     // output: inbox progress, the finalized withdrawal batch, and TempoState.
-    let next_processed_hash = B256::from(
-        read_zone_storage(
-            &mut zone_state,
-            ZONE_INBOX_ADDRESS,
-            inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
-        )?
-        .to_be_bytes::<32>(),
-    );
+    let next_processed_hash = B256::from(read_zone_storage(
+        &mut zone_state,
+        ZONE_INBOX_ADDRESS,
+        inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
+    )?);
     let next_processed_number = read_zone_storage(
         &mut zone_state,
         ZONE_INBOX_ADDRESS,
@@ -254,14 +240,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         .iter()
         .any(|block| block.finalize_withdrawal_batch_count.is_some());
     let (withdrawal_queue_hash, withdrawal_batch_index) = if has_withdrawal_finalization {
-        let hash = B256::from(
-            read_zone_storage(
-                &mut zone_state,
-                ZONE_OUTBOX_ADDRESS,
-                outbox::slots::WITHDRAWAL_QUEUE_HASH,
-            )?
-            .to_be_bytes::<32>(),
-        );
+        let hash = B256::from(read_zone_storage(
+            &mut zone_state,
+            ZONE_OUTBOX_ADDRESS,
+            outbox::slots::WITHDRAWAL_QUEUE_HASH,
+        )?);
         let index_slot = read_zone_storage(
             &mut zone_state,
             ZONE_OUTBOX_ADDRESS,
@@ -275,18 +258,15 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             witness.public_inputs.expected_withdrawal_batch_index,
         )
     };
-    let final_tempo_hash = B256::from(
-        read_zone_storage(
-            &mut zone_state,
-            TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
-        )?
-        .to_be_bytes::<32>(),
-    );
+    let final_tempo_hash = B256::from(read_zone_storage(
+        &mut zone_state,
+        TEMPO_STATE_ADDRESS,
+        tempo_state::slots::TEMPO_BLOCK_HASH,
+    )?);
     let final_tempo_number = read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
-        U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER),
+        tempo_state::slots::TEMPO_BLOCK_NUMBER,
     )?
     .to::<u64>();
 
@@ -336,6 +316,36 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             withdrawal_batch_index,
         },
     })
+}
+
+/// Validates witness-controlled timestamp fields before they select fork rules or enter the EVM.
+fn validate_zone_block_timestamp(
+    block: &ZoneBlock,
+    block_index: usize,
+    parent: &TempoHeader,
+) -> Result<(), Error> {
+    if block.timestamp_millis_part >= 1000 {
+        return Err(Error::InvalidTimestampMillisPart {
+            block_index,
+            actual: block.timestamp_millis_part,
+        });
+    }
+
+    let actual = block
+        .timestamp
+        .checked_mul(1000)
+        .and_then(|timestamp| timestamp.checked_add(block.timestamp_millis_part))
+        .ok_or(Error::BlockTimestampOverflow { block_index })?;
+    let previous = parent
+        .timestamp()
+        .checked_mul(1000)
+        .and_then(|timestamp| timestamp.checked_add(parent.timestamp_millis_part))
+        .ok_or(Error::ParentTimestampOverflow { block_index })?;
+    if actual < previous {
+        return Err(Error::BlockTimestampRegression { previous, actual });
+    }
+
+    Ok(())
 }
 
 fn read_zone_storage(
@@ -541,8 +551,17 @@ pub enum Error {
     /// Zone block numbering cannot advance past `u64::MAX`.
     #[error("zone block number overflow")]
     BlockNumberOverflow,
-    /// A Zone block timestamp regressed from its predecessor.
-    #[error("zone block timestamp regressed: previous {previous}, got {actual}")]
+    /// A witness supplied a value outside the millisecond component's canonical domain.
+    #[error("zone block {block_index} has invalid timestamp millisecond component {actual}")]
+    InvalidTimestampMillisPart { block_index: usize, actual: u64 },
+    /// A witness-controlled Zone timestamp could not be represented in milliseconds.
+    #[error("zone block {block_index} timestamp overflows milliseconds")]
+    BlockTimestampOverflow { block_index: usize },
+    /// A parent Zone timestamp could not be represented in milliseconds.
+    #[error("parent of zone block {block_index} has a timestamp that overflows milliseconds")]
+    ParentTimestampOverflow { block_index: usize },
+    /// A Zone block's full millisecond timestamp regressed from its predecessor.
+    #[error("zone block millisecond timestamp regressed: previous {previous}, got {actual}")]
     BlockTimestampRegression { previous: u64, actual: u64 },
     /// Tempo-dependent inputs appeared without a Tempo header import.
     #[error("zone block {block_index} has Tempo inputs without a Tempo header")]
@@ -673,7 +692,9 @@ mod tests {
     use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
     use reth_evm::ConfigureEvm;
-    use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
+    use reth_trie_common::{
+        EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode, root::state_root_unhashed,
+    };
     use revm::{
         DatabaseCommit as _,
         database::{State, states::bundle_state::BundleRetention},
@@ -689,7 +710,7 @@ mod tests {
     fn test_config() -> SpfConfig {
         let tempo_chain_spec = tempo_chainspec::spec::MODERATO.clone();
         let mut genesis = tempo_chain_spec.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(tempo_chain_spec.chain().id(), 1).unwrap();
+        genesis.config.chain_id = zone_chain_id(tempo_chain_spec.chain_id(), 1).unwrap();
         let zone_chain_spec =
             Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
         SpfConfig::new(zone_chain_spec)
@@ -699,7 +720,7 @@ mod tests {
     fn derives_portal_from_the_chain_spec_zone_id() {
         let parent = tempo_chainspec::spec::MODERATO.clone();
         let mut genesis = parent.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(parent.chain().id(), 0x0102_0304).unwrap();
+        genesis.config.chain_id = zone_chain_id(parent.chain_id(), 0x0102_0304).unwrap();
         let spec = Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
         assert_eq!(
             SpfConfig::new(spec).portal(),
@@ -720,7 +741,7 @@ mod tests {
 
         BatchWitness {
             public_inputs: PublicInputs {
-                parent_chain_id: tempo_chainspec::spec::MODERATO.chain().id(),
+                parent_chain_id: tempo_chainspec::spec::MODERATO.chain_id(),
                 zone_id: 1,
                 tempo_block_number: 2,
                 anchor_block_number: 2,
@@ -765,6 +786,20 @@ mod tests {
 
     fn checkpoint_import(headers_rlp: Vec<Bytes>) -> TempoImport {
         TempoImport::CheckpointOnly { headers_rlp }
+    }
+
+    fn empty_zone_block(timestamp: u64, timestamp_millis_part: u64) -> ZoneBlock {
+        ZoneBlock {
+            number: 1,
+            parent_hash: B256::ZERO,
+            timestamp,
+            timestamp_millis_part,
+            beneficiary: Address::ZERO,
+            tempo_import: checkpoint_import(vec![Bytes::from([0x01])]),
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        }
     }
 
     fn witnessed_account_state(
@@ -827,6 +862,47 @@ mod tests {
         assert_eq!(
             prove_zone_batch(&test_config(), witness),
             Err(Error::EmptyZoneBatch)
+        );
+    }
+
+    #[test]
+    fn validates_complete_millisecond_timestamps_before_execution() {
+        let parent = TempoHeader {
+            inner: Header {
+                timestamp: 100,
+                ..Default::default()
+            },
+            timestamp_millis_part: 500,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(100, 1000), 3, &parent),
+            Err(Error::InvalidTimestampMillisPart {
+                block_index: 3,
+                actual: 1000,
+            })
+        );
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(100, 499), 3, &parent),
+            Err(Error::BlockTimestampRegression {
+                previous: 100_500,
+                actual: 100_499,
+            })
+        );
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(u64::MAX, 0), 3, &parent),
+            Err(Error::BlockTimestampOverflow { block_index: 3 })
+        );
+
+        // Zone consensus permits equal full-millisecond timestamps.
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(100, 500), 3, &parent),
+            Ok(())
+        );
+        assert_eq!(
+            validate_zone_block_timestamp(&empty_zone_block(100, 501), 3, &parent),
+            Ok(())
         );
     }
 
@@ -912,8 +988,8 @@ mod tests {
         assert_eq!(
             prove_zone_batch(&config, witness),
             Err(Error::ChainIdMismatch {
-                expected: config.chain_spec().chain().id(),
-                actual: zone_chain_id(tempo_chainspec::spec::MODERATO.chain().id(), 2).unwrap(),
+                expected: config.chain_spec().chain_id(),
+                actual: zone_chain_id(tempo_chainspec::spec::MODERATO.chain_id(), 2).unwrap(),
             })
         );
     }
@@ -978,7 +1054,7 @@ mod tests {
             U256::ZERO,
             alloy_consensus::constants::KECCAK_EMPTY,
             Vec::new(),
-            Some((slot, U256::from_be_bytes(hash.0))),
+            Some((slot, hash.into())),
         );
         let mut database = WitnessDatabase::from_zone_state_witness(witness, state_root).unwrap();
 
@@ -1035,10 +1111,7 @@ mod tests {
             storage_root: EMPTY_ROOT_HASH,
             code_hash: alloy_consensus::constants::KECCAK_EMPTY,
         };
-        let expected_root = keccak256(alloy_rlp::encode(TrieNode::Leaf(LeafNode::new(
-            Nibbles::unpack(keccak256(address)),
-            alloy_rlp::encode(expected_account),
-        ))));
+        let expected_root = state_root_unhashed([(address, expected_account)]);
         assert_eq!(
             state.database.state_root(state.bundle_state).unwrap(),
             expected_root
@@ -1132,7 +1205,7 @@ mod tests {
             account,
             0,
             U256::ZERO,
-            keccak256([]),
+            alloy_consensus::constants::KECCAK_EMPTY,
             Vec::new(),
             Some((slot, value)),
         );
@@ -1151,10 +1224,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            database
-                .read_l1_storage(account, B256::from(slot.to_be_bytes::<32>()), 9)
-                .unwrap(),
-            B256::from(value.to_be_bytes::<32>())
+            database.read_l1_storage(account, slot.into(), 9).unwrap(),
+            B256::from(value)
         );
     }
 
@@ -1193,7 +1264,7 @@ mod tests {
                 .unwrap();
         let env =
             next_block_evm_env(&config, tempo_database, &witness.parent_header, &block).unwrap();
-        assert_eq!(env.cfg_env.chain_id, config.chain_spec().chain().id());
+        assert_eq!(env.cfg_env.chain_id, config.chain_spec().chain_id());
         assert_eq!(env.block_env.inner.basefee, 0);
     }
 
@@ -1349,7 +1420,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let checkpoint_hash = keccak256(alloy_rlp::encode(checkpoint));
+        let checkpoint_hash = checkpoint.hash_slow();
         let anchor = TempoHeader {
             inner: Header {
                 parent_hash: checkpoint_hash,

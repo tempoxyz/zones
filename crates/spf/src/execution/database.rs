@@ -71,11 +71,9 @@ impl WitnessDatabase {
         let state = StatelessSparseTrie::new(state_root, &node_pool)?;
         let mut code_by_hash = B256Map::default();
         for code in bytecodes {
-            let code_hash = keccak256(&code);
-            if code_by_hash
-                .insert(code_hash, Bytecode::new_raw(code))
-                .is_some()
-            {
+            let bytecode = Bytecode::new_raw(code);
+            let code_hash = bytecode.hash_slow();
+            if code_by_hash.insert(code_hash, bytecode).is_some() {
                 return Err(WitnessDatabaseError::DuplicateBytecodeHash { code_hash }.into());
             }
         }
@@ -163,8 +161,7 @@ impl Database for WitnessDatabase {
         // Resolve BLOCKHASH through the history contract so the ordinary storage witness
         // proves the returned value against the parent header's state root.
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
-        let value = self.storage(HISTORY_STORAGE_ADDRESS, slot)?;
-        Ok(B256::from(value.to_be_bytes::<32>()))
+        Ok(self.storage(HISTORY_STORAGE_ADDRESS, slot)?.into())
     }
 }
 
@@ -291,7 +288,7 @@ impl L1StorageReader for TempoWitnessDatabase {
                 "witness does not include the checkpoint state root",
             )
         })?;
-        let value = match state.storage(account, U256::from_be_bytes(slot.0)) {
+        let value = match state.storage(account, slot.into()) {
             Ok(value) => value,
             Err(
                 error @ (StatelessSparseTrieError::IncompleteAccountProof { .. }
@@ -314,7 +311,7 @@ impl L1StorageReader for TempoWitnessDatabase {
                 });
             }
         };
-        Ok(B256::from(value.to_be_bytes::<32>()))
+        Ok(value.into())
     }
 }
 

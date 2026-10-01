@@ -29,7 +29,7 @@ pub fn set_tempo_fork(genesis: &mut Genesis, fork: TempoHardfork, activation: u6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ZoneChainSpec, ZoneHardfork, ZoneHardforks};
+    use crate::ZoneChainSpec;
     use tempo_chainspec::{TempoChainSpec, TempoHardforks, spec::DEV};
     use zone_primitives::constants::zone_chain_id;
 
@@ -48,10 +48,6 @@ mod tests {
                     .extra_fields
                     .remove(&format!("{}Time", fork.to_string().to_lowercase()));
             }
-            genesis
-                .config
-                .extra_fields
-                .insert("z1Time".into(), serde_json::json!(500));
             let alloc = genesis.alloc.clone();
             set_tempo_fork(&mut genesis, after, 1_000);
             assert_eq!(genesis.alloc, alloc);
@@ -67,8 +63,6 @@ mod tests {
                 assert_eq!(tempo.tempo_hardfork_at(timestamp), expected);
                 assert_eq!(zone.tempo_hardfork_at(timestamp), expected);
             }
-            assert_eq!(zone.zone_hardfork_at(499), ZoneHardfork::Z0);
-            assert_eq!(zone.zone_hardfork_at(500), ZoneHardfork::Z1);
         }
     }
 }

@@ -10,7 +10,7 @@ use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::TransportResult;
-use reth_chain_state::CanonStateSubscriptions;
+use reth_chain_state::{CanonStateSubscriptions, PersistedBlockSubscriptions};
 use reth_storage_api::{BlockReader, StateProviderFactory};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
@@ -43,8 +43,9 @@ pub use proofs::{
     ProofCollectorConfig, ProofCollectorHandle, StoredBlockProof, create_proof_collector,
 };
 pub use prover::{
-    SHADOW_PROVER_QUEUE_CAPACITY, SettlementProof, SettlementProverConfig, ShadowProofAnchor,
-    ShadowProver, ShadowProverConfig, spawn_shadow_prover,
+    SHADOW_PROVER_QUEUE_CAPACITY, SettlementProof, SettlementProver, SettlementProverConfig,
+    ShadowProofAnchor, ShadowProver, ShadowProverConfig, spawn_settlement_prover,
+    spawn_shadow_prover,
 };
 pub use prover_config::{HardforkProverAddress, ProverAddresses};
 pub use settlement::{
@@ -137,30 +138,31 @@ pub struct ZoneSequencerHandle {
 /// Spawn all zone sequencer background tasks.
 ///
 /// This is the top-level POC entrypoint that starts:
-/// - **Zone monitor** — consumes native canonical Zone blocks and receipts, extracts withdrawal
-///   events into the shared store, builds [`crate::BatchData`], and submits each batch
-///   synchronously to the ZonePortal on Tempo L1. Local state only advances on successful
-///   submission.
+/// - **Zone monitor** — prepares the next persisted Zone batch while the preceding batch is being
+///   submitted to the ZonePortal. Submission remains ordered, and confirmed state only advances
+///   after a successful L1 receipt.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawals` for each pending withdrawal.
-/// - **Settlement prover** — when `prover_config` is set, settlement waits for a successful SPF
-///   execution and Nitro NSM attestation before submitting the batch. A proof collector is
-///   required and every unsettled input must be persisted before proving.
+/// - **Settlement prover** — when `settlement_prover` is set, settlement waits for a successful
+///   SPF execution and Nitro NSM attestation before submitting the batch. The prover is owned by
+///   the caller so it outlives individual leader generations.
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
 ///
 /// `shutdown` stops both tasks gracefully: it is observed at their poll boundaries, so an
 /// in-flight L1 transaction resolves before teardown.
-pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
+pub async fn spawn_zone_sequencer<P>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
-    proof_collector: Option<ProofCollectorHandle>,
-    prover_config: Option<SettlementProverConfig>,
+    prover: Option<SettlementProver>,
     settlements: Option<SettlementManager>,
     shutdown: tokio_util::sync::CancellationToken,
-) -> ZoneSequencerHandle {
+) -> ZoneSequencerHandle
+where
+    P: ZoneSequencerProvider + PersistedBlockSubscriptions,
+{
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
@@ -171,14 +173,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     )
     .await
     .expect("valid L1 RPC URL");
-    let settlement_prover = prover_config.map(|prover_config| {
-        prover::spawn_settlement_prover(
-            prover_config,
-            proof_collector.expect("settlement prover requires a proof collector"),
-            zone_provider.clone(),
-            l1_provider.clone(),
-        )
-    });
     let sequencer_address = signer.address();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
@@ -220,7 +214,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         l1_provider,
         signer,
         monitor_shared_state,
-        settlement_prover,
+        prover,
         shutdown,
     );
 
@@ -236,10 +230,9 @@ async fn connect_l1_provider(
     retry_connection_interval: Duration,
     signer: PrivateKeySigner,
 ) -> TransportResult<DynProvider<TempoNetwork>> {
-    let wallet = alloy_network::EthereumWallet::from(signer);
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .with_nonce_key_filler()
-        .wallet(wallet)
+        .wallet(signer)
         .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
         .await?
         .erased();

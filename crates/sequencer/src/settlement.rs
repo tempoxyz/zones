@@ -38,18 +38,20 @@ use crate::{
         LegacyBatchSubmitted, LegacyTempoAdvanced, TempoAdvanced, TokenEnablementTransition,
         ZonePortal,
     },
-    attestation::{AttestationDomain, SettlementAttestation, SettlementCertificate},
+    attestation::{
+        AttestationDomain, SettlementAttestation, SettlementCertificate,
+        SignedSettlementAttestation,
+    },
     prover::SettlementProof,
     prover_config::active_l1_hardfork,
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
-use alloy_eips::BlockHashOrNumber;
+use alloy_eips::{BlockHashOrNumber, eip2935::HISTORY_SERVE_WINDOW};
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
-use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use eyre::{OptionExt as _, Result, WrapErr as _};
@@ -68,7 +70,6 @@ use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
 #[derive(Debug)]
 pub enum BatchSubmitError {
-    Cancelled,
     PortalAdvanced,
     PreparedAnchorInvalid(eyre::Report),
     /// The attestation was generated using a prover selected under a different L1 policy.
@@ -88,7 +89,6 @@ impl From<eyre::Report> for BatchSubmitError {
 impl fmt::Display for BatchSubmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cancelled => formatter.write_str("batch processing cancelled"),
             Self::PortalAdvanced => {
                 formatter.write_str("portal already committed the batch height")
             }
@@ -102,8 +102,14 @@ impl fmt::Display for BatchSubmitError {
     }
 }
 
-/// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
-const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
+impl std::error::Error for BatchSubmitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PreparedAnchorInvalid(error) | Self::Other(error) => Some(error.as_ref()),
+            Self::PortalAdvanced | Self::ProverHardforkChanged { .. } => None,
+        }
+    }
+}
 
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
@@ -240,7 +246,7 @@ impl BatchAnchorConfig {
 impl Default for BatchAnchorConfig {
     fn default() -> Self {
         Self {
-            history_window: DEFAULT_EIP2935_HISTORY_WINDOW,
+            history_window: HISTORY_SERVE_WINDOW as u64,
             safety_margin: DEFAULT_EIP2935_SAFETY_MARGIN,
         }
     }
@@ -604,13 +610,7 @@ impl BatchSubmitter {
             withdrawalQueueHash: batch.withdrawal_queue_hash,
             verifierConfigHash: keccak256(verifier_config),
         };
-        let digest = domain.settlement_digest(&message);
-        let signature = signer.sign_hash_sync(&digest)?;
-        let mut encoded = Vec::with_capacity(65);
-        encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
-        encoded.extend_from_slice(&signature.s().to_be_bytes::<32>());
-        encoded.push(signature.v() as u8 + 27);
-        Ok(encoded.into())
+        Ok(SignedSettlementAttestation::sign(message, domain, signer)?.signature)
     }
 
     /// Read all mutable portal state needed for one submission at a single L1 block.
@@ -1050,8 +1050,8 @@ impl BatchSubmitter {
 
     /// Read the current `blockHash` from the ZonePortal on L1.
     ///
-    /// Used to resync the monitor's `prev_block_hash` after repeated submission
-    /// failures, ensuring subsequent batches use the portal's actual state.
+    /// Used to reject a prepared batch whose predecessor no longer matches the
+    /// portal before submitting it.
     pub async fn read_portal_block_hash(&self) -> Result<B256> {
         let hash = self.portal.blockHash().call().await?;
         Ok(hash)
@@ -1943,7 +1943,7 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
-    use alloy_consensus::Header as ConsensusHeader;
+    use alloy_consensus::{Header as ConsensusHeader, Sealable as _};
     use alloy_primitives::{B256, address};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
@@ -2251,7 +2251,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let hash = alloy_primitives::keccak256(alloy_rlp::encode(&header));
+        let hash = header.hash_slow();
         (
             TempoHeaderResponse {
                 inner: RpcHeader {
@@ -3133,7 +3133,7 @@ mod tests {
     fn resolve_hash_mismatch_skipped() {
         let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
         let withdrawals = vec![w0];
-        let wrong_hash = B256::from([0xabu8; 32]);
+        let wrong_hash = B256::repeat_byte(0xab);
 
         let mut events = BTreeMap::new();
         events.insert(5, test_batch_event(wrong_hash));
@@ -3198,7 +3198,7 @@ mod tests {
     #[test]
     fn resolve_empty_withdrawals_vec_skipped() {
         let mut events = BTreeMap::new();
-        events.insert(5, test_batch_event(B256::from([0x11u8; 32])));
+        events.insert(5, test_batch_event(B256::repeat_byte(0x11)));
 
         let mut slot_withdrawals = BTreeMap::new();
         slot_withdrawals.insert(5, vec![]);
@@ -3227,7 +3227,7 @@ mod tests {
         let withdrawals = vec![w];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
         // head_slot_hash doesn't match any tail of the withdrawal list
-        let corrupted_hash = B256::from([0xdeu8; 32]);
+        let corrupted_hash = B256::repeat_byte(0xde);
 
         let mut events = BTreeMap::new();
         events.insert(5, test_batch_event(full_hash));

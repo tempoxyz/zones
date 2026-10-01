@@ -11,7 +11,6 @@ use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::Evm;
 use alloy_primitives::{Bytes, U256};
-use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -218,7 +217,7 @@ where
             .build();
 
         let chain_spec = self.provider.chain_spec();
-        let chain_id = chain_spec.chain().id();
+        let chain_id = chain_spec.chain_id();
 
         let block_gas_limit = parent_header.gas_limit();
 
@@ -363,7 +362,7 @@ where
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
-            tx_count = sealed_block.body().transactions.len(),
+            tx_count = sealed_block.transaction_count(),
             block_size_bytes = execution_block_size_estimate,
             ?elapsed,
             "Built zone payload"
@@ -802,11 +801,8 @@ fn build_advance_tempo_tx_from_parts(
     enabled_tokens: Vec<abi::EnabledToken>,
     chain_id: u64,
 ) -> Recovered<TempoTxEnvelope> {
-    let mut header_rlp = Vec::new();
-    header.encode(&mut header_rlp);
-
     let calldata = abi::IZoneInbox::advanceTempoCall {
-        header: Bytes::from(header_rlp),
+        header: alloy_rlp::encode(header).into(),
         deposits,
         decryptions,
         enabledTokens: enabled_tokens,
@@ -846,11 +842,7 @@ pub fn build_advance_tempo_headers_tx(
     }
     let headers = headers
         .iter()
-        .map(|header| {
-            let mut encoded = Vec::new();
-            header.header().encode(&mut encoded);
-            Bytes::from(encoded)
-        })
+        .map(|header| alloy_rlp::encode(header.header()).into())
         .collect();
     let calldata = abi::IZoneInbox::advanceTempoHeadersCall { headers }.abi_encode();
     let tx = TxLegacy {
@@ -872,7 +864,6 @@ pub fn build_advance_tempo_headers_tx(
 mod tests {
     use alloy_consensus::{Header, Signed, TxLegacy};
     use alloy_primitives::{Address, B256, U256, address};
-    use alloy_rlp::Decodable;
     use alloy_sol_types::SolCall;
     use reth_primitives_traits::{Recovered, SealedHeader};
     use reth_tasks::cancel::CancelOnDrop;
@@ -943,9 +934,7 @@ mod tests {
         let call = IZoneInbox::advanceTempoHeadersCall::abi_decode(&signed.tx().input).unwrap();
         assert_eq!(call.headers.len(), 2);
         for (encoded, expected) in call.headers.iter().zip(headers) {
-            let mut encoded = encoded.as_ref();
-            let decoded = TempoHeader::decode(&mut encoded).unwrap();
-            assert!(encoded.is_empty());
+            let decoded: TempoHeader = alloy_rlp::decode_exact(encoded).unwrap();
             assert_eq!(decoded.inner.number, expected.inner.number);
         }
     }

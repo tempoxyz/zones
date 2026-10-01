@@ -4,17 +4,19 @@
 //! recipient and memo are hidden from on-chain observers.
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, B256, Bytes, address},
+    network::primitives::ReceiptResponse,
+    primitives::{Address, B256, Bytes},
     providers::{Provider, ProviderBuilder},
     rpc::types::Filter,
-    signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
+use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{DepositPayload, IZoneInbox, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
+
+use crate::zone_utils::{L1_EXPLORER, parse_private_key};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct Deposit {
@@ -31,7 +33,7 @@ pub(crate) struct Deposit {
     private_key: String,
 
     /// TIP-20 token address to deposit.
-    #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     token: Address,
 
     /// Amount to deposit.
@@ -53,16 +55,11 @@ pub(crate) struct Deposit {
 
 impl Deposit {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let signer: PrivateKeySigner = key_str.parse()?;
+        let signer = parse_private_key(&self.private_key)?;
         let sender = signer.address();
         let to = self.to.unwrap_or(sender);
-        let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&self.l1_rpc_url)
             .await?;
 
@@ -128,7 +125,7 @@ impl Deposit {
         }
 
         println!("Deposit sent! (block {block_number})");
-        println!("Explorer: https://explore.moderato.tempo.xyz/tx/{tx_hash}");
+        println!("Explorer: {L1_EXPLORER}/{tx_hash}");
 
         // Wait for L2 processing if zone RPC is provided
         if let (Some(zone_rpc), Some(from_block)) = (&self.zone_rpc_url, l2_from_block) {

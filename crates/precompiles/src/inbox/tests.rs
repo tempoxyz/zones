@@ -2,7 +2,6 @@ use super::*;
 
 use alloy_evm::EvmInternals;
 use alloy_primitives::{B256, Bytes, U256, address, keccak256};
-use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError, SolValue};
 use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
@@ -31,12 +30,6 @@ const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000a1"
 const ALICE: Address = address!("0x00000000000000000000000000000000000000a2");
 const BOB: Address = address!("0x00000000000000000000000000000000000000b0");
 
-fn encode_header(header: &TempoHeader) -> Bytes {
-    let mut encoded = Vec::new();
-    header.encode(&mut encoded);
-    encoded.into()
-}
-
 struct Harness {
     ctx: TestContext,
     l1: MockL1Reader,
@@ -57,7 +50,7 @@ impl Harness {
     }
 
     fn with_l1(l1: MockL1Reader, mut ctx: TestContext) -> eyre::Result<Self> {
-        let genesis_rlp = encode_header(&TempoHeader::default());
+        let genesis_rlp = alloy_rlp::encode(TempoHeader::default());
         let genesis_hash = keccak256(&genesis_rlp);
         let child_header = TempoHeader {
             inner: alloy_consensus::Header {
@@ -151,7 +144,7 @@ impl Harness {
         enabled_tokens: Vec<EnabledToken>,
     ) -> IZoneInbox::advanceTempoCall {
         IZoneInbox::advanceTempoCall {
-            header: encode_header(&self.child_header()),
+            header: alloy_rlp::encode(self.child_header()).into(),
             deposits,
             decryptions,
             enabledTokens: enabled_tokens,
@@ -295,9 +288,7 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
     let base: U256 = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
-    harness
-        .l1
-        .insert(PORTAL, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(PORTAL, slot_x, 1, sequencer_x.into());
     harness.l1.insert(
         PORTAL,
         slot_x + U256::ONE,
@@ -421,7 +412,7 @@ fn advance_tempo_headers_activates_at_t13() -> eyre::Result<()> {
     for hardfork in [TempoHardfork::T12, TempoHardfork::T13] {
         let mut harness = Harness::new_with_hardfork(hardfork)?;
         let calldata = IZoneInbox::advanceTempoHeadersCall {
-            headers: vec![encode_header(&harness.child_header())],
+            headers: vec![alloy_rlp::encode(harness.child_header()).into()],
         }
         .abi_encode();
         let output = harness.call(Address::ZERO, calldata)?;
@@ -551,11 +542,9 @@ fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let nonce = 1u64;
     harness.seed_fallback_recipient(nonce, BOB)?;
-    let mut encoded_nonce = [0u8; 20];
-    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let first = WithdrawalBounceBackDeposit {
         token: PATH_USD_ADDRESS,
-        to: Address::from(encoded_nonce),
+        to: Address::left_padding_from(&nonce.to_be_bytes()),
         amount: 100,
     };
     let first_hash = keccak256(
@@ -757,9 +746,7 @@ fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result
 
     let base: U256 = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
-    harness
-        .l1
-        .insert(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(portal, slot_x, 1, sequencer_x.into());
     harness.l1.insert(
         portal,
         slot_x + U256::ONE,
@@ -812,7 +799,7 @@ fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result
         harness
             .l1
             .storage_requests()
-            .contains(&(portal, B256::from(slot_x.to_be_bytes()), 1))
+            .contains(&(portal, B256::from(slot_x), 1))
     );
     Ok(())
 }
@@ -830,9 +817,7 @@ fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
 
     let base: U256 = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
-    harness
-        .l1
-        .insert(PORTAL, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(PORTAL, slot_x, 1, sequencer_x.into());
     harness.l1.insert(
         PORTAL,
         slot_x + U256::ONE,
@@ -906,9 +891,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
     let portal = PORTAL;
     let base: U256 = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
-    harness
-        .l1
-        .insert(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(portal, slot_x, 1, sequencer_x.into());
     harness.l1.insert(
         portal,
         slot_x + U256::ONE,
@@ -1104,11 +1087,9 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
     let nonce = 8u64;
     harness.seed_fallback_recipient(nonce, BOB)?;
     let token = address!("0x20c00000000000000000000000000000000000cc");
-    let mut encoded_nonce = [0u8; 20];
-    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = WithdrawalBounceBackDeposit {
         token,
-        to: Address::from(encoded_nonce),
+        to: Address::left_padding_from(&nonce.to_be_bytes()),
         amount: 555,
     };
     let expected_hash = keccak256(
@@ -1153,11 +1134,9 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let nonce = 7u64;
     harness.seed_fallback_recipient(nonce, BOB)?;
-    let mut encoded_nonce = [0u8; 20];
-    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = WithdrawalBounceBackDeposit {
         token: PATH_USD_ADDRESS,
-        to: Address::from(encoded_nonce),
+        to: Address::left_padding_from(&nonce.to_be_bytes()),
         amount: 321,
     };
     let expected_hash = keccak256(

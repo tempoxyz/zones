@@ -17,7 +17,6 @@ use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_primitives::{B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider as _};
-use alloy_rlp::Decodable as _;
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_sol_types::{SolCall as _, SolInterface as _};
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
@@ -94,8 +93,9 @@ impl fmt::Debug for SettlementProverConfig {
 /// Inputs for observational SPF validation on RPC followers.
 pub type ShadowProverConfig = SettlementProverConfig;
 
+/// Validation worker whose attested proofs gate L1 settlement.
 #[derive(Debug, Clone)]
-pub(crate) struct SettlementProver {
+pub struct SettlementProver {
     sender: mpsc::Sender<ProverJob>,
 }
 
@@ -201,7 +201,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
     }
 }
 
-pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
+/// Spawn the node's settlement prover, shared by every leader generation.
+pub fn spawn_settlement_prover<P: ZoneSequencerProvider>(
     config: SettlementProverConfig,
     proofs: ProofCollectorHandle,
     zone_provider: P,
@@ -788,9 +789,9 @@ fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
     let mode = VerifierMode::try_from(proof_bundle.verifier_config.as_ref())?;
     ensure!(
         mode == VerifierMode::NitroV1,
-        "remote prover returned unsupported verifier config 0x{}; expected 0x{}",
-        alloy_primitives::hex::encode(&proof_bundle.verifier_config),
-        alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
+        "remote prover returned unsupported verifier config {}; expected {}",
+        alloy_primitives::hex::encode_prefixed(&proof_bundle.verifier_config),
+        alloy_primitives::hex::encode_prefixed(NITRO_VERIFIER_CONFIG_V1),
     );
     mode.validate_proof_shape(&proof_bundle.proof)?;
     Ok(())
@@ -989,10 +990,7 @@ fn final_tempo_header(block: &ZoneBlock) -> Result<TempoHeader> {
 }
 
 fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
-    let mut input = encoded;
-    let header = TempoHeader::decode(&mut input).context("decode Tempo header RLP")?;
-    ensure!(input.is_empty(), "Tempo header RLP has trailing bytes");
-    Ok(header)
+    alloy_rlp::decode_exact(encoded).context("decode Tempo header RLP")
 }
 
 async fn zone_witnesses(
@@ -1106,7 +1104,7 @@ async fn tempo_header(provider: &DynProvider<TempoNetwork>, number: u64) -> Resu
     provider
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await?
-        .map(|block| block.header.as_ref().clone())
+        .map(|block| block.header.inner.into_consensus())
         .ok_or_eyre(format!("Tempo block {number} not found"))
 }
 

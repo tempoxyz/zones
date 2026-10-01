@@ -38,7 +38,7 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    SettlementManager, SettlementProverConfig, ZoneSequencerConfig, ZoneSequencerHandle,
+    SettlementManager, SettlementProver, ZoneSequencerConfig, ZoneSequencerHandle,
     ZoneSequencerProvider, resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
@@ -119,7 +119,7 @@ pub(crate) struct LeaderSequencerDeps {
     pub sequencer_config: ZoneSequencerConfig,
     /// Node-owned collector shared across all role generations.
     pub proof_collector: Option<zone_sequencer::ProofCollectorHandle>,
-    pub prover_config: Option<SettlementProverConfig>,
+    pub prover: Option<SettlementProver>,
 }
 
 /// Sinks for the long-lived P2P event demultiplexer.
@@ -990,7 +990,6 @@ where
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
-            let collector = sequencer.proof_collector.clone();
             let engine = build_engine(context, sequencer, last_header);
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
@@ -1011,7 +1010,7 @@ where
             });
             let provider = context.provider.clone();
             let commands = context.commands.clone();
-            let broadcast_proofs = collector.clone();
+            let broadcast_proofs = sequencer.proof_collector.clone();
             tasks.spawn(async move {
                 broadcast_persisted_blocks(provider, commands, broadcaster_rx, broadcast_proofs)
                     .await;
@@ -1051,15 +1050,14 @@ where
                 .clone()
                 .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
             let zone_provider = context.provider.clone();
-            let prover_config = sequencer.prover_config.clone();
+            let prover = sequencer.prover.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
                 let handle = spawn_zone_sequencer(
                     sequencer_config,
                     signer,
                     zone_provider,
-                    collector,
-                    prover_config,
+                    prover,
                     Some(settlements),
                     sequencer_token.clone(),
                 )
@@ -1121,8 +1119,8 @@ where
 mod tests {
     use std::{future::pending, time::Duration};
 
+    use alloy_consensus::Sealable as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-    use reth_primitives_traits::SealedHeader;
     use reth_provider::test_utils::MockEthProvider;
     use tempo_primitives::{TempoHeader, TempoPrimitives};
     use tokio::sync::{mpsc, oneshot};
@@ -1160,12 +1158,12 @@ mod tests {
         let provider = MockEthProvider::<TempoPrimitives>::new();
         let mut recovery_header = TempoHeader::default();
         recovery_header.inner.number = 7;
-        let recovery_hash = SealedHeader::seal_slow(recovery_header.clone()).hash();
+        let recovery_hash = recovery_header.hash_slow();
         provider.add_header(recovery_hash, recovery_header);
 
         let mut head = TempoHeader::default();
         head.inner.number = 9;
-        let head_hash = SealedHeader::seal_slow(head.clone()).hash();
+        let head_hash = head.hash_slow();
         provider.add_header(head_hash, head);
 
         assert_eq!(

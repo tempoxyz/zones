@@ -55,7 +55,8 @@ impl FromStr for HardforkProverAddress {
 pub struct ProverAddresses(BTreeMap<TempoHardfork, RemoteProverConfig>);
 
 impl ProverAddresses {
-    /// Build a configuration, rejecting duplicate assignments.
+    /// Build authenticated endpoints, requiring an explicit policy for nonempty assignments and
+    /// rejecting duplicate assignments.
     pub fn new(
         assignments: Vec<HardforkProverAddress>,
         policy: Option<&[u8]>,
@@ -63,6 +64,11 @@ impl ProverAddresses {
         if assignments.is_empty() {
             return Ok(None);
         }
+        let policy = policy.ok_or_else(|| {
+            eyre::eyre!(
+                "remote proving requires --sequencer.prover-attestation-policy; this Tempo release does not expose the verifier's PCR policy"
+            )
+        })?;
         let mut addresses = BTreeMap::new();
         for assignment in assignments {
             let HardforkProverAddress { hardfork, address } = assignment;
@@ -72,13 +78,7 @@ impl ProverAddresses {
             );
             let prev = addresses.insert(
                 hardfork,
-                if let Some(policy) = policy {
-                    RemoteProverConfig::from_policy_json(address, policy)?
-                } else {
-                    let pcrs = tempo_precompiles::zone_verifier::approved_pcrs(hardfork)
-                        .ok_or_else(|| eyre::eyre!("no approved prover PCRs for {hardfork:?}"))?;
-                    RemoteProverConfig::from_pcrs(address, pcrs)?
-                },
+                RemoteProverConfig::from_policy_json(address, policy)?,
             );
             ensure!(prev.is_none(), "duplicate prover address for {hardfork}");
         }
@@ -319,6 +319,26 @@ mod tests {
         )
         .unwrap()
         .unwrap()
+    }
+
+    #[test]
+    fn remote_assignments_require_an_attestation_policy() {
+        assert!(ProverAddresses::new(Vec::new(), None).unwrap().is_none());
+        for &hardfork in TempoHardfork::VARIANTS {
+            let error = ProverAddresses::new(
+                vec![HardforkProverAddress {
+                    hardfork,
+                    address: "prover:5000".to_owned(),
+                }],
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("--sequencer.prover-attestation-policy")
+            );
+        }
     }
 
     #[test]

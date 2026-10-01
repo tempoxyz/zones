@@ -6,7 +6,7 @@ use std::{
 };
 
 use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
-use alloy_eips::{BlockHashOrNumber, BlockId, eip2718::Encodable2718 as _};
+use alloy_eips::{BlockHashOrNumber, eip2718::Encodable2718 as _, eip2935::HISTORY_SERVE_WINDOW};
 use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -39,7 +39,6 @@ use zone_spf::{
 mod verifier_request;
 mod verify;
 
-const EIP2935_HISTORY_WINDOW: u64 = 8191;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 const RPC_CONCURRENCY: usize = 8;
 const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -1014,11 +1013,11 @@ async fn zone_header(zone: &DynProvider<TempoNetwork>, number: u64) -> Result<Te
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await?
         .ok_or_else(|| eyre!("Zone block {number} not found"))?;
-    Ok(block.header.as_ref().clone())
+    Ok(block.header.inner.into_consensus())
 }
 
 fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
-    let header = block.header.as_ref().clone();
+    let header = block.header.inner.into_consensus();
     let block_hash = header.hash_slow();
     let rpc_transactions = match block.transactions {
         BlockTransactions::Full(transactions) => transactions,
@@ -1150,7 +1149,7 @@ async fn withdrawal_batch_index_at(
 ) -> Result<u64> {
     let index = zone
         .get_storage_at(ZONE_OUTBOX_ADDRESS, outbox::slots::WITHDRAWAL_BATCH_INDEX)
-        .block_id(BlockId::number(block_number))
+        .number(block_number)
         .await?;
     Ok(index.as_limbs()[0])
 }
@@ -1160,16 +1159,11 @@ async fn tempo_header(tempo: &DynProvider<TempoNetwork>, number: u64) -> Result<
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await?
         .ok_or_else(|| eyre!("Tempo block {number} not found"))?;
-    Ok(block.header.as_ref().clone())
+    Ok(block.header.inner.into_consensus())
 }
 
 fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
-    let mut input = encoded;
-    let header = alloy_rlp::Decodable::decode(&mut input).context("decode Tempo header RLP")?;
-    if !input.is_empty() {
-        bail!("Tempo header RLP has trailing bytes");
-    }
-    Ok(header)
+    alloy_rlp::decode_exact(encoded).context("decode Tempo header RLP")
 }
 
 async fn zone_witnesses(
@@ -1247,7 +1241,7 @@ async fn tempo_anchor(
         bail!("Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}");
     }
     let gap = tip - checkpoint_number;
-    if gap < EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MARGIN {
+    if gap < HISTORY_SERVE_WINDOW as u64 - EIP2935_SAFETY_MARGIN {
         return Ok((
             checkpoint_number,
             checkpoint.hash_slow(),

@@ -1,56 +1,49 @@
 use alloy::{
     consensus::BlockHeader as _,
-    genesis::{ChainConfig, Genesis, GenesisAccount},
+    genesis::{Genesis, GenesisAccount},
     primitives::{Address, B256, Bytes, U256, address, keccak256},
     providers::{Provider, ProviderBuilder},
 };
 use alloy_eips::BlockNumberOrTag;
-use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
 use reth_evm::{
-    Evm as _, EvmEnv, EvmFactory,
-    revm::{
-        DatabaseCommit,
-        context::JournalTr,
-        database::{CacheDB, EmptyDB},
-        state::{AccountInfo, Bytecode},
-    },
+    Evm as _,
+    revm::{DatabaseCommit, context::JournalTr, state::AccountInfo},
 };
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_T0_BASE_FEE};
+use tempo_chainspec::{cli::TempoHardforkArgs, spec::TEMPO_T0_BASE_FEE};
 use tempo_contracts::{
-    ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
-    PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
-    contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
+    ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, SAFE_DEPLOYER_ADDRESS,
+    contracts::{CreateX, Multicall3, SafeDeployer},
 };
-use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
+use tempo_evm::genesis::{
+    GenesisEvm, create_genesis_evm, deploy_arachnid_create2_factory, deploy_permit2,
+    ethereum_chain_config, genesis_account, genesis_evm_env, predeployed_contract,
+    with_genesis_storage,
+};
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
     stablecoin_dex::StablecoinDEX,
-    storage::{StorageActions, StorageCtx},
     storage_credits::StorageCredits,
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
 };
 use tempo_primitives::TempoHeader;
-use tempo_revm::TempoBlockEnv;
-use tempo_zone_contracts::ZonePortal;
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+};
 use zone_precompiles::{
     TempoState as NativeTempoState, ZoneFeeManager, ZoneInbox as NativeZoneInbox,
     ZoneOutbox as NativeZoneOutbox,
 };
 
 use crate::zone_utils::find_zone_deployment_block;
-
-const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
-const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
-const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
@@ -113,13 +106,8 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
 
-    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    pub(crate) t12_time: Option<u64>,
-
-    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    pub(crate) t13_time: Option<u64>,
+    #[command(flatten)]
+    pub(crate) forks: TempoHardforkArgs,
 }
 
 impl GenerateZoneGenesis {
@@ -147,10 +135,7 @@ impl GenerateZoneGenesis {
 
         evm.db_mut().insert_account_info(
             DEPLOYER,
-            AccountInfo {
-                balance: U256::from(1_000_000_000_000_000_000_000u128),
-                ..Default::default()
-            },
+            AccountInfo::from_balance(U256::from(1_000_000_000_000_000_000_000u128)),
         );
 
         // Initialize all precompiles and deploy standard contracts to match the
@@ -159,18 +144,45 @@ impl GenerateZoneGenesis {
         deploy_arachnid_create2_factory(&mut evm);
         deploy_permit2(&mut evm)?;
 
-        initialize_tip403_registry(&mut evm)?;
-        create_path_usd_token(&mut evm)?;
-        initialize_fee_manager(&mut evm, self.default_fee_token)?;
-        initialize_stablecoin_dex(&mut evm)?;
-        initialize_nonce_manager(&mut evm)?;
-        initialize_account_keychain(&mut evm)?;
-        initialize_receive_policy_guard(&mut evm)?;
-        initialize_storage_credits(&mut evm)?;
+        with_genesis_storage(&mut evm, || {
+            // Required for fee token transfer checks.
+            println!("Initializing TIP403 registry");
+            TIP403Registry::new().initialize()?;
 
-        initialize_tempo_state(&mut evm, &header_rlp)?;
-        initialize_zone_inbox(&mut evm)?;
-        initialize_zone_outbox(&mut evm)?;
+            println!("Creating pathUSD fee token at {PATH_USD_ADDRESS}");
+            create_path_usd_token()?;
+
+            let default_fee_token = self.default_fee_token;
+            println!("Initializing fee manager with default fee token {default_fee_token}");
+            ZoneFeeManager::new().initialize(default_fee_token)?;
+
+            println!("Initializing stablecoin exchange");
+            StablecoinDEX::new().initialize()?;
+
+            println!("Initializing nonce manager");
+            NonceManager::new().initialize()?;
+
+            println!("Initializing account keychain");
+            AccountKeychain::new().initialize()?;
+
+            println!("Initializing TIP-1028 ReceivePolicyGuard");
+            ReceivePolicyGuard::new().initialize()?;
+
+            // TIP-1060 bookkeeping writes StorageCredits from the EVM handler even when no
+            // transaction calls it. Keeping the account non-empty prevents EIP-161 from dropping
+            // the sequential transition while the sparse-trie state hook observes its storage.
+            println!("Initializing TIP-1060 StorageCredits");
+            StorageCredits::new().initialize()?;
+
+            println!("Initializing native TempoState at {TEMPO_STATE_ADDRESS}");
+            NativeTempoState::new().initialize(&header_rlp)?;
+
+            println!("Initializing native ZoneInbox at {ZONE_INBOX_ADDRESS}");
+            NativeZoneInbox::new().initialize()?;
+
+            println!("Initializing native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
+            NativeZoneOutbox::new().initialize()
+        })?;
 
         let native_state = evm.ctx_mut().journaled_state.finalize();
         evm.db_mut().commit(native_state);
@@ -201,24 +213,8 @@ impl GenerateZoneGenesis {
                 self.with_create2_factory || **addr != ARACHNID_CREATE2_FACTORY_ADDRESS
             })
             .map(|(address, account)| {
-                let storage: Option<BTreeMap<_, _>> = if !account.storage.is_empty() {
-                    Some(
-                        account
-                            .storage
-                            .iter()
-                            .map(|(key, val)| ((*key).into(), (*val).into()))
-                            .collect(),
-                    )
-                } else {
-                    None
-                };
-                let genesis_account = GenesisAccount {
-                    nonce: Some(account.info.nonce),
-                    code: account.info.code.as_ref().map(|c| c.original_bytes()),
-                    storage,
-                    ..Default::default()
-                };
-                (*address, genesis_account)
+                let storage = account.storage.iter().map(|(key, val)| (*key, *val));
+                (*address, genesis_account(&account.info, storage))
             })
             .collect();
 
@@ -230,65 +226,26 @@ impl GenerateZoneGenesis {
         genesis_alloc.entry(Address::ZERO).or_default().nonce = Some(1);
 
         // Deploy standard utility contracts matching L1 genesis.
-        genesis_alloc.insert(
-            MULTICALL3_ADDRESS,
-            GenesisAccount {
-                code: Some(Bytes::from_static(&Multicall3::DEPLOYED_BYTECODE)),
-                nonce: Some(1),
-                ..Default::default()
-            },
-        );
-        if self.with_createx {
-            genesis_alloc.insert(
+        for (address, code, enabled) in [
+            (MULTICALL3_ADDRESS, &Multicall3::DEPLOYED_BYTECODE, true),
+            (
                 CREATEX_ADDRESS,
-                GenesisAccount {
-                    code: Some(Bytes::from_static(&CreateX::DEPLOYED_BYTECODE)),
-                    nonce: Some(1),
-                    ..Default::default()
-                },
-            );
-        }
-        if self.with_safe_deployer {
-            genesis_alloc.insert(
+                &CreateX::DEPLOYED_BYTECODE,
+                self.with_createx,
+            ),
+            (
                 SAFE_DEPLOYER_ADDRESS,
-                GenesisAccount {
-                    code: Some(Bytes::from_static(&SafeDeployer::DEPLOYED_BYTECODE)),
-                    nonce: Some(1),
-                    ..Default::default()
-                },
-            );
-        }
-
-        let mut chain_config = ChainConfig {
-            chain_id: self.chain_id,
-            homestead_block: Some(0),
-            eip150_block: Some(0),
-            eip155_block: Some(0),
-            eip158_block: Some(0),
-            byzantium_block: Some(0),
-            constantinople_block: Some(0),
-            petersburg_block: Some(0),
-            istanbul_block: Some(0),
-            berlin_block: Some(0),
-            london_block: Some(0),
-            merge_netsplit_block: Some(0),
-            shanghai_time: Some(0),
-            cancun_time: Some(0),
-            prague_time: Some(0),
-            osaka_time: Some(0),
-            terminal_total_difficulty: Some(U256::from(0)),
-            terminal_total_difficulty_passed: true,
-            deposit_contract_address: Some(Address::ZERO),
-            ..Default::default()
-        };
-
-        for (name, timestamp) in [("t12Time", self.t12_time), ("t13Time", self.t13_time)] {
-            if let Some(timestamp) = timestamp {
-                chain_config
-                    .extra_fields
-                    .insert_value(name.into(), timestamp)?;
+                &SafeDeployer::DEPLOYED_BYTECODE,
+                self.with_safe_deployer,
+            ),
+        ] {
+            if enabled {
+                genesis_alloc.insert(address, predeployed_contract(code));
             }
         }
+
+        let mut chain_config = ethereum_chain_config(self.chain_id);
+        self.forks.write_to(&mut chain_config);
 
         let mut genesis = Genesis::default()
             .with_gas_limit(self.gas_limit)
@@ -391,11 +348,10 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
     let anchor_block = creation_block.checked_sub(1).ok_or_else(|| {
         eyre!("portal {portal} exists at genesis, so no pre-creation anchor is available")
     })?;
-    let anchor_block_id = BlockId::number(anchor_block);
     ensure!(
         provider
             .get_code_at(portal)
-            .block_id(anchor_block_id)
+            .number(anchor_block)
             .await
             .wrap_err_with(|| {
                 format!("failed to fetch portal code at Tempo anchor block {anchor_block}")
@@ -406,7 +362,7 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
     ensure!(
         !provider
             .get_code_at(portal)
-            .block_id(BlockId::number(creation_block))
+            .number(creation_block)
             .await
             .wrap_err_with(|| {
                 format!("failed to fetch portal code at creation block {creation_block}")
@@ -426,9 +382,7 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
         anchor_header_response.number()
     );
     let response_hash = anchor_header_response.hash;
-    let anchor_header = anchor_header_response.inner.inner;
-    let mut header_rlp = Vec::new();
-    anchor_header.encode(&mut header_rlp);
+    let header_rlp = alloy_rlp::encode(anchor_header_response.inner.inner);
     let anchor_hash = keccak256(&header_rlp);
     ensure!(
         anchor_hash == response_hash,
@@ -470,113 +424,11 @@ pub(crate) async fn wait_for_finalized_pre_creation_anchor<P: Provider<TempoNetw
     ))
 }
 
-fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> TempoEvm<CacheDB<EmptyDB>> {
-    let db = CacheDB::default();
-    let mut env: EvmEnv<TempoHardfork, TempoBlockEnv> =
-        EvmEnv::default().with_timestamp(U256::ZERO);
-    env.cfg_env.chain_id = chain_id;
+fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> GenesisEvm {
+    let mut env = genesis_evm_env(chain_id);
     env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
     env.block_env.inner.gas_limit = gas_limit;
-
-    let factory = TempoEvmFactory::default();
-    factory.create_evm(db, env)
-}
-
-/// Deploys the Arachnid CREATE2 factory by directly inserting it into the EVM state.
-fn deploy_arachnid_create2_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) {
-    println!("Deploying Arachnid CREATE2 factory at {ARACHNID_CREATE2_FACTORY_ADDRESS}");
-    evm.db_mut().insert_account_info(
-        ARACHNID_CREATE2_FACTORY_ADDRESS,
-        AccountInfo {
-            code: Some(Bytecode::new_raw(ARACHNID_CREATE2_FACTORY_BYTECODE)),
-            nonce: 0,
-            ..Default::default()
-        },
-    );
-}
-
-/// Deploys Permit2 contract via the Arachnid CREATE2 factory.
-fn deploy_permit2(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let bytecode = &tempo_contracts::Permit2::BYTECODE;
-    let calldata: Bytes = PERMIT2_SALT
-        .as_slice()
-        .iter()
-        .chain(bytecode.iter())
-        .copied()
-        .collect();
-
-    println!("Deploying Permit2 via CREATE2 to {PERMIT2_ADDRESS}");
-    let result =
-        evm.transact_system_call(Address::ZERO, ARACHNID_CREATE2_FACTORY_ADDRESS, calldata)?;
-    if !result.result.is_success() {
-        return Err(eyre!("Permit2 deployment failed: {:?}", result));
-    }
-    evm.db_mut().commit(result.state);
-    println!("Permit2 deployed successfully at {PERMIT2_ADDRESS}");
-    Ok(())
-}
-
-/// Initialize the native TempoState precompile storage from the L1 genesis header.
-fn initialize_tempo_state(
-    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
-    header_rlp: &[u8],
-) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || NativeTempoState::new().initialize(header_rlp),
-    )?;
-    println!("Initialized native TempoState at {TEMPO_STATE_ADDRESS}");
-    Ok(())
-}
-
-/// Initialize the native ZoneInbox account marker and storage.
-fn initialize_zone_inbox(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || NativeZoneInbox::new().initialize(),
-    )?;
-    println!("Initialized native ZoneInbox at {ZONE_INBOX_ADDRESS}");
-    Ok(())
-}
-
-/// Initialize the native ZoneOutbox account marker and storage.
-fn initialize_zone_outbox(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || NativeZoneOutbox::new().initialize(),
-    )?;
-    println!("Initialized native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
-    Ok(())
-}
-
-/// Initialize the TIP403Registry precompile (required for fee token transfer checks).
-fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || TIP403Registry::new().initialize(),
-    )?;
-    println!("Initialized TIP403Registry");
-    Ok(())
+    create_genesis_evm(env)
 }
 
 /// Create pathUSD as the default fee token at its reserved TIP20 address.
@@ -585,147 +437,32 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 /// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
 /// Without this, user transactions on the zone revert with `InvalidFeeToken`.
 /// ZoneInbox is the fixed token admin; the configured zone admin receives no token roles.
-fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || {
-            TIP20Factory::new().create_token_reserved_address(
-                PATH_USD_ADDRESS,
-                "pathUSD",
-                "pathUSD",
-                "USD",
-                Address::ZERO,
-                ZONE_INBOX_ADDRESS,
-            )?;
+fn create_path_usd_token() -> tempo_precompiles::error::Result<()> {
+    TIP20Factory::new().create_token_reserved_address(
+        PATH_USD_ADDRESS,
+        "pathUSD",
+        "pathUSD",
+        "USD",
+        Address::ZERO,
+        ZONE_INBOX_ADDRESS,
+    )?;
 
-            let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
-            // Allow address(0) to mint (system transactions use sender=0)
-            token.grant_role_internal(Address::ZERO, ISSUER_ROLE)?;
-            // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
-            token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
-            // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
-            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
+    let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+    // Allow address(0) to mint (system transactions use sender=0)
+    token.grant_role_internal(Address::ZERO, ISSUER_ROLE)?;
+    // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
+    token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
+    // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
+    token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
 
-            // Set a large supply cap
-            token.set_supply_cap(
-                ZONE_INBOX_ADDRESS,
-                ITIP20::setSupplyCapCall {
-                    newSupplyCap: U256::from(u128::MAX),
-                },
-            )?;
-
-            Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
+    // Set a large supply cap
+    token.set_supply_cap(
+        ZONE_INBOX_ADDRESS,
+        ITIP20::setSupplyCapCall {
+            newSupplyCap: U256::from(u128::MAX),
         },
     )?;
 
-    println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
-    Ok(())
-}
-
-/// Initialize the Zone fee manager precompile.
-fn initialize_fee_manager(
-    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
-    default_fee_token: Address,
-) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || {
-            let mut fee_manager = ZoneFeeManager::new();
-            fee_manager
-                .initialize(default_fee_token)
-                .expect("Could not init fee manager");
-        },
-    );
-    println!("Initialized ZoneFeeManager with default fee token {default_fee_token}");
-    Ok(())
-}
-
-/// Initialize the StablecoinDEX precompile.
-fn initialize_stablecoin_dex(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || StablecoinDEX::new().initialize(),
-    )?;
-    println!("Initialized StablecoinDEX");
-    Ok(())
-}
-
-/// Initialize the NonceManager precompile.
-fn initialize_nonce_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || NonceManager::new().initialize(),
-    )?;
-    println!("Initialized NonceManager");
-    Ok(())
-}
-
-/// Initialize the AccountKeychain precompile.
-fn initialize_account_keychain(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || AccountKeychain::new().initialize(),
-    )?;
-    println!("Initialized AccountKeychain");
-    Ok(())
-}
-
-/// Initialize the ReceivePolicyGuard precompile account.
-fn initialize_receive_policy_guard(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || ReceivePolicyGuard::new().initialize(),
-    )?;
-    println!("Initialized ReceivePolicyGuard");
-    Ok(())
-}
-
-/// Initialize the StorageCredits precompile account.
-///
-/// TIP-1060 bookkeeping writes this account from the EVM handler, even when no transaction calls
-/// the precompile directly. Keeping the account non-empty prevents EIP-161 from dropping the
-/// sequential transition while the sparse-trie state hook still observes its storage updates.
-fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || StorageCredits::new().initialize(),
-    )?;
-    println!("Initialized StorageCredits");
     Ok(())
 }
 
@@ -733,15 +470,18 @@ fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 mod tests {
     use super::*;
     use clap::Parser;
+    use tempo_chainspec::{TempoHardfork, TempoHardforks};
+    use zone_chainspec::ZoneChainSpec;
 
     #[tokio::test]
     async fn genesis_preserves_explicit_fork_timestamps() {
-        for (t12, t13) in [
-            (None, None),
-            (Some(0), Some(0)),
-            (Some(1789463700), None),
-            (None, Some(1789467300)),
-            (Some(9223372036854775807u64), Some(9223372036854775807u64)),
+        for (t12, t13, t14) in [
+            (None, None, None),
+            (Some(0), Some(0), Some(0)),
+            (Some(0), Some(u64::MAX), Some(u64::MAX)),
+            (Some(1789463700), None, None),
+            (None, Some(1789467300), None),
+            (Some(u64::MAX), Some(u64::MAX), Some(u64::MAX)),
         ] {
             let output = tempfile::tempdir().unwrap();
             let mut args = vec![
@@ -753,7 +493,11 @@ mod tests {
                 "--admin".to_owned(),
                 "0x1000000000000000000000000000000000000001".to_owned(),
             ];
-            for (flag, timestamp) in [("--t12-time", t12), ("--t13-time", t13)] {
+            for (flag, timestamp) in [
+                ("--t12-time", t12),
+                ("--t13-time", t13),
+                ("--t14-time", t14),
+            ] {
                 if let Some(timestamp) = timestamp {
                     args.extend([flag.to_owned(), timestamp.to_string()]);
                 }
@@ -768,16 +512,102 @@ mod tests {
             )
             .unwrap();
             let config = serde_json::to_value(&genesis.config).unwrap();
-            assert_eq!(
-                config.get("t12Time"),
-                t12.map(serde_json::Value::from).as_ref()
-            );
-            assert_eq!(
-                config.get("t13Time"),
-                t13.map(serde_json::Value::from).as_ref()
-            );
             assert_eq!(genesis.config.chain_id, 134509785776129);
             assert!(!genesis.alloc.is_empty());
+
+            let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+            // Check each fork: the highest active fork can hide missing earlier ones.
+            for &fork in TempoHardfork::VARIANTS {
+                if fork == TempoHardfork::Genesis {
+                    continue;
+                }
+                let activation = match fork {
+                    TempoHardfork::T12 => t12.unwrap_or(0),
+                    TempoHardfork::T13 => t13.unwrap_or(0),
+                    TempoHardfork::T14 => t14.unwrap_or(0),
+                    _ => 0,
+                };
+                let field = format!("{}Time", fork.to_string().to_lowercase());
+                assert_eq!(config[&field], serde_json::json!(activation));
+                for timestamp in [0, activation.saturating_sub(1), activation, u64::MAX] {
+                    assert_eq!(
+                        spec.tempo_fork_activation(fork)
+                            .active_at_timestamp(timestamp),
+                        timestamp >= activation,
+                        "{fork} at {timestamp}"
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn every_tempo_fork_has_an_independent_timestamp_override() {
+        for &overridden in TempoHardfork::VARIANTS {
+            if overridden == TempoHardfork::Genesis {
+                continue;
+            }
+            let flag = format!("--{}-time", overridden.to_string().to_lowercase());
+            let command = GenerateZoneGenesis::try_parse_from([
+                "generate-zone-genesis",
+                "--output",
+                "/tmp/zone",
+                "--chain-id",
+                "134509785776129",
+                "--admin",
+                "0x1000000000000000000000000000000000000001",
+                &flag,
+                "12345",
+            ])
+            .unwrap();
+            let mut genesis = Genesis::default();
+            genesis.config.chain_id = command.chain_id;
+            command.forks.write_to(&mut genesis.config);
+            let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+            for &fork in TempoHardfork::VARIANTS {
+                for timestamp in [0, 12344, 12345] {
+                    assert_eq!(
+                        spec.tempo_fork_activation(fork)
+                            .active_at_timestamp(timestamp),
+                        fork != overridden || timestamp >= 12345,
+                        "{fork} at {timestamp} with {overridden} overridden"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn genesis_writes_explicit_hardfork_profile() {
+        let output = tempfile::tempdir().unwrap();
+        GenerateZoneGenesis::try_parse_from([
+            "generate-zone-genesis",
+            "--output",
+            output.path().to_str().unwrap(),
+            "--chain-id",
+            "134509785776129",
+            "--admin",
+            "0x1000000000000000000000000000000000000001",
+            "--hardfork",
+            "T13",
+            "--t13-time",
+            "100",
+        ])
+        .unwrap()
+        .run()
+        .await
+        .unwrap();
+        let genesis = serde_json::from_slice::<Genesis>(
+            &std::fs::read(output.path().join("genesis.json")).unwrap(),
+        )
+        .unwrap();
+        let config = serde_json::to_value(&genesis.config).unwrap();
+
+        assert_eq!(config["t12Time"], serde_json::json!(0));
+        assert_eq!(config["t13Time"], serde_json::json!(100));
+        assert_eq!(config["t14Time"], serde_json::Value::Null);
+        let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+        assert_eq!(spec.tempo_hardfork_at(99), TempoHardfork::T12);
+        assert_eq!(spec.tempo_hardfork_at(u64::MAX), TempoHardfork::T13);
     }
 }

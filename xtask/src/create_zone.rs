@@ -3,27 +3,25 @@
 #![allow(clippy::too_many_arguments)]
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, address},
+    network::primitives::ReceiptResponse,
+    primitives::Address,
     providers::{Provider, ProviderBuilder},
-    signers::local::PrivateKeySigner,
-    sol_types::SolEvent,
 };
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_chainspec::{cli::TempoHardforkArgs, spec::TEMPO_T0_BASE_FEE};
 use tempo_contracts::precompiles::ITIP403Registry;
-use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use tempo_zone_contracts::{
-    ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
+    MAX_SEQUENCERS, ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
 };
 use zone_primitives::constants::zone_chain_id;
 
 use crate::{
     generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
-    zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only},
+    zone_utils::{MODERATO_ZONE_FACTORY, parse_private_key, write_owner_only},
 };
 
 #[derive(Debug, clap::Parser)]
@@ -41,7 +39,7 @@ pub(crate) struct CreateZone {
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
-    #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     initial_token: Address,
 
     /// Enable account allowlist enforcement. Membership is retained while disabled.
@@ -98,17 +96,9 @@ pub(crate) struct CreateZone {
     #[arg(long, default_value_t = 30_000_000)]
     gas_limit: u64,
 
-    /// T12 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    t12_time: Option<u64>,
-
-    /// T13 activation timestamp inherited from L1. Omit to keep the default schedule.
-    #[arg(long)]
-    t13_time: Option<u64>,
+    #[command(flatten)]
+    forks: TempoHardforkArgs,
 }
-
-/// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
-const MAX_SEQUENCERS: usize = 8;
 
 impl CreateZone {
     fn factory_params(&self) -> ZoneFactory::CreateZoneParams {
@@ -163,14 +153,9 @@ impl CreateZone {
             );
         }
 
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let signer: PrivateKeySigner = key_str.parse()?;
-        let wallet = EthereumWallet::from(signer);
+        let signer = parse_private_key(&self.private_key)?;
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(signer)
             .connect(&self.l1_rpc_url)
             .await?;
 
@@ -245,10 +230,7 @@ impl CreateZone {
             .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
 
         let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
+            .decoded_log::<ZoneFactory::ZoneCreated>()
             .ok_or_else(|| eyre!("no ZoneCreated event in receipt"))?;
 
         let zone_id = event.zoneId;
@@ -315,8 +297,7 @@ impl CreateZone {
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
-            t12_time: self.t12_time,
-            t13_time: self.t13_time,
+            forks: self.forks,
         };
         genesis_cmd.run().await?;
 
@@ -377,6 +358,7 @@ impl CreateZone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::address;
     use clap::Parser;
 
     #[test]
@@ -402,8 +384,7 @@ mod tests {
             private_key: String::new(),
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
-            t12_time: None,
-            t13_time: None,
+            forks: TempoHardforkArgs::default(),
         };
 
         let params = command.factory_params();
@@ -427,9 +408,18 @@ mod tests {
             "0",
             "--t13-time",
             "9223372036854775807",
+            "--t14-time",
+            "18446744073709551615",
         ])
         .unwrap();
-        assert_eq!(command.t12_time, Some(0));
-        assert_eq!(command.t13_time, Some(9223372036854775807));
+        let mut config = alloy::genesis::ChainConfig::default();
+        command.forks.write_to(&mut config);
+        assert_eq!(config.extra_fields["t4Time"], serde_json::json!(0));
+        assert_eq!(config.extra_fields["t12Time"], serde_json::json!(0));
+        assert_eq!(
+            config.extra_fields["t13Time"],
+            serde_json::json!(9223372036854775807u64)
+        );
+        assert_eq!(config.extra_fields["t14Time"], serde_json::json!(u64::MAX));
     }
 }

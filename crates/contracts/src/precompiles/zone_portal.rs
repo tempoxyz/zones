@@ -11,10 +11,6 @@ use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 
-/// Maximum deposits that may remain outstanding in portal.
-pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
-/// Maximum token enablements that may remain outstanding in portal.
-pub const MAX_UNPROCESSED_TOKEN_ENABLEMENTS: usize = 8;
 /// Maximum UTF-8 byte length of each enabled token metadata string.
 pub const MAX_TOKEN_METADATA_BYTES: usize = 31;
 
@@ -607,7 +603,7 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
             ZonePortal::sequencerEncryptionKeyReturn {
                 x: key.x,
                 yParity: key.yParity,
-                pubkey: alloy_signer::utils::public_key_to_address(&verifying_key),
+                pubkey: Address::from_public_key(&verifying_key),
             },
             key.keyIndex,
         ))
@@ -648,10 +644,7 @@ mod tests {
 
         assert_eq!(key.x, expected.x);
         assert_eq!(key.yParity, expected.yParity);
-        assert_eq!(
-            key.pubkey,
-            alloy_signer::utils::public_key_to_address(&verifying_key)
-        );
+        assert_eq!(key.pubkey, Address::from_public_key(&verifying_key));
         assert_eq!(key_index, expected.keyIndex);
         assert!(asserter.read_q().is_empty());
     }

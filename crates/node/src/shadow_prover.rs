@@ -156,7 +156,7 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
                 )
             })?
             .into_iter()
-            .map(|transaction| transaction.inner.into_inner())
+            .map(|transaction| transaction.into_inner())
             .collect::<Vec<_>>();
         verify_transactions_root(
             &transactions,

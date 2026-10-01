@@ -10,9 +10,11 @@ Subcommands currently supported:
 - `generate-zone-genesis`: generates a Zone L2 genesis file.
 - `pause-portal`: pauses new deposits, Zone block production, and L1 withdrawal processing for 30 days.
 
-`create-zone` and `generate-zone-genesis` accept `--t12-time` and `--t13-time`
-to write the parent L1's activation timestamps into Zone genesis. Pass the same
-values used to configure L1; for example, `--t12-time 9223372036854775807
---t13-time 9223372036854775807` keeps both forks disabled for a devnet run.
-Omitting a flag preserves the existing default schedule for that fork. These
-flags configure Zone genesis only; they do not change the parent L1 schedule.
+`create-zone` and `generate-zone-genesis` explicitly write every supported Tempo
+fork (T0 through T14, including T1A/T1B/T1C) into Zone genesis, defaulting each
+activation timestamp to `0`. Override individual timestamps with `--t0-time`,
+`--t1-time`, `--t1a-time`, etc. through `--t14-time` to match the parent L1.
+For example, a T12-only devnet can pass `--hardfork T12`, which writes explicit
+`null`s for T13 and later forks; explicit `--t*-time` flags still take precedence. Omitting a flag
+activates that fork at genesis, even when another fork is delayed explicitly.
+These flags configure Zone genesis only; they do not change the parent L1 schedule.

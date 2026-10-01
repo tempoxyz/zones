@@ -76,11 +76,7 @@ impl MockL1Reader {
     }
 
     pub fn request_count<T: Storable>(&self, block_number: u64, slot: &Slot<T>) -> usize {
-        let expected = (
-            slot.address(),
-            B256::from(slot.slot().to_be_bytes()),
-            block_number,
-        );
+        let expected = (slot.address(), B256::from(slot.slot()), block_number);
         self.storage_requests
             .lock()
             .unwrap()
@@ -192,20 +188,20 @@ impl L1StorageReader for MockL1Reader {
         }
 
         let value = match self.storage.lock().unwrap().get_mut(&block_number) {
-            Some(storage) => storage
-                .sload(account, U256::from_be_bytes(slot.0))
-                .map_err(|err| L1StateError::StorageUnavailable {
+            Some(storage) => storage.sload(account, slot.into()).map_err(|err| {
+                L1StateError::StorageUnavailable {
                     account,
                     slot,
                     block_number,
                     reason: err.to_string(),
-                })?,
+                }
+            })?,
             None => U256::ZERO,
         };
         if value.is_zero() {
             Ok(self.fallback)
         } else {
-            Ok(B256::from(value.to_be_bytes()))
+            Ok(value.into())
         }
     }
 }

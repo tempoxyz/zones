@@ -333,7 +333,7 @@ fn derive_authenticated_withdrawal_nonce(
 }
 
 fn authenticated_withdrawal_derivation_key(encryption_privkey: &k256::SecretKey) -> [u8; 32] {
-    let secret = secret_scalar_bytes(encryption_privkey);
+    let secret = encryption_privkey.to_bytes();
     // Derive a purpose-specific HMAC key first, so the raw ECIES private scalar
     // is not reused directly across the ephemeral-scalar and nonce derivations.
     hmac_sha256(&secret, AUTH_WITHDRAWAL_DERIVATION_KEY_DOMAIN)
@@ -356,13 +356,6 @@ fn authenticated_withdrawal_context(
     msg.extend_from_slice(tx_hash.as_slice());
     msg.extend_from_slice(&fallback_nonce.to_be_bytes());
     msg
-}
-
-fn secret_scalar_bytes(secret_key: &k256::SecretKey) -> [u8; 32] {
-    let repr = secret_key.to_nonzero_scalar().to_repr();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(repr.as_ref());
-    out
 }
 
 /// Decrypt an authenticated-withdrawal `encryptedSender` payload.
@@ -959,13 +952,10 @@ mod tests {
         // Encrypt a 63-byte plaintext (wrong length — should be 64)
         let short_plaintext = [0u8; 63];
         let aes_key = {
-            use k256::{
-                AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint,
-            };
+            use k256::{AffinePoint, ProjectivePoint, Scalar};
             let seq_scalar: Scalar = *f.seq_key.to_nonzero_scalar();
             let shared = AffinePoint::from(ProjectivePoint::from(f.eph_pub) * seq_scalar);
-            let ss_enc = shared.to_encoded_point(true);
-            let ss_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
+            let (ss_x, _) = super::compressed_x_and_parity(&shared);
             let info = super::hkdf_info(&f.portal, &f.key_index, &f.eph_pub_x, &f.sender);
             hkdf_sha256(&ss_x, b"ecies-aes-key", &info)
         };
@@ -990,12 +980,11 @@ mod tests {
         // RFC 4231 Test Case 2
         let key = b"Jefe";
         let data = b"what do ya want for nothing?";
-        let expected =
-            const_hex::decode("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
-                .unwrap();
+        let expected = alloy_primitives::hex!(
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
 
-        let result = hmac_sha256(key, data);
-        assert_eq!(result.as_slice(), expected.as_slice());
+        assert_eq!(hmac_sha256(key, data), expected);
     }
 
     #[test]
