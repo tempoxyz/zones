@@ -2,10 +2,6 @@ variable "VERGEN_GIT_SHA" {
   default = ""
 }
 
-variable "VERGEN_GIT_SHA_SHORT" {
-  default = ""
-}
-
 variable "PROVER_EIF_CONTEXT" {
   default = "./target/tempo-zone-prover-eif"
 }
@@ -58,7 +54,6 @@ target "_common" {
     RUST_PROFILE = "profiling"
     CACHE_FAMILY = "node"
     VERGEN_GIT_SHA = "${VERGEN_GIT_SHA}"
-    VERGEN_GIT_SHA_SHORT = "${VERGEN_GIT_SHA_SHORT}"
   }
   platforms = ["linux/amd64"]
 }
