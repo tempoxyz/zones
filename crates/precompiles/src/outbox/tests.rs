@@ -3,6 +3,7 @@ use super::*;
 use alloy_primitives::{Bytes, address, keccak256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
 use revm::precompile::PrecompileResult;
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     storage::{StorageCtx, StorageKey},
     test_util::TIP20Setup,
@@ -14,7 +15,7 @@ use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 use crate::{
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
     test_utils::{
-        MockL1Reader, TestContext, TestPrecompiles, call_precompile, test_context,
+        MockL1Reader, TestContext, TestPrecompiles, call_precompile, test_context_with_hardfork,
         test_precompiles, test_storage_provider,
     },
     tx_context,
@@ -40,7 +41,11 @@ struct Harness {
 
 impl Harness {
     fn new() -> eyre::Result<Self> {
-        let mut ctx = test_context();
+        Self::new_at(TempoHardfork::T13)
+    }
+
+    fn new_at(spec: TempoHardfork) -> eyre::Result<Self> {
+        let mut ctx = test_context_with_hardfork(spec);
         let token = tempo_precompiles::PATH_USD_ADDRESS;
         let l1 = MockL1Reader::default();
         let sequencer_membership_slot = keccak256((SEQUENCER, portal::slots::ROLE).abi_encode());
@@ -253,6 +258,10 @@ fn assert_revert(result: PrecompileResult, error: impl SolInterface) {
     let output = result.expect("precompile error");
     assert!(output.is_revert());
     assert_eq!(output.bytes, error.abi_encode());
+}
+
+fn assert_static_halt(result: PrecompileResult) {
+    assert!(result.expect("precompile fatal error").is_halt());
 }
 
 #[test]
@@ -853,11 +862,11 @@ fn many_withdrawals_finalize_and_clear_pending_state() -> eyre::Result<()> {
 }
 
 #[test]
-fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    let token = harness.token;
-    assert_revert(
-        harness.call_static(
+fn static_mutation_obeys_parent_fork_and_leaves_no_pending_withdrawal() -> eyre::Result<()> {
+    for spec in [TempoHardfork::T11, TempoHardfork::T12, TempoHardfork::T13] {
+        let mut harness = Harness::new_at(spec)?;
+        let token = harness.token;
+        let result = harness.call_static(
             ALICE,
             ZoneOutboxAbi::requestWithdrawalCall {
                 token,
@@ -870,14 +879,18 @@ fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
                 revealTo: Bytes::new(),
             }
             .abi_encode(),
-        ),
-        ZoneOutboxError::static_call_not_allowed(),
-    );
-    assert!(
-        harness.l1.storage_requests().is_empty(),
-        "static mutation must reach dispatch without portal reads"
-    );
-    assert!(harness.pending()?.is_empty());
+        );
+        if spec.is_t12() {
+            assert_static_halt(result);
+        } else {
+            assert_revert(result, ZoneOutboxError::static_call_not_allowed());
+        }
+        assert!(
+            harness.l1.storage_requests().is_empty(),
+            "static mutation must reach dispatch without portal reads"
+        );
+        assert!(harness.pending()?.is_empty());
+    }
     Ok(())
 }
 
@@ -906,10 +919,7 @@ fn fallback_recipient_nonce_is_private_and_consumed_once_by_inbox() -> eyre::Res
         ),
         ZoneOutboxError::invalid_fallback_recipient(),
     );
-    assert_revert(
-        harness.call_static(ZONE_INBOX_ADDRESS, &calldata),
-        ZoneOutboxError::static_call_not_allowed(),
-    );
+    assert_static_halt(harness.call_static(ZONE_INBOX_ADDRESS, &calldata));
 
     // The failed static call must not consume the mapping entry.
     let output = harness.call(ZONE_INBOX_ADDRESS, &calldata)?;

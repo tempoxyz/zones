@@ -96,6 +96,7 @@ impl CallRules for TIP20Rules {
                 | ITIP20::ITIP20Calls::setNextQuoteToken(_)
                 | ITIP20::ITIP20Calls::completeQuoteTokenUpdate(_)
                 | ITIP20::ITIP20Calls::changeTransferPolicyId(_)
+                | ITIP20::ITIP20Calls::burnAt(_)
                 | ITIP20::ITIP20Calls::burnBlocked(_) => {
                     CallCheck::Revert(Unauthorized {}.abi_encode().into())
                 }
@@ -113,6 +114,7 @@ impl CallRules for TIP20Rules {
                 | ITIP20::ITIP20Calls::PAUSE_ROLE(_)
                 | ITIP20::ITIP20Calls::UNPAUSE_ROLE(_)
                 | ITIP20::ITIP20Calls::ISSUER_ROLE(_)
+                | ITIP20::ITIP20Calls::BURN_AT_ROLE(_)
                 | ITIP20::ITIP20Calls::BURN_BLOCKED_ROLE(_)
                 | ITIP20::ITIP20Calls::approve(_)
                 | ITIP20::ITIP20Calls::permit(_)
@@ -332,6 +334,7 @@ mod tests {
         let account = Address::repeat_byte(0x22);
         let rules = rules();
 
+        assert_allowed(&rules, ITIP20::BURN_AT_ROLECall {}, caller);
         assert_allowed(
             &rules,
             IRolesAuth::hasRoleCall {
@@ -437,6 +440,14 @@ mod tests {
             caller,
         );
         assert_unauthorized(&rules, ITIP20::completeQuoteTokenUpdateCall {}, caller);
+        assert_unauthorized(
+            &rules,
+            ITIP20::burnAtCall {
+                from: account,
+                amount: U256::ONE,
+            },
+            caller,
+        );
         assert_unauthorized(
             &rules,
             ITIP20::burnBlockedCall {
