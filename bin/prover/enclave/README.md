@@ -4,6 +4,46 @@
 parent instance generates a complete `BatchWitness` and sends it to the enclave over `AF_VSOCK`;
 the enclave performs no RPC or filesystem access.
 
+## Architecture
+
+```text
+sequencer ──TCP :5000──▶ host container ──vsock :5000──▶ enclave
+                         (tempo-vsock-proxy)              (tempo-zone-prover-enclave)
+                                                               │
+sequencer ◀──────────────── proofBundle ◀──────────────────────┘
+    │
+    └──▶ L1 portal ──▶ zone verifier (checks the attestation document)
+```
+
+1. The sequencer builds a `BatchWitness` and sends it to the prover endpoint configured for the
+   live L1 hardfork.
+2. The host container runs `nitro-cli` to launch the enclave and `tempo-vsock-proxy` to forward TCP
+   connections to the enclave's vsock port. It does not inspect or change the traffic.
+3. The enclave replays the batch through the SPF, binds the batch digest into an NSM attestation
+   document, and returns both in a `proofBundle`.
+4. From T13, the sequencer checks the proof against the L1 verifier before submitting the batch.
+
+Related tools:
+
+- [`tempo-zone-prover-utils`](../utils/README.md) generates witnesses, replays submitted batches,
+  sends witnesses to a prover, and verifies saved proofs against L1. It is the main operator tool.
+- [`tempo-vsock-proxy`](../vsock-proxy/README.md) is the host-side TCP-to-vsock forwarder.
+
+## Glossary
+
+- **EIF** (Enclave Image File): the bootable enclave image built from the enclave Docker image by
+  `nitro-cli build-enclave`.
+- **NSM** (Nitro Secure Module): the enclave's device at `/dev/nsm` that signs attestation documents.
+- **Attestation document**: a COSE/CBOR document signed by AWS's Nitro PKI. It contains the
+  enclave's PCRs and the caller-provided `user_data`, which here is the batch digest.
+- **CID** (context identifier): the vsock address of an enclave, set with `ENCLAVE_CID`.
+- **PCR0**: hash of the enclave image file.
+- **PCR1**: hash of the Linux kernel and bootstrap.
+- **PCR2**: hash of the application.
+
+See AWS's [PCR definitions](https://docs.aws.amazon.com/enclaves/latest/user/set-up-attestation.html)
+for the full list.
+
 ## Protocol
 
 The server listens on AF_VSOCK port `5000` by default, or on TCP port `5000` when `--use-tcp` is
@@ -43,8 +83,23 @@ binary still requires the Nitro Secure Module after a successful SPF replay, so 
 outside an enclave ends with `attestation_unavailable` rather than an unattested success response.
 Set `SPF_TEMPO_GENESIS` or pass `--tempo-genesis` with a directory containing trusted Tempo genesis
 JSON files. Only files with a `.json` extension are loaded, in filename order; other files are
-ignored. Each custom chain ID must be unique and cannot
-override a built-in Tempo network.
+ignored. Each custom chain ID must be unique and cannot override a built-in Tempo network.
+
+## Verifier configurations
+
+Each settled batch names the verifier configuration it uses:
+
+| Config | Name | Proof |
+|---|---|---|
+| `0x01` | Nitro | The raw attestation document from the enclave |
+| `0x02` | NoProof | Empty |
+
+NoProof is a temporary fallback that keeps settlement moving when no Nitro proof is available. The
+sequencer uses it when proving is not enabled, and also when a proving attempt fails. Failures
+include an unreachable prover, an error response, or a proof that fails the L1 verifier check
+before submission. A fallback after a failed attempt logs ``Settling batch with the `NoProof`
+verifier fallback`` and increments `tempo_zone_monitor_batch_no_proof_fallback_total`. Whether L1
+accepts a NoProof batch is decided by L1 policy, not by the sequencer.
 
 ## Images and EIF
 
