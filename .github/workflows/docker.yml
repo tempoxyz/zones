@@ -120,7 +120,7 @@ jobs:
       image: ${{ steps.toolchain.outputs.image }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@e8383309ef9889168bdfb1e678e9b01903b6f51f # main
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -145,11 +145,11 @@ jobs:
 
       - name: Set up Depot
         if: inputs.eif_builder_image == ''
-        uses: tempoxyz/gh-actions/vendor/depot/setup-action@b61457a6d6d06485b118a3c0e9637c94186c8c5a # main
+        uses: tempoxyz/gh-actions/vendor/depot/setup-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
 
       - name: Log in to toolchain registry
         if: inputs.eif_builder_image == ''
-        uses: tempoxyz/gh-actions/vendor/docker/login-action@b61457a6d6d06485b118a3c0e9637c94186c8c5a # main
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
