@@ -37,7 +37,7 @@ contract MockVerifier is IVerifier {
         external
         returns (bool)
     {
-        emit Verified();
+        if (shouldAccept) emit Verified();
         return shouldAccept;
     }
 
