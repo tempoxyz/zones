@@ -52,9 +52,11 @@ Tempo contains a bounded dependency-call adapter and transaction-owned reservati
 scope. Its tests exercise caller/origin preservation, static context, delegated
 code, execution/state gas, rollback, recoverable dependency failures, and
 non-replenishment across native roots. T15 adds native portal deposit dispatch
-and post-execution payment admission only for verified, top-level registered
-portals. Native portal withdrawal/settlement, Earn vault dispatch, and complete
-payment admission remain open; the current slice does not pass E02/E03.
+and verified top-level payment admission. It also bounds canonical AA
+`submitBatch`, checks portal and implementation identity, and executes the
+existing implementation in a paid EVM2 delegate frame. Native withdrawal,
+Earn vault dispatch, and complete payment admission remain open; this slice
+does not pass E02/E03.
 
 Tempo and Zones generate the complete portal bindings from one ABI definition,
 including historical overloads, while Zones retains its local RPC helpers.
@@ -75,6 +77,12 @@ real native child calls, private Zone credit, NoProof settlement, and one
 single-transaction block with zero general-lane gas. It does not establish
 private Earn, native withdrawal, real proofs, fork migration, or sustained
 combined throughput.
+
+The [fork-boundary settlement evidence](evidence/EVM2_T15_SETTLEMENT_FORK.md)
+records a preexisting Zone balance across scheduled T15 activation, post-fork
+native deposit and AA batch settlement, reconciled backing, and three isolated
+payment-lane blocks with zero general gas. Its verifier mode is NoProof; it
+does not establish real proof security or full migration.
 
 ## Protocol requirements
 
@@ -194,9 +202,10 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | --- | --- | --- |
 | Repository/upstream inventory | Started | Tempo #7871, Zones #1463, TIP-1084 #6559; local Earn invariants inspected |
 | Compatible EVM2 baseline | Partial | Real bridge receipts and backing reconciliation; NoProof mode, no scheduled native activation |
-| Shared native context and paid child work | Partial | Tempo T15 native portal deposit uses paid TIP-20 child calls; withdrawals, settlement, vault and full admission remain open |
+| Shared native context and paid child work | Partial | Tempo T15 native deposit and bounded delegate-frame settlement use paid child calls; withdrawals, vault and full admission remain open |
 | Shared portal ABI | Implemented groundwork | Tempo ABI macro reused by Zones; historical selector/event tests |
 | Native reentry provider safety | Reproduced finding fixed | EVM2 #523 Miri before/after; downstream shared dispatch aligned |
 | T15 native deposit smoke | Partial | [Real native trace, private credit, backing, NoProof batch, and one zero-general-gas deposit block](evidence/EVM2_T15_NATIVE_DEPOSIT.md); Zone created after fork |
+| T15 existing-Zone activation smoke | Partial | [Pre-fork private balance, scheduled fork, post-fork native deposit and two payment-lane batches](evidence/EVM2_T15_SETTLEMENT_FORK.md); NoProof, no vault or withdrawal migration |
 | E01–I01 | Open | No passing combined acceptance result recorded |
-| Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642; full Tempo/Zones implementation PRs open |
+| Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642, Tempo #8076, Zones #1637, Earn #354; full implementation open |

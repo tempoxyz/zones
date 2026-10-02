@@ -84,3 +84,18 @@ revision in their native-payment branches.
 - **Remaining:** test delegated candidates and saturation, cover AA bundles
   without exposing arbitrary child execution, and review
   all pool and prover classifiers. The finding is not closed.
+
+## F004: direct private TIP-20 transfers are disabled on Zones
+
+- **Severity:** delivery blocker for private transfer and combined Earn/Zone flows.
+- **Trigger:** after the T15 fork-boundary run credited 2,000,000 private pathUSD,
+  send a signed `transfer(address,uint256)` from the funded account on Zone 1.
+  Transaction `0xb8781785fe41ef25e0dcaf1f28d8b4d2a74fcdfbdd549c4c93efbcf15906547b`
+  reverted with `Unauthorized()`; no value moved.
+- **Cause:** `TIP20Rules::admit` rejects every transfer selector during the
+  initial permissioned Zone phase. The upstream token transfer path and fixed
+  gas wrapper exist, but this gate prevents user-to-user movement.
+- **Required fix:** activate scoped, privacy-safe transfer admission at the
+  sequenced Zone fork, retain policy checks and fixed gas, and verify balances,
+  allowance failures, gas indistinguishability, and later batch settlement on
+  a real devnet. This finding remains open.
