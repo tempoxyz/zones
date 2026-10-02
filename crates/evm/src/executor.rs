@@ -318,7 +318,7 @@ mod tests {
         ZoneBlockPhase, ZoneTransactionKind,
     };
 
-    use alloy_consensus::{Header, Sealable as _, Signed, TxLegacy};
+    use alloy_consensus::{Header, Sealable as _, SignableTransaction as _, TxLegacy};
     use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor, eth::EthBlockExecutionCtx};
     use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256};
     use alloy_sol_types::{SolCall, SolEvent};
@@ -356,14 +356,14 @@ mod tests {
     use crate::ZoneEvmFactory;
 
     fn system_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
-        TempoTxEnvelope::Legacy(Signed::new_unhashed(
+        TempoTxEnvelope::Legacy(
             TxLegacy {
                 to: to.into(),
                 input,
                 ..Default::default()
-            },
-            TEMPO_SYSTEM_TX_SIGNATURE,
-        ))
+            }
+            .into_signed(TEMPO_SYSTEM_TX_SIGNATURE),
+        )
     }
 
     fn advance_tempo_tx() -> TempoTxEnvelope {
@@ -409,14 +409,14 @@ mod tests {
     }
 
     fn ordinary_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
-        TempoTxEnvelope::Legacy(Signed::new_unhashed(
+        TempoTxEnvelope::Legacy(
             TxLegacy {
                 to: to.into(),
                 input,
                 ..Default::default()
-            },
-            Signature::test_signature(),
-        ))
+            }
+            .into_signed(Signature::test_signature()),
+        )
     }
 
     fn subblock_tx() -> TempoTxEnvelope {

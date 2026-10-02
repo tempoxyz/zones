@@ -74,7 +74,7 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     pub(crate) fn may_broadcast_block(&self) -> bool {
-        self.authority.retained_leaders.contains(self.local)
+        self.is_retained_leader(self.local)
     }
 
     pub(crate) fn am_i_retained_leader(&self) -> bool {
@@ -94,7 +94,7 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     pub(crate) fn may_broadcast_settlement_proposal(&self) -> bool {
-        self.may_broadcast_block()
+        self.am_i_retained_leader()
     }
 
     pub(crate) fn block_recipients(&self) -> Vec<PublicKey> {
@@ -117,7 +117,7 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     pub(crate) fn may_accept_settlement_signature(&self, peer: &PublicKey) -> bool {
-        self.is_remote_quorum_peer(peer) && self.am_i_retained_leader()
+        self.may_accept_backfill_response(peer) && self.am_i_retained_leader()
     }
 
     pub(crate) fn preferred_backfill_leader(&self) -> Option<PublicKey> {
@@ -126,7 +126,7 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     pub(crate) fn backfill_candidates(&self) -> Vec<PublicKey> {
-        self.membership.other_quorum_peers(self.local)
+        self.other_quorum_peers()
     }
 
     pub(crate) fn is_remote_member(&self, peer: &PublicKey) -> bool {
@@ -146,11 +146,11 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     pub(crate) fn transaction_recipients(&self) -> Vec<PublicKey> {
-        self.membership.other_quorum_peers(self.local)
+        self.other_quorum_peers()
     }
 
     pub(crate) fn may_accept_transaction(&self, peer: &PublicKey) -> bool {
-        self.is_remote_peer(peer) && self.membership.is_quorum_member(self.local)
+        self.is_remote_member(peer) && self.am_i_quorum_member()
     }
 
     fn is_retained_leader(&self, peer: &PublicKey) -> bool {
@@ -158,7 +158,7 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     fn is_remote_retained_leader(&self, peer: &PublicKey) -> bool {
-        peer != self.local && self.membership.contains(peer) && self.is_retained_leader(peer)
+        self.is_remote_peer(peer) && self.is_retained_leader(peer)
     }
 
     pub(crate) fn is_remote_peer(&self, peer: &PublicKey) -> bool {
@@ -166,7 +166,7 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     pub(crate) fn is_remote_quorum_peer(&self, peer: &PublicKey) -> bool {
-        self.is_remote_peer(peer) && self.membership.is_quorum_member(peer)
+        self.is_remote_member(peer) && self.membership.is_quorum_member(peer)
     }
 }
 
@@ -227,7 +227,7 @@ mod tests {
 
         let leader_key = key(1);
         let leader = RoutingPolicy::new(&leader_key, &membership, &schedule);
-        assert!(leader.may_broadcast_block());
+        assert!(leader.am_i_retained_leader());
         assert_eq!(
             leader
                 .block_recipients()
@@ -239,7 +239,7 @@ mod tests {
 
         let follower_key = key(3);
         let follower = RoutingPolicy::new(&follower_key, &membership, &schedule);
-        assert!(!follower.may_broadcast_block());
+        assert!(!follower.am_i_retained_leader());
         assert_eq!(follower.preferred_backfill_leader(), Some(key(2)));
         assert_eq!(
             follower
@@ -262,7 +262,7 @@ mod tests {
         let schedule = manifest.leadership_schedule();
         let local = key(2);
         let policy = RoutingPolicy::new(&local, &membership, &schedule);
-        assert!(!policy.may_broadcast_block());
+        assert!(!policy.am_i_retained_leader());
         assert_eq!(policy.transaction_forwarding_status(), None);
         assert_eq!(policy.preferred_backfill_leader(), None);
     }
@@ -283,7 +283,7 @@ mod tests {
             .unwrap();
 
         let recovery_policy = RoutingPolicy::new(&recovery, &membership, &schedule);
-        assert!(recovery_policy.may_broadcast_block());
+        assert!(recovery_policy.am_i_retained_leader());
         assert!(recovery_policy.may_broadcast_settlement_proposal());
         assert!(
             recovery_policy.may_accept_settlement_signature(&portal_successor),
@@ -295,7 +295,7 @@ mod tests {
 
         schedule.record_applied_anchor(60);
         let completed_recovery = RoutingPolicy::new(&recovery, &membership, &schedule);
-        assert!(!completed_recovery.may_broadcast_block());
+        assert!(!completed_recovery.am_i_retained_leader());
         let follower = RoutingPolicy::new(&portal_successor, &membership, &schedule);
         assert!(!follower.may_send_settlement_signature(&recovery));
     }

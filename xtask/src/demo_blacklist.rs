@@ -70,9 +70,7 @@ use tempo_contracts::precompiles::{
     IRolesAuth, ITIP20 as TIP20Token, ITIP20Factory as TIP20Factory,
     ITIP403Registry as TIP403Registry,
 };
-use tempo_precompiles::{
-    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
-};
+use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use tempo_zone_contracts::{
     DepositPayload, IZoneInbox, IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
@@ -239,7 +237,10 @@ impl DemoBlacklist {
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
 
         let roles = IRolesAuth::new(token_addr, &l1);
-        let receipt = roles.grantRole(ISSUER_ROLE, admin).send_sync().await?;
+        let receipt = roles
+            .grantRole(tempo_precompiles::tip20::TIP20Token::issuer_role(), admin)
+            .send_sync()
+            .await?;
         check(&receipt, "grantRole")?;
         println!("  ISSUER_ROLE granted to {admin}");
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);

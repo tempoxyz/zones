@@ -25,7 +25,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
-    tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
+    tip20::{ITIP20, TIP20Error, TIP20Token},
     tip403_registry::TIP403Registry,
 };
 use tempo_precompiles_macros::contract;
@@ -156,7 +156,7 @@ impl ZoneInbox {
 
         // Step 2: Process deposits and build hash chain
         let tempo_block_hash = tempo_state.tempo_block_hash()?;
-        let mut current_hash = self.processed_deposit_queue_hash.read()?;
+        let mut current_hash = self.processed_deposit_queue_hash()?;
         let mut decryptions = call.decryptions.into_iter();
         let mut outbox = ZoneOutbox::new();
 
@@ -206,7 +206,7 @@ impl ZoneInbox {
 
         // Step 4: Update state
         self.processed_deposit_queue_hash.write(current_hash)?;
-        let previous_number = self.processed_deposit_number.read()?;
+        let previous_number = self.processed_deposit_number()?;
         let processed_number = previous_number
             .checked_add(deposit_count)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
@@ -265,8 +265,8 @@ impl ZoneInbox {
                 PATH_USD_ADDRESS,
                 ZONE_INBOX_ADDRESS,
             )?;
-            token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
-            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
+            token.grant_role_internal(ZONE_INBOX_ADDRESS, TIP20Token::issuer_role())?;
+            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, TIP20Token::issuer_role())?;
             policy_registry.token_transfer_policies[enabled.token].write(l1_policy)?;
 
             self.emit_event(enabled.enabled_event())?;

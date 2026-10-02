@@ -630,18 +630,17 @@ mod tests {
     }
 
     fn anchor_log(number: u64) -> Log {
-        Log {
-            address: ZONE_INBOX_ADDRESS,
-            data: IZoneInbox::TempoAdvanced_1 {
+        event_log(
+            ZONE_INBOX_ADDRESS,
+            IZoneInbox::TempoAdvanced_1 {
                 tempoBlockHash: B256::repeat_byte(0xaa),
                 tempoBlockNumber: number,
                 depositsProcessed: U256::from(2),
                 newProcessedDepositQueueHash: B256::repeat_byte(0xbb),
                 lastProcessedDepositNumber: 3,
                 lastProcessedEnabledTokenCount: 4,
-            }
-            .encode_log_data(),
-        }
+            },
+        )
     }
 
     fn receipt(logs: Vec<Log>) -> Receipt {
@@ -1102,12 +1101,7 @@ mod tests {
             address: Address::repeat_byte(9),
             data: anchor.data.clone(),
         };
-        let receipt = Receipt {
-            tx_type: TxType::Legacy,
-            success: true,
-            cumulative_gas_used: 0,
-            logs: vec![noise, anchor],
-        };
+        let receipt = receipt(vec![noise, anchor]);
         let tx = transaction();
         let events = collect(
             std::slice::from_ref(&tx),
@@ -1153,22 +1147,17 @@ mod tests {
                 ),
             ],
         };
-        let successful = Receipt {
-            tx_type: TxType::Legacy,
-            success: true,
-            cumulative_gas_used: 0,
-            logs: vec![
-                anchor_log(7),
-                event_log(
-                    token,
-                    ITIP20::Transfer {
-                        from: successful_fee.from,
-                        to: successful_fee.to,
-                        amount: successful_fee.amount,
-                    },
-                ),
-            ],
-        };
+        let successful = receipt(vec![
+            anchor_log(7),
+            event_log(
+                token,
+                ITIP20::Transfer {
+                    from: successful_fee.from,
+                    to: successful_fee.to,
+                    amount: successful_fee.amount,
+                },
+            ),
+        ]);
         let events = collect(
             &[transaction(), transaction()],
             &[failed, successful],

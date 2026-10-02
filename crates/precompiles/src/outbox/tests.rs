@@ -108,7 +108,7 @@ impl Harness {
     }
 
     fn call(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {
-        self.call_inner(caller, caller, data, true, false)
+        self.call_with_fee_payer(caller, caller, data)
     }
 
     fn call_with_fee_payer(

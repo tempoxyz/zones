@@ -163,8 +163,7 @@ mod tests {
         storage::{Handler, StorageCtx},
         test_util::TIP20Setup,
         tip20::{
-            IRolesAuth, ISSUER_ROLE, ITIP20,
-            ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token,
+            IRolesAuth, ITIP20, ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token,
         },
         zone_factory::ZonePortalStorage as ZonePortal,
     };
@@ -348,13 +347,15 @@ mod tests {
             &rules,
             IRolesAuth::hasRoleCall {
                 account,
-                role: ISSUER_ROLE,
+                role: TIP20Token::issuer_role(),
             },
             caller,
         );
         assert_allowed(
             &rules,
-            IRolesAuth::getRoleAdminCall { role: ISSUER_ROLE },
+            IRolesAuth::getRoleAdminCall {
+                role: TIP20Token::issuer_role(),
+            },
             caller,
         );
     }
@@ -461,7 +462,7 @@ mod tests {
     fn role_mutations_are_disallowed() {
         let caller = Address::repeat_byte(0x11);
         let account = Address::repeat_byte(0x22);
-        let role = ISSUER_ROLE;
+        let role = TIP20Token::issuer_role();
         let rules = rules();
 
         assert_unauthorized(&rules, IRolesAuth::grantRoleCall { role, account }, caller);

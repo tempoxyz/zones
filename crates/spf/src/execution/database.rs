@@ -108,7 +108,7 @@ impl WitnessDatabase {
 
             let storage_entry = self.storage.entry(*address).or_default();
             for (slot, value) in account.storage.iter() {
-                storage_entry.insert(*slot, value.present_value);
+                storage_entry.insert(*slot, value.present_value());
             }
         }
 

@@ -121,7 +121,7 @@ impl VerifyClosedLoop {
             .wrap_err("failed reading ZonePortal admin")?;
         let portal_admin_code = provider
             .get_code_at(portal_admin)
-            .block_id(snapshot_block_id)
+            .number(snapshot_block)
             .await
             .wrap_err("failed reading ZonePortal admin bytecode")?;
 

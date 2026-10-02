@@ -10,7 +10,7 @@ use tempo_contracts::precompiles::{
     IRolesAuth, IStablecoinDEX as StablecoinDEX, ITIP20 as TIP20Token,
     ITIP20Factory as TIP20Factory,
 };
-use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
+use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS};
 use tempo_zone_contracts::{
     DepositPayload, IZoneOutbox, SwapAndDepositRouterCallback, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
@@ -460,7 +460,7 @@ async fn configure_and_mint_demo_token<P: Provider<TempoNetwork>>(
     check(&receipt, "setSupplyCap")?;
 
     let receipt = IRolesAuth::new(token, l1)
-        .grantRole(ISSUER_ROLE, admin)
+        .grantRole(tempo_precompiles::tip20::TIP20Token::issuer_role(), admin)
         .send_sync()
         .await
         .wrap_err("grantRole failed")?;

@@ -1121,7 +1121,7 @@ where
         .ok_or_else(|| eyre::eyre!("forced recovery Tempo anchor overflow"))?;
 
     let recovery_portal_epoch = if recovery_anchor == snapshot_anchor {
-        portal_leadership.epoch
+        portal_leadership.epoch()
     } else {
         ZonePortal::new(portal_address, l1_provider)
             .leaderEpoch()
@@ -1138,7 +1138,7 @@ where
         .checked_add(1)
         .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
 
-    if portal_leadership.epoch >= recovery_epoch {
+    if portal_leadership.epoch() >= recovery_epoch {
         warn!(
             target: "reth::cli",
             leader = %recovery.leader(),
@@ -1146,8 +1146,8 @@ where
             recovery_zone_height,
             recovery_zone_hash = %recovery.recovery_block_hash(),
             snapshot_anchor,
-            portal_epoch = portal_leadership.epoch,
-            portal_activation_tempo_block = portal_leadership.activation_tempo_block,
+            portal_epoch = portal_leadership.epoch(),
+            portal_activation_tempo_block = portal_leadership.activation_tempo_block(),
             "Skipping completed manifest forced recovery; remove the stale directive"
         );
         metrics::counter!("zone_forced_recovery_directives_total", "result" => "completed")
@@ -1189,7 +1189,7 @@ async fn seed_leadership_schedule(
     } else {
         l1_provider
             .get_code_at(portal_address)
-            .block_id(block_id)
+            .number(snapshot_anchor)
             .await
             .map_err(|err| {
                 eyre::eyre!(
@@ -1488,7 +1488,7 @@ where
         let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
         let portal_code = l1_provider
             .get_code_at(portal)
-            .block_id(block_id)
+            .number(block_number)
             .await
             .map_err(|err| {
                 eyre::eyre!(
@@ -1543,7 +1543,7 @@ where
         let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
         let portal_code = l1_provider
             .get_code_at(self.portal_address)
-            .block_id(block_id)
+            .number(block_number)
             .await?;
         if portal_code.is_empty() {
             return Ok(());
@@ -2107,16 +2107,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Signed, TxEip1559};
+    use alloy_consensus::{SignableTransaction as _, TxEip1559};
     use alloy_primitives::{Bytes, Signature, TxKind, U256, address};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
-    use reth_primitives_traits::Recovered;
+    use reth_primitives_traits::SignedTransaction;
     use tempo_primitives::transaction::{Call, TempoTransaction};
     use zone_chainspec::tempo_chain_spec_for_l1;
 
     fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
-        TempoPooledTransaction::new(Recovered::new_unchecked(envelope, sender))
+        TempoPooledTransaction::new(SignedTransaction::with_signer(envelope, sender))
     }
 
     fn aa_transaction(sender: Address, calls: Vec<Call>) -> TempoPooledTransaction {
@@ -2229,9 +2229,9 @@ mod tests {
         let restart_schedule = |snapshot_anchor| {
             let portal = LeadershipState::new(1, portal_leader.clone(), 0);
             let schedule = LeadershipSchedule::seeded(LeadershipState::new(
-                portal.epoch,
+                portal.epoch(),
                 portal_leader.clone(),
-                portal.activation_tempo_block,
+                portal.activation_tempo_block(),
             ));
             schedule.record_applied_anchor(snapshot_anchor);
             schedule
@@ -2263,13 +2263,13 @@ mod tests {
     #[test]
     fn pool_policy_allows_allowlisted_plain_create() {
         let sender = Address::repeat_byte(0x11);
-        let envelope = TempoTxEnvelope::Eip1559(Signed::new_unhashed(
+        let envelope = TempoTxEnvelope::Eip1559(
             TxEip1559 {
                 to: TxKind::Create,
                 ..Default::default()
-            },
-            Signature::test_signature(),
-        ));
+            }
+            .into_signed(Signature::test_signature()),
+        );
         let transaction = pooled_transaction(envelope, sender);
 
         let err = zone_evm::validate_transaction(transaction.tx_env(), &[]).unwrap_err();

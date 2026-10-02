@@ -30,7 +30,7 @@ use tempo_precompiles::{
     receive_policy_guard::ReceivePolicyGuard,
     stablecoin_dex::StablecoinDEX,
     storage_credits::StorageCredits,
-    tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
+    tip20::{ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
 };
@@ -318,7 +318,7 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
     ensure!(
         !provider
             .get_code_at(portal)
-            .block_id(finalized_block_id)
+            .number(finalized_block)
             .await
             .wrap_err_with(|| {
                 format!(
@@ -449,11 +449,11 @@ fn create_path_usd_token() -> tempo_precompiles::error::Result<()> {
 
     let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
     // Allow address(0) to mint (system transactions use sender=0)
-    token.grant_role_internal(Address::ZERO, ISSUER_ROLE)?;
+    token.grant_role_internal(Address::ZERO, TIP20Token::issuer_role())?;
     // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
-    token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
+    token.grant_role_internal(ZONE_INBOX_ADDRESS, TIP20Token::issuer_role())?;
     // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
-    token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
+    token.grant_role_internal(ZONE_OUTBOX_ADDRESS, TIP20Token::issuer_role())?;
 
     // Set a large supply cap
     token.set_supply_cap(

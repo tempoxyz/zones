@@ -21,7 +21,7 @@ use std::time::Duration;
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
 use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP403Registry};
 use tempo_precompiles::{
-    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
+    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::TIP20Token,
     tip403_registry::AuthRole,
 };
 use tempo_primitives::transaction::Call;
@@ -424,7 +424,7 @@ impl EarnZoneFixture {
         let provider = l1.dev_provider();
         let authority_contract = DemoTokenAuthority::new(authority, &provider);
         let receipt = IRolesAuth::new(PATH_USD_ADDRESS, &provider)
-            .grantRole(ISSUER_ROLE, authority)
+            .grantRole(TIP20Token::issuer_role(), authority)
             .send()
             .await?
             .get_receipt()
@@ -432,7 +432,7 @@ impl EarnZoneFixture {
         eyre::ensure!(receipt.status(), "granting reserve issuer role failed");
         for token in [vault_asset, alternate_asset] {
             let receipt = IRolesAuth::new(token, &provider)
-                .grantRole(ISSUER_ROLE, authority)
+                .grantRole(TIP20Token::issuer_role(), authority)
                 .send()
                 .await?
                 .get_receipt()

@@ -722,13 +722,13 @@ fn validate_live_block_sender(
         return Ok(());
     };
     match schedule.leader_for(anchor_number) {
-        Some(record) if &record.leader == sender => Ok(()),
+        Some(record) if record.leader() == sender => Ok(()),
         Some(record) => {
             eyre::bail!(
                 "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
                  the schedule assigns that anchor to {} (epoch {})",
                 record.leader,
-                record.epoch,
+                record.epoch(),
             );
         }
         None => {
@@ -1042,6 +1042,7 @@ fn validate_block_timestamp(timestamp_millis: u64, now: SystemTime) -> eyre::Res
 mod tests {
     use std::time::Duration;
 
+    use alloy_consensus::SignableTransaction as _;
     use alloy_eips::NumHash;
     use alloy_primitives::{Address, B256};
     use tokio_util::sync;
@@ -1053,7 +1054,7 @@ mod tests {
     #[test]
     fn decodes_advance_tempo_header_from_first_system_tx() {
         use alloy_consensus::BlockHeader as _;
-        use reth_primitives_traits::{SealedBlock, SealedHeader};
+        use reth_primitives_traits::SealedHeader;
         use tempo_primitives::{Block, TempoHeader};
 
         let l1_header = TempoHeader {
@@ -1072,7 +1073,7 @@ mod tests {
             follows_checkpoint_blocks: false,
         };
         let tx = zone_payload::build_advance_tempo_tx(&prepared, 1337);
-        let block = SealedBlock::seal_slow(Block {
+        let block = reth_primitives_traits::Block::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
                 transactions: vec![tx.into_inner()],
@@ -1089,10 +1090,9 @@ mod tests {
 
     #[test]
     fn rejects_advance_tempo_sent_to_wrong_contract() {
-        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_consensus::TxLegacy;
         use alloy_primitives::{Address, U256};
         use alloy_sol_types::SolCall as _;
-        use reth_primitives_traits::SealedBlock;
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
         };
@@ -1113,13 +1113,12 @@ mod tests {
             value: U256::ZERO,
             input: calldata.into(),
         };
-        let block = SealedBlock::seal_slow(Block {
+        let block = reth_primitives_traits::Block::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
-                transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                    tx,
-                    TEMPO_SYSTEM_TX_SIGNATURE,
-                ))],
+                transactions: vec![TempoTxEnvelope::Legacy(
+                    tx.into_signed(TEMPO_SYSTEM_TX_SIGNATURE),
+                )],
                 ommers: vec![],
                 withdrawals: None,
             },
@@ -1131,10 +1130,9 @@ mod tests {
 
     #[test]
     fn rejects_block_without_advance_tempo() {
-        use reth_primitives_traits::SealedBlock;
         use tempo_primitives::{Block, TempoHeader};
 
-        let block = SealedBlock::seal_slow(Block {
+        let block = reth_primitives_traits::Block::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
                 transactions: vec![],
@@ -1149,9 +1147,8 @@ mod tests {
 
     #[test]
     fn rejects_non_system_advance_tempo_transaction() {
-        use alloy_consensus::{Signed, TxLegacy};
         use alloy_primitives::Signature;
-        use reth_primitives_traits::{SealedBlock, SealedHeader};
+        use reth_primitives_traits::SealedHeader;
         use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 
         let prepared = zone_l1::PreparedL1Block {
@@ -1166,13 +1163,15 @@ mod tests {
         else {
             unreachable!("advanceTempo builder must produce a legacy transaction")
         };
-        let block = SealedBlock::seal_slow(Block {
+        let block = reth_primitives_traits::Block::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
-                transactions: vec![TempoTxEnvelope::Legacy(Signed::<TxLegacy>::new_unhashed(
-                    system_tx.tx().clone(),
-                    Signature::test_signature(),
-                ))],
+                transactions: vec![TempoTxEnvelope::Legacy(
+                    system_tx
+                        .tx()
+                        .clone()
+                        .into_signed(Signature::test_signature()),
+                )],
                 ommers: vec![],
                 withdrawals: None,
             },
@@ -1184,9 +1183,8 @@ mod tests {
 
     #[test]
     fn rejects_malformed_advance_tempo_calldata() {
-        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_consensus::TxLegacy;
         use alloy_primitives::{Bytes, U256};
-        use reth_primitives_traits::SealedBlock;
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
         };
@@ -1197,13 +1195,12 @@ mod tests {
             input: Bytes::from_static(b"not advanceTempo calldata"),
             ..Default::default()
         };
-        let block = SealedBlock::seal_slow(Block {
+        let block = reth_primitives_traits::Block::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
-                transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                    tx,
-                    TEMPO_SYSTEM_TX_SIGNATURE,
-                ))],
+                transactions: vec![TempoTxEnvelope::Legacy(
+                    tx.into_signed(TEMPO_SYSTEM_TX_SIGNATURE),
+                )],
                 ommers: vec![],
                 withdrawals: None,
             },
@@ -1219,10 +1216,9 @@ mod tests {
 
     #[test]
     fn rejects_malformed_or_trailing_advance_tempo_header_rlp() {
-        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_consensus::TxLegacy;
         use alloy_primitives::{Bytes, U256};
         use alloy_sol_types::SolCall as _;
-        use reth_primitives_traits::SealedBlock;
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
         };
@@ -1241,13 +1237,12 @@ mod tests {
                 input: calldata.into(),
                 ..Default::default()
             };
-            SealedBlock::seal_slow(Block {
+            reth_primitives_traits::Block::seal_slow(Block {
                 header: TempoHeader::default(),
                 body: alloy_consensus::BlockBody {
-                    transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                        tx,
-                        TEMPO_SYSTEM_TX_SIGNATURE,
-                    ))],
+                    transactions: vec![TempoTxEnvelope::Legacy(
+                        tx.into_signed(TEMPO_SYSTEM_TX_SIGNATURE),
+                    )],
                     ommers: vec![],
                     withdrawals: None,
                 },

@@ -53,6 +53,7 @@ use tempo_precompiles::{
     storage::{
         Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
     },
+    tip20::TIP20Token,
     tip403_registry::{
         ALLOW_ALL_POLICY_ID, AuthRole, CompoundPolicyData as RawCompoundPolicyData, PolicyData,
         PolicyType, TIP403Registry, tip403_registry_slots,
@@ -2454,8 +2455,8 @@ impl L1TestNode {
                 ephemeralPubkeyX: enc.eph_pub_x,
                 ephemeralPubkeyYParity: enc.eph_pub_y_parity,
                 ciphertext: enc.ciphertext.into(),
-                nonce: alloy_primitives::FixedBytes(enc.nonce),
-                tag: alloy_primitives::FixedBytes(enc.tag),
+                nonce: alloy_primitives::FixedBytes::new(enc.nonce),
+                tag: alloy_primitives::FixedBytes::new(enc.tag),
             },
         ))
     }
@@ -2495,13 +2496,12 @@ impl L1TestNode {
         amount: u128,
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::{IRolesAuth, ITIP20};
-        use tempo_precompiles::tip20::ISSUER_ROLE;
 
         let provider = self.dev_provider();
 
         // Admin can grant ISSUER_ROLE to self
         let receipt = IRolesAuth::new(token, &provider)
-            .grantRole(ISSUER_ROLE, self.dev_address())
+            .grantRole(TIP20Token::issuer_role(), self.dev_address())
             .send()
             .await?
             .get_receipt()
@@ -3349,8 +3349,8 @@ impl ZoneAccount {
                 ephemeralPubkeyX: enc.eph_pub_x,
                 ephemeralPubkeyYParity: enc.eph_pub_y_parity,
                 ciphertext: enc.ciphertext.into(),
-                nonce: alloy_primitives::FixedBytes(enc.nonce),
-                tag: alloy_primitives::FixedBytes(enc.tag),
+                nonce: alloy_primitives::FixedBytes::new(enc.nonce),
+                tag: alloy_primitives::FixedBytes::new(enc.tag),
             },
         ))
     }

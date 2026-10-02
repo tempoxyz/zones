@@ -135,10 +135,10 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
             .await?
             .ok_or_eyre(format!("L1 block {} was not found", submission.block.hash))?;
         ensure!(
-            block.header.number() == submission.block.number,
+            block.number() == submission.block.number,
             "L1 block {} has number {}, expected {}",
             submission.block.hash,
-            block.header.number(),
+            block.number(),
             submission.block.number
         );
         ensure!(

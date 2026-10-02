@@ -142,8 +142,8 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
     let zone_provider = MockEthProvider::new();
     set_tempo_checkpoint(&zone_provider, checkpoint);
 
-    L1Subscriber {
-        config: L1SubscriberConfig {
+    L1Subscriber::new(
+        L1SubscriberConfig {
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
             l1_fetch_concurrency: 1,
@@ -152,15 +152,14 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
             deferred_work_start: None,
         },
         zone_provider,
-        deposit_queue: DepositQueue::default(),
-        enabled_tokens: crate::state::EnabledTokenRegistry::default(),
-        l1_state_cache: crate::L1StateCache::new(),
-        block_tracker: L1BlockTracker::default(),
-        leadership_sink: None,
-        finalized_batch_submissions: None,
-        encryption_keys: None,
-        subscriber_metrics: Default::default(),
-    }
+        DepositQueue::default(),
+        crate::state::EnabledTokenRegistry::default(),
+        crate::L1StateCache::new(),
+        L1BlockTracker::default(),
+        None,
+        None,
+        None,
+    )
 }
 
 fn test_subscriber(block_number: u64) -> L1Subscriber<MockEthProvider> {
