@@ -29,9 +29,10 @@ substitute an easier workflow for an acceptance gate.
 - TIP-1084 vault-backed tokens: https://github.com/tempoxyz/tempo/pull/6559.
   The inspected draft excludes vault operations from payment classification.
   That exclusion requires a new bounded execution specification.
-- Earn: `src/earn/VaultAdapter.sol`, `IVaultEngine`, ERC4626 and Veda engines,
-  closed-loop ZoneGateway, contributions, fees, pending async claims, and
-  deployment-fixed engine migration modes. Preserve their economic invariants.
+- Earn at upstream `main` (2026-10-02): `src/core/EarnVault.sol`, separate
+  `EarnFees`, ERC4626, Veda, and PropAMM engines, `SingleZoneEarnRouter`,
+  contributions, pending async claims, and deployment-fixed engine migration
+  modes. Preserve their economic invariants and distinct storage accounts.
 
 These are dependencies, not evidence of this goal's completion.
 
@@ -43,12 +44,17 @@ Draft deliverables published so far:
 - [EVM2 transaction context and shared reentry dispatch](https://github.com/alloy-rs/evm2/pull/523).
 - [Reth native call context and shared dispatch](https://github.com/paradigmxyz/reth/pull/27642),
   based on its existing `codex/excise-revm` branch.
+- [TIP-1128 native Earn lifecycle](https://github.com/tempoxyz/tempo/pull/8074),
+  aligned with current EarnVault and EarnFees storage and ABI.
+- [Earn spend-to-receiver contract surface](https://github.com/tempoxyz/earn/pull/354).
 
 Tempo contains a bounded dependency-call adapter and transaction-owned reservation
 scope. Its tests exercise caller/origin preservation, static context, delegated
 code, execution/state gas, rollback, recoverable dependency failures, and
-non-replenishment across native roots. Native portal/vault dispatch and payment
-admission are not yet implemented; these helpers alone do not pass E02/E03.
+non-replenishment across native roots. T15 adds native portal deposit dispatch
+and post-execution payment admission only for verified, top-level registered
+portals. Native portal withdrawal/settlement, Earn vault dispatch, and complete
+payment admission remain open; the current slice does not pass E02/E03.
 
 Tempo and Zones generate the complete portal bindings from one ABI definition,
 including historical overloads, while Zones retains its local RPC helpers.
@@ -63,6 +69,12 @@ canonical settlement receipts and exact backing reconciliation. It uses the
 explicit temporary NoProof mode. Real execution-proof settlement, historical
 replay, scheduled native activation/migration and mixed Earn/Zone throughput
 remain open. No full acceptance gate in the table has passed.
+
+The [T15 native deposit evidence](evidence/EVM2_T15_NATIVE_DEPOSIT.md) records
+real native child calls, private Zone credit, NoProof settlement, and one
+single-transaction block with zero general-lane gas. It does not establish
+private Earn, native withdrawal, real proofs, fork migration, or sustained
+combined throughput.
 
 ## Protocol requirements
 
