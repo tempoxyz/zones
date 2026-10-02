@@ -91,6 +91,15 @@ and supply matched L1 portal backing. The Tempo PR's
 rechecks these receipts, fork code hashes, balances, and lane samples against
 the running reviewed L1 and Zone. The new Zone still uses NoProof mode.
 
+After pinning Zones to the reviewed Tempo revision, the rebuilt Zone node
+restarted on the same datadir and resumed settlement. A 1,000-unit transfer
+from an account with 1,000 private units reverted with
+`InsufficientBalance()` after its 1-unit fee. Sending the remaining 998
+succeeded, and authenticated balances plus private supply reconciled to the
+10,000-unit L1 portal backing. The covering batch settled in L1 receipt
+`0x4bfe04db2f936fed8b7249e1986d8e70e236ec9f4ec699a6187917e0916e7b8a`.
+Both private receipts and the settlement are in the reviewed record.
+
 While these isolated devnets are available, rerun the public receipt and state
 checker from the Tempo checkout:
 
