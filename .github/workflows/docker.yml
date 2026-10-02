@@ -338,7 +338,7 @@ jobs:
             tempo-zone-prover-compiled.target=compiled
             tempo-zone-prover-compiled.output=type=local,dest=target/prover-compiled
             tempo-zone.tags=${{ env.STAGING_REPOSITORY }}:${{ needs.resolve-production-build-inputs.outputs.staging_tag }}
-            tempo-zone.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag') }}
+            tempo-zone.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.reproducible_verify != true)) }}
             tempo-zone-xtask.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
             tempo-zone-prover-utils.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
           # Scheduled builds refresh moving external tools and base images. All
@@ -507,8 +507,8 @@ jobs:
     needs: resolve-production-build-inputs
     if: >-
       github.repository == 'tempoxyz/zones' &&
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+      (github.event_name == 'push' || github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.reproducible_verify != true))
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -586,8 +586,8 @@ jobs:
       - production-reproducible-clean-rebuild
     if: >-
       github.repository == 'tempoxyz/zones' &&
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+      (github.event_name == 'push' || github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.reproducible_verify != true))
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -766,8 +766,8 @@ jobs:
     if: >-
       needs.production-reproducible-verify.result == 'success' &&
       github.repository == 'tempoxyz/zones' &&
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+      (github.event_name == 'push' || github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.reproducible_verify != true))
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -801,6 +801,8 @@ jobs:
             ${{ env.REGISTRY }}/tempo-zone
             docker.io/tempoxyz/tempo-zone
           tags: |
+            type=schedule,pattern=nightly
+            type=raw,value=nightly,enable=${{ inputs.nightly == true }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
