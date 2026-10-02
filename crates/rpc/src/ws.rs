@@ -284,7 +284,7 @@ async fn handle_subscribe(
         }
         SubscriptionKind::Logs => {
             let filter = match params.unwrap_or_default() {
-                SubscriptionParams::None => Filter::default(),
+                SubscriptionParams::None => Filter::new(),
                 SubscriptionParams::Logs(filter) => *filter,
                 SubscriptionParams::Bool(_) | SubscriptionParams::TransactionReceipts(_) => {
                     return WsDispatchResult::response_only(JsonRpcResponse::error(

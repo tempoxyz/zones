@@ -31,10 +31,10 @@ impl ZoneInbox {
             |call| match call {
                 IZoneInbox::IZoneInboxCalls {
                     processedDepositQueueHash(call) => {
-                        view(call, |_| self.processed_deposit_queue_hash.read())
+                        view(call, |_| self.processed_deposit_queue_hash())
                     },
                     processedDepositNumber(call) => {
-                        view(call, |_| self.processed_deposit_number.read())
+                        view(call, |_| self.processed_deposit_number())
                     },
                     processedTokenEnablementHash(call) => {
                         view(call, |_| self.processed_token_enablement_hash.read())

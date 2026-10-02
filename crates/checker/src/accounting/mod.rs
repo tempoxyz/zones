@@ -194,7 +194,7 @@ impl State {
                 .account_total;
             for (account, actual) in balances {
                 let key = AccountKey::new(token, account);
-                let expected = self.accounts.get(&key).copied().unwrap_or_default();
+                let expected = self.account(key).unwrap_or_default();
                 if actual != expected {
                     return Err(AccountingError::BalanceMismatch {
                         key,
@@ -221,9 +221,7 @@ impl State {
     ) -> Result<(), AccountingError> {
         for (token, available) in balances {
             let required = self
-                .tokens
-                .get(&token)
-                .copied()
+                .token(token)
                 .ok_or(AccountingError::UnknownToken { token })?
                 .liability()?;
             if available < required {
@@ -269,18 +267,14 @@ impl State {
         tokens: &mut BTreeMap<Address, Option<TokenState>>,
     ) -> Result<(), AccountingError> {
         let previous_token = self
-            .tokens
-            .get(&key.token)
-            .copied()
+            .token(key.token)
             .ok_or(AccountingError::UnknownToken { token: key.token })?;
         let mut next_token = previous_token;
         next_token.account_total = change.apply(next_token.account_total)?;
-        let current = self.accounts.get(&key).copied().unwrap_or_default();
+        let current = self.account(key).unwrap_or_default();
         let next = change.apply(current)?;
 
-        accounts
-            .entry(key)
-            .or_insert_with(|| self.accounts.get(&key).copied());
+        accounts.entry(key).or_insert_with(|| self.account(key));
         tokens.entry(key.token).or_insert(Some(previous_token));
         write_nonzero(&mut self.accounts, key, next);
         self.tokens.insert(key.token, next_token);
@@ -295,9 +289,7 @@ impl State {
         previous: &mut BTreeMap<Address, Option<TokenState>>,
     ) -> Result<(), AccountingError> {
         let previous_state = self
-            .tokens
-            .get(&token)
-            .copied()
+            .token(token)
             .ok_or(AccountingError::UnknownToken { token })?;
         let mut state = previous_state;
         let value = kind.balance(&mut state);

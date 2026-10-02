@@ -194,9 +194,7 @@ impl WithdrawalStore {
     ///
     /// Withdrawals within a batch are stored in FIFO order (oldest first).
     pub fn add_withdrawal(&mut self, batch_index: u64, withdrawal: abi::Withdrawal) -> bool {
-        if self.batches.len() >= MAX_CACHED_WITHDRAWAL_SLOTS
-            && !self.batches.contains_key(&batch_index)
-        {
+        if self.batches.len() >= MAX_CACHED_WITHDRAWAL_SLOTS && !self.has_batch(batch_index) {
             return false;
         }
 
@@ -209,9 +207,7 @@ impl WithdrawalStore {
 
     /// Set all withdrawals for a batch at once, replacing any existing data.
     pub fn add_batch(&mut self, batch_index: u64, withdrawals: Vec<abi::Withdrawal>) -> bool {
-        if self.batches.len() >= MAX_CACHED_WITHDRAWAL_SLOTS
-            && !self.batches.contains_key(&batch_index)
-        {
+        if self.batches.len() >= MAX_CACHED_WITHDRAWAL_SLOTS && !self.has_batch(batch_index) {
             return false;
         }
 

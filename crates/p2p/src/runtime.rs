@@ -304,7 +304,7 @@ impl P2pHandle {
             commands,
             events,
             backfill,
-        } = self.parts.take().expect("P2P handle already consumed");
+        } = self.into_parts();
         shutdown.cancel();
 
         // Close the caller-side channels while the runtime is winding down.
@@ -554,7 +554,7 @@ async fn run_commands(
                 let policy =
                     RoutingPolicy::new(&local_ed25519_public_key, &membership, &leadership);
                 let (may_broadcast, recipients) =
-                    (policy.may_broadcast_block(), policy.block_recipients());
+                    (policy.am_i_retained_leader(), policy.block_recipients());
                 if !may_broadcast {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", "Ignoring live block broadcast command without retained scheduled leadership");

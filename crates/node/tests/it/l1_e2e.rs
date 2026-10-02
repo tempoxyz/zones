@@ -2578,8 +2578,8 @@ async fn test_deposit_old_key_during_grace_mints_after_rotation() -> eyre::Resul
                 ephemeralPubkeyX: current.eph_pub_x,
                 ephemeralPubkeyYParity: current.eph_pub_y_parity,
                 ciphertext: current.ciphertext.into(),
-                nonce: alloy_primitives::FixedBytes(current.nonce),
-                tag: alloy_primitives::FixedBytes(current.tag),
+                nonce: alloy_primitives::FixedBytes::new(current.nonce),
+                tag: alloy_primitives::FixedBytes::new(current.tag),
             },
             depositor.address(),
         )
@@ -2612,8 +2612,8 @@ async fn test_deposit_old_key_during_grace_mints_after_rotation() -> eyre::Resul
                 ephemeralPubkeyX: historical.eph_pub_x,
                 ephemeralPubkeyYParity: historical.eph_pub_y_parity,
                 ciphertext: historical.ciphertext.into(),
-                nonce: alloy_primitives::FixedBytes(historical.nonce),
-                tag: alloy_primitives::FixedBytes(historical.tag),
+                nonce: alloy_primitives::FixedBytes::new(historical.nonce),
+                tag: alloy_primitives::FixedBytes::new(historical.tag),
             },
             depositor.address(),
         )

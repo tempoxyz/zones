@@ -519,16 +519,16 @@ where
     let next_anchor = checkpoint.saturating_add(1);
     Ok(match schedule.leader_for(next_anchor) {
         None => DesiredRole::Fenced,
-        Some(record) if &record.leader == local => {
+        Some(record) if record.leader() == local => {
             if can_lead {
                 DesiredRole::Leader {
-                    epoch: record.epoch,
+                    epoch: record.epoch(),
                     next_anchor,
                 }
             } else {
                 error!(
                     target: "zone::role",
-                    epoch = record.epoch,
+                    epoch = record.epoch(),
                     next_anchor,
                     "This node is the scheduled leader but has no sequencer resources; fencing"
                 );
@@ -536,7 +536,7 @@ where
             }
         }
         Some(record) => DesiredRole::Follower {
-            epoch: record.epoch,
+            epoch: record.epoch(),
         },
     })
 }

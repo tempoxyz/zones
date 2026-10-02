@@ -486,7 +486,7 @@ pub fn raw_zero() -> Box<RawValue> {
 /// Serialize a value directly to [`RawValue`], skipping the intermediate
 /// `serde_json::Value` allocation.
 pub fn to_raw<T: serde::Serialize>(value: &T) -> Result<Box<RawValue>, JsonRpcError> {
-    serde_json::value::to_raw_value(value).map_err(|e| JsonRpcError::internal(e.to_string()))
+    serde_json::value::to_raw_value(value).map_err(|e| internal(e))
 }
 
 /// Shorthand for wrapping any `Display` error into a [`JsonRpcError::internal`].
