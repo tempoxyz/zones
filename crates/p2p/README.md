@@ -96,8 +96,8 @@ The authenticated-network namespace includes the P2P wire-protocol version,
 Tempo L1 chain ID, ZonePortal address, and zone ID. This keeps nodes from different local, test,
 or production environments from connecting when a key or endpoint is accidentally reused.
 
-Each node also logs a `membership_digest` covering every member's Ed25519 identity, `rpc_only`
-standing, and settlement address. It is diagnostic only — compare it across nodes to spot a
+Each node also logs a `membership_digest` covering the settlement proof mode and every member's
+Ed25519 identity, `rpc_only` standing, and settlement address. It is diagnostic only — compare it across nodes to spot a
 manifest mismatch, whose symptom is settlement stalling because the leader collects signatures
 from a different set than it needs. Peer addresses are excluded, so relocating a node does not
 change it.
@@ -109,6 +109,7 @@ the configuration shape:
 
 ```toml
 leader_ed25519_public_key = "0xleader..."
+settlement_proof_mode = "no-proof"
 
 [[nodes]]
 name = "leader"
@@ -179,6 +180,12 @@ The manifest loader validates that:
 - every address has a non-zero port;
 - `leader_ed25519_public_key` identifies one of the nodes;
 - both local private keys correspond to the same manifest member.
+
+`settlement_proof_mode` selects the proof policy every quorum member signs: `no-proof` for
+the explicit rollout mode or `nitro` for attested settlement. It defaults to `no-proof` for
+existing manifests. The active sequencer's `--sequencer.enable-prover` setting must match this
+policy; followers use the manifest policy even when they do not run a prover locally. Change
+the manifest on every quorum node together before switching the portal verifier.
 
 At P2P startup, the node requires the configured `ZonePortal` to be deployed at the current L1 tip,
 then checks the manifest against it. The persisted Zone genesis anchor may still precede portal

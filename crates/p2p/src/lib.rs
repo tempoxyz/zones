@@ -13,7 +13,7 @@ mod runtime;
 pub use backfill::{BackfillCommand, BackfillPorts, BackfillRequest, BackfillResponse};
 pub use manifest::{
     ForcedRecoveryConfig, ForcedRecoveryState, LeadershipSchedule, LeadershipState,
-    ManifestAddress, ManifestError, ManifestNode, Role, ZoneManifest,
+    ManifestAddress, ManifestError, ManifestNode, Role, SettlementProofMode, ZoneManifest,
 };
 pub use network::{MAX_TRANSACTION_MESSAGE_SIZE, P2pNetworkId};
 pub use protocol::{EncodedBlock, PeerTip};

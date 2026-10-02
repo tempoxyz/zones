@@ -777,6 +777,13 @@ where
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
+            let use_nitro_prover = config.manifest().settlement_proof_mode().requires_nitro();
+            if let Some(sequencer) = self.sequencer_config.as_ref() {
+                eyre::ensure!(
+                    sequencer.enable_prover == use_nitro_prover,
+                    "sequencer prover setting conflicts with manifest settlement_proof_mode"
+                );
+            }
             Some(
                 Self::start_p2p(
                     config,
@@ -796,9 +803,7 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.retry_connection_interval,
                     self.encryption_keys.clone().unwrap_or_default(),
-                    self.sequencer_config
-                        .as_ref()
-                        .is_some_and(|config| config.enable_prover),
+                    use_nitro_prover,
                     &task_executor,
                     &sequencer_rpc_slot,
                 )
