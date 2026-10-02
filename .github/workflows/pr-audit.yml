@@ -2,7 +2,7 @@ name: Pull request audit
 
 on:
   pull_request:
-    types: [labeled]
+    types: [labeled, opened, synchronize, reopened, ready_for_review]
   pull_request_target: # zizmor: ignore[dangerous-triggers]
     types: [opened, reopened, synchronize, labeled, unlabeled]
   pull_request_review:
@@ -14,18 +14,12 @@ on:
 permissions: {}
 
 jobs:
-  # Label-triggered audit -> read-only shared reusable
+  # Push and label audits -> read-only shared reusable
   audit:
     if: >-
       github.repository == 'tempoxyz/zones' &&
       (
-        (
-        github.event_name == 'pull_request' &&
-        (
-          github.event.label.name == 'cyclops' ||
-          github.event.label.name == 'agentic-audit'
-        )
-        ) ||
+        github.event_name == 'pull_request' ||
         (
           github.event_name == 'pull_request_target' ||
           github.event_name == 'pull_request_review' ||
@@ -37,12 +31,13 @@ jobs:
       contents: read
       pull-requests: read
       statuses: write
-    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@390f7d8129384d3a24b79113ee2586e96455fd40 # 2026-10-02T18-23-23Z-390f7d81
     with:
       required-labels: |
         cyclops
         agentic-audit
       require-completed-audit: true
+      audit-on-push: true
     secrets:
       EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
       EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
@@ -69,9 +64,9 @@ jobs:
       pull-requests: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        uses: tempoxyz/gh-actions/actions/secure-runner@390f7d8129384d3a24b79113ee2586e96455fd40 # 2026-10-02T18-23-23Z-390f7d81
 
-      - uses: tempoxyz/gh-actions/actions/pr-audit-comment@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+      - uses: tempoxyz/gh-actions/actions/pr-audit-comment@390f7d8129384d3a24b79113ee2586e96455fd40 # 2026-10-02T18-23-23Z-390f7d81
         with:
           command-regex: '^(?:@decofe\s+)?(?:cyclops\s+(?:private\s+)?audit|derek\s+audit)\b'
           permission-check-mode: association
