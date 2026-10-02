@@ -1,0 +1,77 @@
+{
+  "kind": "t15_private_transfer_and_payment_settlement_smoke",
+  "full_native_payment_acceptance": false,
+  "execution_proof_verified": false,
+  "zone_t15_scheduled": true,
+  "zone_source_revision": "afbabc891",
+  "tempo_source_revision": "3ce628b69",
+  "binary_sha256": {
+    "tempo": "53dc87813725edd3caf0841e9c174d2eb1c7643309a2ad987aa5c59fb731ca4c",
+    "zones": "169602f9dbed4598a9dbfd65ab7a5af267affd2785799c1dcd342b76f0d7b317"
+  },
+  "clients": {
+    "l1": "tempo/v1.14.0-5bb038c/x86_64-unknown-linux-gnu",
+    "zone": "tempo-zone/v0.3.1-3c64961/x86_64-unknown-linux-gnu"
+  },
+  "genesis": {
+    "l1": "0xe4c37aeabb3c011af3f06399ed6951df7c9634a9d0cc4a88e4881a941ac91d2d",
+    "zone": "0xe262193f2dfaafcf08fd0876ff08d0b22e11de9e7060077724fdf8e0448439b6"
+  },
+  "bounced_deposit": {
+    "hash": "0xe64d25fd96ffb02c75f9f9f7304a3e694f2fd551e5adaa6e4093d1f488d56b3b",
+    "block": 2669,
+    "l1_gas_used": 592167,
+    "portal_backing_after_refund": 0
+  },
+  "valid_deposit": {
+    "hash": "0xd89be43645e2fdd5066ac9fd95bab7e9411e52ffac9f10272d380f23777a9dfe",
+    "l1_block": 2901,
+    "zone_credit_block": 268,
+    "amount": 1000000
+  },
+  "transfers": [
+    {
+      "hash": "0xc134b827f0a2c49ade98b9cd4f1c8ad7dd58cbef7ee14d89f154e2a1cc839c62",
+      "block": 281,
+      "amount": 250000,
+      "recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+      "gas_used": 371596
+    },
+    {
+      "hash": "0x4069cb21771a95ceb4901dbeeaf4236cb3ddbcf1ecf3a7a03e939c700011372b",
+      "block": 350,
+      "amount": 100000,
+      "recipient": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+      "gas_used": 121596
+    },
+    {
+      "hash": "0x46649b1ccc33c1d2eeff551f77bb34f78d66a77993e2cf3a324a5609b0a8220e",
+      "block": 448,
+      "amount": 50000,
+      "recipient": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "gas_used": 121572
+    }
+  ],
+  "balances_at_zone_block_448": {
+    "sender": 600000,
+    "recipient_one": 350000,
+    "recipient_two": 50000,
+    "portal_backing": 1000000,
+    "zone_supply": 1000000
+  },
+  "settled_batch": {
+    "hash": "0x199e855ed2dafb7c72e6dea8a9162ee48530ac1925e60228f14b1c72a9443c8b",
+    "l1_block": 3047,
+    "zone_height": 350,
+    "gas_used": 98842,
+    "lane_sample": {
+      "time": 1790916093.9456687,
+      "payment_transactions_last": 1.0,
+      "general_gas_used_last": 0.0,
+      "payment_gas_used_last": 98842.0,
+      "gas_used_last": 98842.0,
+      "pool_transactions_included_last": 1.0
+    },
+    "proof_mode": "NoProof (0x02)"
+  }
+}

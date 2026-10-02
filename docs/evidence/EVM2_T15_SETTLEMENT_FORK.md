@@ -10,7 +10,10 @@ and L1 portal backing were each 1,000,000.
 
 The dev genesis scheduled T15 for Unix time `1790913144`. L1 block 176 was
 pre-fork (`1790913085`); block 177 activated T15 (`1790913223`) after a Tempo
-restart on the same datadir. The first post-fork AA `submitBatch` transaction,
+restart on the same datadir. This was an L1 activation. The Zone genesis did
+not encode `t15Time`; its local execution stayed at T14. This run therefore
+does not prove a Zone execution hardfork or Zone-state migration. The first
+post-fork AA `submitBatch` transaction,
 [`0x2dd101da…c5ad`](https://github.com/tempoxyz/tempo/pull/8076), settled in
 block 182. Its call trace enters the portal's canonical implementation through
 a `DELEGATECALL`, which in turn calls the verifier. The block contains only this
@@ -33,6 +36,13 @@ native withdrawal, vault operations, fresh genesis peer sync, or sustained
 combined throughput. The attempted private TIP-20 transfer reverted because
 Zone `TIP20Rules` still disables direct transfers; that blocker is tracked in
 the [finding ledger](NATIVE_EXECUTION_FINDINGS.md).
+
+The checker ran successfully before this devnet was stopped. A later
+`tempo-zone dev` invocation wiped its datadir and provisioned Zone 2, as that
+command is documented to do. The checked JSON remains an archived observation;
+the RPC replay command below requires a restored Zone 1 datadir or a newly
+reproduced run. Fresh T15 testing must schedule the Zone fork in its genesis
+and restart an existing Zone with `tempo-zone node`, not `tempo-zone dev`.
 
 Rerun the checker while the isolated devnet and local binaries remain present:
 

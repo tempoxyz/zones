@@ -95,7 +95,32 @@ revision in their native-payment branches.
 - **Cause:** `TIP20Rules::admit` rejects every transfer selector during the
   initial permissioned Zone phase. The upstream token transfer path and fixed
   gas wrapper exist, but this gate prevents user-to-user movement.
-- **Required fix:** activate scoped, privacy-safe transfer admission at the
-  sequenced Zone fork, retain policy checks and fixed gas, and verify balances,
-  allowance failures, gas indistinguishability, and later batch settlement on
-  a real devnet. This finding remains open.
+- **Fix:** Zones `afbabc891` admits transfer selectors at the inherited T15
+  fork while forwarding to the upstream token for allowance and TIP-403 policy
+  checks. The wrapper retains fixed precompile gas and error redaction.
+- **Regression:** 18 focused precompile tests pass, including allowance,
+  balance, fixed-gas, and insufficient-balance cases. A new T15 Zone accepted
+  three signed transfers; final private balances sum to L1 portal backing and
+  Zone supply. The batch covering the second transfer used 98,842 payment gas
+  and zero general gas; see [the checked run](EVM2_T15_PRIVATE_TRANSFER.md).
+  The initial 250,000-gas difference aligned with the sender's first nonce;
+  a later new-recipient transfer used steady-state gas. Complete privacy and
+  policy review across callers and failure paths remains open.
+
+## F005: local Zone fork schedule was absent from the T15 devnet
+
+- **Severity:** migration-test blocker; no protocol compromise shown.
+- **Trigger:** inspect the Zone genesis and startup hardfork list from the
+  fork-boundary run. `t15Time` was absent even though the L1 genesis scheduled
+  T15; Zone execution remained at T14. Re-running `tempo-zone dev` on that
+  datadir wiped it and provisioned a new Zone ID, as its CLI contract specifies.
+- **Impact:** the archived receipts prove L1 activation and surviving Zone
+  custody/settlement, but not a Zone execution upgrade. The original Zone 1
+  datadir is no longer available for live checker replay. Its genesis was
+  reconstructed from the recorded L1 anchor with the exact archived genesis
+  hash, but the current datadir contains the newly provisioned Zone 2.
+- **Partial fix:** explicit `--dev.t15-time` writes the local Zone schedule
+  at provisioning. A new Zone 3 started with T15 active, transferred funds,
+  settled a batch, and restarted with `tempo-zone node` using its saved genesis
+  and datadir. A fresh devnet must still run an existing Zone through its own
+  scheduled fork with funded pre-fork positions and replay/sync verification.

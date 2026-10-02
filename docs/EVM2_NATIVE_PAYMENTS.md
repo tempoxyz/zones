@@ -82,7 +82,14 @@ The [fork-boundary settlement evidence](evidence/EVM2_T15_SETTLEMENT_FORK.md)
 records a preexisting Zone balance across scheduled T15 activation, post-fork
 native deposit and AA batch settlement, reconciled backing, and three isolated
 payment-lane blocks with zero general gas. Its verifier mode is NoProof; it
-does not establish real proof security or full migration.
+does not establish real proof security or full migration. The Zone genesis did
+not schedule T15, so this was an L1 fork boundary, not a Zone execution fork.
+
+The [T15 private-transfer evidence](evidence/EVM2_T15_PRIVATE_TRANSFER.md)
+records a Zone with its own T15 schedule, three signed private transfers,
+reconciled supply/backing after a portal-bound deposit, a stateful restart,
+and one NoProof settlement batch using zero general-lane gas. It was
+provisioned after L1 activation and does not close the migration or proof gates.
 
 ## Protocol requirements
 
@@ -206,6 +213,7 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | Shared portal ABI | Implemented groundwork | Tempo ABI macro reused by Zones; historical selector/event tests |
 | Native reentry provider safety | Reproduced finding fixed | EVM2 #523 Miri before/after; downstream shared dispatch aligned |
 | T15 native deposit smoke | Partial | [Real native trace, private credit, backing, NoProof batch, and one zero-general-gas deposit block](evidence/EVM2_T15_NATIVE_DEPOSIT.md); Zone created after fork |
-| T15 existing-Zone activation smoke | Partial | [Pre-fork private balance, scheduled fork, post-fork native deposit and two payment-lane batches](evidence/EVM2_T15_SETTLEMENT_FORK.md); NoProof, no vault or withdrawal migration |
+| T15 existing-Zone L1 activation smoke | Partial | [Pre-fork private balance, scheduled L1 fork, post-fork native deposit and two payment-lane batches](evidence/EVM2_T15_SETTLEMENT_FORK.md); Zone execution stayed T14; NoProof |
+| T15 Zone private transfer smoke | Partial | [Scheduled Zone T15, three signed transfers, backing, restart and one payment-lane batch](evidence/EVM2_T15_PRIVATE_TRANSFER.md); NoProof, Zone created after L1 fork |
 | E01–I01 | Open | No passing combined acceptance result recorded |
 | Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642, Tempo #8076, Zones #1637, Earn #354; full implementation open |
