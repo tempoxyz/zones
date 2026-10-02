@@ -1093,7 +1093,6 @@ mod tests {
         use alloy_consensus::TxLegacy;
         use alloy_primitives::{Address, U256};
         use alloy_sol_types::SolCall as _;
-
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
         };
@@ -1186,7 +1185,6 @@ mod tests {
     fn rejects_malformed_advance_tempo_calldata() {
         use alloy_consensus::TxLegacy;
         use alloy_primitives::{Bytes, U256};
-
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
         };
@@ -1221,7 +1219,6 @@ mod tests {
         use alloy_consensus::TxLegacy;
         use alloy_primitives::{Bytes, U256};
         use alloy_sol_types::SolCall as _;
-
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
         };

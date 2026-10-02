@@ -347,14 +347,14 @@ mod tests {
             &rules,
             IRolesAuth::hasRoleCall {
                 account,
-                role: tempo_precompiles::tip20::TIP20Token::issuer_role(),
+                role: TIP20Token::issuer_role(),
             },
             caller,
         );
         assert_allowed(
             &rules,
             IRolesAuth::getRoleAdminCall {
-                role: tempo_precompiles::tip20::TIP20Token::issuer_role(),
+                role: TIP20Token::issuer_role(),
             },
             caller,
         );
@@ -462,7 +462,7 @@ mod tests {
     fn role_mutations_are_disallowed() {
         let caller = Address::repeat_byte(0x11);
         let account = Address::repeat_byte(0x22);
-        let role = tempo_precompiles::tip20::TIP20Token::issuer_role();
+        let role = TIP20Token::issuer_role();
         let rules = rules();
 
         assert_unauthorized(&rules, IRolesAuth::grantRoleCall { role, account }, caller);

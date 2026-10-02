@@ -626,14 +626,8 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
         assert!(token.is_initialized()?);
         assert_eq!(token.name()?, "Example Dollar");
         assert_eq!(token.next_quote_token()?, PATH_USD_ADDRESS);
-        assert!(token.has_role_internal(
-            ZONE_INBOX_ADDRESS,
-            tempo_precompiles::tip20::TIP20Token::issuer_role()
-        )?);
-        assert!(token.has_role_internal(
-            ZONE_OUTBOX_ADDRESS,
-            tempo_precompiles::tip20::TIP20Token::issuer_role()
-        )?);
+        assert!(token.has_role_internal(ZONE_INBOX_ADDRESS, TIP20Token::issuer_role())?);
+        assert!(token.has_role_internal(ZONE_OUTBOX_ADDRESS, TIP20Token::issuer_role())?);
         assert_eq!(
             StorageCtx.sload(TIP403_REGISTRY_ADDRESS, binding_slot)?,
             anchored_policy

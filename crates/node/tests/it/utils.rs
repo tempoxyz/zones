@@ -53,6 +53,7 @@ use tempo_precompiles::{
     storage::{
         Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
     },
+    tip20::TIP20Token,
     tip403_registry::{
         ALLOW_ALL_POLICY_ID, AuthRole, CompoundPolicyData as RawCompoundPolicyData, PolicyData,
         PolicyType, TIP403Registry, tip403_registry_slots,
@@ -2500,10 +2501,7 @@ impl L1TestNode {
 
         // Admin can grant ISSUER_ROLE to self
         let receipt = IRolesAuth::new(token, &provider)
-            .grantRole(
-                tempo_precompiles::tip20::TIP20Token::issuer_role(),
-                self.dev_address(),
-            )
+            .grantRole(TIP20Token::issuer_role(), self.dev_address())
             .send()
             .await?
             .get_receipt()

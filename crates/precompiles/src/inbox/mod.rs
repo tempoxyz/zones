@@ -265,14 +265,8 @@ impl ZoneInbox {
                 PATH_USD_ADDRESS,
                 ZONE_INBOX_ADDRESS,
             )?;
-            token.grant_role_internal(
-                ZONE_INBOX_ADDRESS,
-                tempo_precompiles::tip20::TIP20Token::issuer_role(),
-            )?;
-            token.grant_role_internal(
-                ZONE_OUTBOX_ADDRESS,
-                tempo_precompiles::tip20::TIP20Token::issuer_role(),
-            )?;
+            token.grant_role_internal(ZONE_INBOX_ADDRESS, TIP20Token::issuer_role())?;
+            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, TIP20Token::issuer_role())?;
             policy_registry.token_transfer_policies[enabled.token].write(l1_policy)?;
 
             self.emit_event(enabled.enabled_event())?;
