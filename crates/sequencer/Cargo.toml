@@ -63,6 +63,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 jsonrpsee.workspace = true
+metrics-exporter-prometheus.workspace = true
+metrics-util.workspace = true
 proptest.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
