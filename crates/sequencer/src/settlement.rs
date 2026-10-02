@@ -49,8 +49,11 @@ use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
-use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_alloy::{
+    TempoNetwork,
+    provider::ext::TempoProviderExt,
+    rpc::{ForkSchedule, TempoCallBuilderExt},
+};
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
@@ -1216,10 +1219,11 @@ pub enum SettlementAbi {
 impl SettlementAbi {
     /// Resolve the settlement selector and attestation format from the live Tempo L1 hardfork.
     pub async fn from_l1(provider: &DynProvider<TempoNetwork>) -> Result<Self> {
-        let t13_active = provider
-            .is_hardfork_active(TempoHardfork::T13)
+        let schedule = provider
+            .get_fork_schedule()
             .await
             .wrap_err("failed reading the live Tempo L1 hardfork")?;
+        let t13_active = t13_active(&schedule)?;
         Ok(if t13_active { Self::T13 } else { Self::Legacy })
     }
 
@@ -1230,6 +1234,28 @@ impl SettlementAbi {
             Self::T13 => keccak256((previous, next).abi_encode()),
         }
     }
+}
+
+fn t13_active(schedule: &ForkSchedule) -> Result<bool> {
+    if let Some(t13) = schedule.schedule.iter().find(|fork| fork.name == "T13") {
+        return Ok(t13.active);
+    }
+    if schedule.active == "Genesis" {
+        return Ok(false);
+    }
+    let name = schedule
+        .active
+        .strip_prefix('T')
+        .ok_or_else(|| eyre::eyre!("unknown active Tempo hardfork {}", schedule.active))?;
+    let number = name.trim_end_matches(|character: char| character.is_ascii_alphabetic());
+    if number.is_empty()
+        || !name[number.len()..]
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        eyre::bail!("unknown active Tempo hardfork {}", schedule.active);
+    }
+    Ok(number.parse::<u64>()? >= 13)
 }
 
 /// Data required to submit a single batch to the ZonePortal on L1.
@@ -1925,6 +1951,27 @@ mod tests {
             SettlementAbi::from_l1(&mock_l1(t13)).await.unwrap(),
             SettlementAbi::T13
         );
+
+        let t16 = Asserter::new();
+        t16.push_success(&serde_json::json!({
+            "active": "T16",
+            "schedule": [{ "name": "T13", "activationTime": 0, "active": true }]
+        }));
+        assert_eq!(
+            SettlementAbi::from_l1(&mock_l1(t16)).await.unwrap(),
+            SettlementAbi::T13
+        );
+
+        let t16_without_schedule = Asserter::new();
+        t16_without_schedule.push_success(&serde_json::json!({ "active": "T16", "schedule": [] }));
+        assert_eq!(
+            SettlementAbi::from_l1(&mock_l1(t16_without_schedule)).await.unwrap(),
+            SettlementAbi::T13
+        );
+
+        let unknown = Asserter::new();
+        unknown.push_success(&serde_json::json!({ "active": "FutureFork", "schedule": [] }));
+        assert!(SettlementAbi::from_l1(&mock_l1(unknown)).await.is_err());
     }
 
     #[test]
