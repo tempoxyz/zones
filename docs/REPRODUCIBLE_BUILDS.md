@@ -75,15 +75,29 @@ The source ref resolves once; both builds use recipes from the trusted workflow
 commit, the reproducible Cargo profile, pinned Rust/Debian images and normalized
 rootfs timestamps. The source must contain the reproducible Cargo profile.
 
-By default, the first job builds the existing Nitro toolchain recipe and publishes
-a run-specific image under `ghcr.io/tempoxyz/tempo-zone-eif-toolchain`. It records
-the resulting digest and uses that exact image for both EIF builds and measurement.
+The toolchain job checks out `tempoxyz/zones` main and hashes the toolchain
+Dockerfile plus its resolved Bake dependency graph, including the pinned kernel
+source. It reuses `ghcr.io/tempoxyz/tempo-zone-eif-toolchain:inputs-<recipe-hash>`
+or builds it on a cache miss. Identical recipes reuse one tag instead of producing
+one tag per run. The resolved digest is recorded and used for both EIF builds and
+measurement; dispatch cannot supply an arbitrary toolchain image. These recipe
+hash tags are retained for reproduction. Changing a toolchain input creates a new
+hash; changing only application source does not.
+
 This fixes Nitro CLI, Linux 6.6.79, NSM and bootstrap binaries as toolchain inputs;
 the comparison does not independently rebuild or verify the toolchain itself.
-To reuse a previous run's toolchain, pass its `eif_builder_image` digest as the
-`eif_builder_image` dispatch input. Use the same source and genesis checksum;
-if the recipes have changed, reproduce locally with the recorded recipe revision
-as described below. Keep the toolchain image available for later reproduction.
+Verification requests from any branch other than `main`, or requests enabling
+both verification modes, fail the validation job instead of silently succeeding.
+
+Production uses the same `Dockerfile.reproducible` prover compiler and
+`Dockerfile.prover-package` runtime as verification. Both paths call
+`scripts/package-prover-eif.sh` to normalize genesis and binary permissions and
+filesystem timestamps, export the container, and construct the EIF with the
+recorded toolchain digest. Production still compiles before fetching the deferred
+genesis. Its measurement identity artifact records the source, genesis checksum,
+binary checksum and toolchain digest. To reproduce the published PCRs, verify
+that same source and genesis with those recipe and toolchain revisions. Adoption
+of the reproducible profile changes production measurements on the next build.
 
 Inspect the result after all jobs finish:
 
@@ -106,12 +120,12 @@ are included for inspection.
 Artifacts `reproducible-prover-eif-verification-depot` and
 `reproducible-prover-eif-verification-docker` contain the actual `enclave.eif`
 files. All verification artifacts expire after seven days. A skipped job is not
-verification. This mode verifies these candidate EIF artifacts; it does not
-establish that a production host image contains the same EIF or perform runtime
-Nitro attestation. Normal image publishing is skipped for the verification dispatch.
+verification. Matching PCRs require the production source, genesis bytes, recipes
+and toolchain digest; the comparison does not perform runtime Nitro attestation.
+Normal image publishing is skipped for the verification dispatch.
 
 For a local rebuild on Linux x86-64 with Docker/Buildx, Git, jq and registry access,
-check out `source_sha`, initialize submodules, and overlay the three files listed
+check out `source_sha`, initialize submodules, and overlay the five files listed
 in `build_definition_paths` from `build_definitions_sha`. Download the genesis
 file and verify its recorded SHA-256, then run:
 

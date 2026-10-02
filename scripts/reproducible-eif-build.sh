@@ -31,10 +31,7 @@ cleanup() {
   rm -rf "$scratch_dir"
 }
 trap cleanup EXIT
-mkdir "$scratch_dir/genesis"
-chmod 0755 "$scratch_dir/genesis"
-cp "$BUILD_INPUT_FILE" "$scratch_dir/genesis/genesis.json"
-chmod 0644 "$scratch_dir/genesis/genesis.json"
+mkdir "$scratch_dir/binary"
 
 case "$BUILD_BACKEND" in
   docker)
@@ -51,26 +48,14 @@ if [[ "$NO_CACHE" == 1 ]]; then
   build+=(--no-cache)
 fi
 
-# Rewrite filesystem timestamps during export: the EIF measures the rootfs,
-# including metadata that does not matter when comparing just the Rust binary.
+# Compile the same canonical executable exported by production before genesis.
 "${build[@]}" \
   --platform linux/amd64 \
   --file docker/Dockerfile.reproducible \
-  --target tempo-zone-prover-enclave-reproducible \
-  --build-context "tempo-genesis=$scratch_dir/genesis" \
+  --target prover-artifacts \
   --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
   --build-arg "GIT_SHA=$GIT_SHA" \
   --build-arg "VERSION=sha-${GIT_SHA:0:7}" \
-  --provenance=false \
-  --tag tempo-zone-prover-enclave:reproducible \
-  --output "type=docker,dest=$scratch_dir/enclave.tar,rewrite-timestamp=true" \
-  .
-docker load --input "$scratch_dir/enclave.tar"
-docker run --rm --platform linux/amd64 \
-  --volume /var/run/docker.sock:/var/run/docker.sock \
-  --volume "$OUT_DIR:/output" \
-  "$EIF_BUILDER_IMAGE" build-enclave \
-  --docker-uri tempo-zone-prover-enclave:reproducible \
-  --name tempo-zone-prover --version "$GIT_SHA" \
-  --output-file /output/enclave.eif
-sha256sum "$OUT_DIR/enclave.eif"
+  --output "type=local,dest=$scratch_dir/binary" .
+export BUILD_BACKEND NO_CACHE SOURCE_DATE_EPOCH GIT_SHA OUT_DIR
+PROVER_BINARY_DIR="$scratch_dir/binary" scripts/package-prover-eif.sh
