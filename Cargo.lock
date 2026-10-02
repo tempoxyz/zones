@@ -1078,7 +1078,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1089,7 +1089,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2843,6 +2843,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.16.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e96a4956774c13c126a8b5af4daa79384f4d826534c95a02d76afb39e2ab64e3"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "unicode-width",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "const-hex"
 version = "1.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3295,7 +3307,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3721,6 +3733,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+
+[[package]]
 name = "enr"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3773,7 +3791,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4992,6 +5010,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "indicatif"
+version = "0.18.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9433806cd6b4ec1aba79c021c7e4c58fb4c3b9977c085062e611ac929998fb0c"
+dependencies = [
+ "console",
+ "portable-atomic",
+ "unicode-width",
+ "unit-prefix",
+ "web-time",
+]
+
+[[package]]
 name = "indoc"
 version = "2.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6139,7 +6170,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7167,7 +7198,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10665,7 +10696,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10745,7 +10776,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs 1.0.8",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11367,7 +11398,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11641,7 +11672,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12026,6 +12057,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempo-state-bloat"
+version = "1.14.0"
+source = "git+https://github.com/tempoxyz/tempo?rev=c2bd4a02c77eb2be9f6abbafab705b8ea998ccbe#c2bd4a02c77eb2be9f6abbafab705b8ea998ccbe"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "clap",
+ "coins-bip32",
+ "eyre",
+ "indicatif",
+ "itertools 0.14.0",
+ "rayon",
+ "reth-chainspec",
+ "reth-cli",
+ "reth-cli-commands",
+ "reth-db-api",
+ "reth-etl",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-tasks",
+ "reth-trie",
+ "reth-trie-db",
+ "tempo-chainspec",
+ "tempo-precompiles",
+ "tempo-primitives",
+ "tracing",
+]
+
+[[package]]
 name = "tempo-transaction-pool"
 version = "1.14.0"
 source = "git+https://github.com/tempoxyz/tempo?rev=c2bd4a02c77eb2be9f6abbafab705b8ea998ccbe#c2bd4a02c77eb2be9f6abbafab705b8ea998ccbe"
@@ -12105,6 +12165,7 @@ dependencies = [
  "tempo-precompiles",
  "tempo-primitives",
  "tempo-revm",
+ "tempo-state-bloat",
  "tempo-zone-contracts",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -13012,6 +13073,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "unit-prefix"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
+
+[[package]]
 name = "universal-hash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13394,7 +13461,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14191,6 +14258,9 @@ dependencies = [
  "reqwest",
  "reth-chain-state",
  "reth-chainspec",
+ "reth-cli-commands",
+ "reth-cli-runner",
+ "reth-db-api",
  "reth-eth-wire-types",
  "reth-ethereum",
  "reth-evm",
@@ -14207,11 +14277,14 @@ dependencies = [
  "reth-rpc-builder",
  "reth-rpc-eth-api",
  "reth-rpc-eth-types",
+ "reth-rpc-server-types",
  "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
  "reth-transaction-pool",
+ "reth-trie",
  "reth-trie-common",
+ "reth-trie-db",
  "revm",
  "serde",
  "serde_json",
@@ -14225,6 +14298,7 @@ dependencies = [
  "tempo-precompiles",
  "tempo-primitives",
  "tempo-revm",
+ "tempo-state-bloat",
  "tempo-transaction-pool",
  "tempo-zone-contracts",
  "thiserror 2.0.20",
