@@ -22,6 +22,14 @@ on:
         description: "Verify a non-production reproducible candidate image"
         type: boolean
         default: false
+      reproducible_eif_verify:
+        description: "Verify prover EIF PCR0/PCR1/PCR2 with independent builds"
+        type: boolean
+        default: false
+      tempo_genesis_sha256:
+        description: "Required for EIF verification: expected SHA-256 of tempo_genesis_url"
+        type: string
+        default: ""
       ref:
         description: "Optional branch, tag, or SHA to verify (defaults to this workflow's commit)"
         type: string
@@ -63,11 +71,40 @@ env:
   TEMPO_DEVNET_GENESIS_URL: ${{ inputs.tempo_genesis_url || 'https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json' }}
 
 jobs:
+  validate-verification-dispatch:
+    name: Validate verification dispatch
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.reproducible_verify == true || inputs.reproducible_eif_verify == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+      - name: Require trusted verification dispatch
+        env:
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.ref }}
+          BINARY_VERIFY: ${{ inputs.reproducible_verify }}
+          EIF_VERIFY: ${{ inputs.reproducible_eif_verify }}
+        run: |
+          set -euo pipefail
+          [[ "$REPOSITORY" == tempoxyz/zones && "$WORKFLOW_REF" == refs/heads/main ]] || {
+            echo "Reproducibility verification must be dispatched from tempoxyz/zones main" >&2
+            exit 1
+          }
+          [[ "$BINARY_VERIFY" != true || "$EIF_VERIFY" != true ]] || {
+            echo "Select only one reproducibility verification mode" >&2
+            exit 1
+          }
+
   reproducible-verify:
     name: Verify reproducible candidate
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      inputs.reproducible_verify == true &&
+      inputs.reproducible_verify == true && inputs.reproducible_eif_verify != true &&
       github.repository == 'tempoxyz/zones' &&
       github.ref == 'refs/heads/main'
     uses: tempoxyz/gh-actions/.github/workflows/reproducible-image-verify.yml@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
@@ -91,12 +128,119 @@ jobs:
       build-script: scripts/reproducible-build.sh
       rebuild-output: out/tempo-zone
 
+  eif-toolchain:
+    name: Resolve trusted EIF toolchain
+    if: >-
+      github.repository == 'tempoxyz/zones' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.reproducible_eif_verify == true &&
+      inputs.reproducible_verify != true && github.ref == 'refs/heads/main') ||
+      (github.event_name != 'workflow_dispatch' ||
+      (inputs.reproducible_verify != true && inputs.reproducible_eif_verify != true)))
+    runs-on: depot-ubuntu-latest-16
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      image: ${{ steps.toolchain.outputs.image }}
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tempoxyz/zones
+          ref: main
+          persist-credentials: false
+
+      - name: Validate verification inputs
+        if: inputs.reproducible_eif_verify == true
+        env:
+          GENESIS_SHA256: ${{ inputs.tempo_genesis_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$GENESIS_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "EIF verification requires tempo_genesis_sha256 (64 lowercase hex characters)" >&2
+            exit 1
+          }
+
+      - name: Set up Depot
+        uses: tempoxyz/gh-actions/vendor/depot/setup-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
+      - name: Log in to toolchain registry
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve or publish immutable toolchain
+        id: toolchain
+        env:
+          TOOLCHAIN_REPOSITORY: ghcr.io/tempoxyz/tempo-zone-eif-toolchain
+        run: |
+          set -euo pipefail
+          # Hash only the toolchain Dockerfile and resolved Bake dependency graph.
+          # Unrelated build targets cannot create duplicate toolchain tags.
+          docker buildx bake -f docker/docker-bake.hcl --print \
+            tempo-zone-prover-eif-builder | jq -cS . > "$RUNNER_TEMP/eif-toolchain-recipe.json"
+          recipe_sha=$(cat docker/Dockerfile.prover-eif-builder \
+            "$RUNNER_TEMP/eif-toolchain-recipe.json" | sha256sum | cut -d' ' -f1)
+          image_ref="$TOOLCHAIN_REPOSITORY:inputs-$recipe_sha"
+          digest=$(docker buildx imagetools inspect "$image_ref" \
+            --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            metadata="$RUNNER_TEMP/eif-toolchain.json"
+            depot bake --project 0c6tg19qsp --push \
+              -f docker/docker-bake.hcl --metadata-file "$metadata" \
+              --set "tempo-zone-prover-eif-builder.tags=$image_ref" \
+              tempo-zone-prover-eif-builder
+            digest="$(jq -er '.["tempo-zone-prover-eif-builder"]["containerimage.digest"]' "$metadata")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          fi
+          echo "image=$TOOLCHAIN_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+          echo "EIF toolchain: \`$TOOLCHAIN_REPOSITORY@$digest\` (main recipe $(git rev-parse HEAD), inputs-$recipe_sha)" >> "$GITHUB_STEP_SUMMARY"
+
+  reproducible-eif-verify:
+    name: Verify reproducible prover EIF
+    needs: eif-toolchain
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.reproducible_eif_verify == true &&
+      inputs.reproducible_verify != true && github.repository == 'tempoxyz/zones' &&
+      github.ref == 'refs/heads/main'
+    uses: tempoxyz/gh-actions/.github/workflows/reproducible-eif-verify.yml@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+      build-definitions-sha: ${{ github.workflow_sha }}
+      build-definition-paths: |
+        .dockerignore
+        docker/Dockerfile.reproducible
+        docker/Dockerfile.prover-package
+        scripts/package-prover-eif.sh
+        scripts/reproducible-eif-build.sh
+      build-script: scripts/reproducible-eif-build.sh
+      eif-builder-image: ${{ needs.eif-toolchain.outputs.image }}
+      build-input-url: ${{ inputs.tempo_genesis_url }}
+      build-input-sha256: ${{ inputs.tempo_genesis_sha256 }}
+      depot-project: 0c6tg19qsp
+      artifact-name: reproducible-prover-eif-verification
+
   build-and-push:
     name: Build and Push Docker Images
+    needs: eif-toolchain
     # Private copies retain PR image builds, but must not publish shared images
     # or run the upstream's scheduled refreshes.
     if: >-
-      (github.event_name != 'workflow_dispatch' || inputs.reproducible_verify != true) &&
+      always() &&
+      (needs.eif-toolchain.result == 'success' ||
+      (github.repository != 'tempoxyz/zones' && needs.eif-toolchain.result == 'skipped')) &&
+      (github.event_name != 'workflow_dispatch' ||
+      (inputs.reproducible_verify != true && inputs.reproducible_eif_verify != true)) &&
       (github.repository == 'tempoxyz/zones' ||
       (github.event_name != 'schedule' && github.event_name != 'push'))
     runs-on: depot-ubuntu-latest-16
@@ -214,6 +358,11 @@ jobs:
       - id: shortsha
         run: echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      - name: Record reproducible prover inputs
+        run: |
+          echo "GIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+
       - name: Configure persistent intermediate layer cache
         env:
           WRITE_BUILD_CACHE: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
@@ -238,9 +387,15 @@ jobs:
       - name: Resolve cached EIF builder
         id: eif_builder
         env:
+          PINNED_BUILDER_IMAGE: ${{ needs.eif-toolchain.outputs.image }}
           REFRESH_BUILDER: ${{ github.event_name == 'schedule' }}
         run: |
           set -euo pipefail
+          if [[ -n "$PINNED_BUILDER_IMAGE" ]]; then
+            echo "image=$PINNED_BUILDER_IMAGE" >> "$GITHUB_OUTPUT"
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Include the pinned kernel source and CLI recipe in the cache identity.
           key=$(cat docker/Dockerfile.prover-eif-builder docker/docker-bake.hcl | sha256sum | cut -d' ' -f1)
           ref="$REGISTRY/tempo-zone-prover-eif-builder:inputs-$key"
@@ -271,7 +426,7 @@ jobs:
           project: 0c6tg19qsp
           # Export only the executable for the later genesis packaging step.
           set: |
-            tempo-zone-prover-compiled.target=compiled
+            tempo-zone-prover-compiled.target=prover-artifacts
             tempo-zone-prover-compiled.output=type=local,dest=target/prover-compiled
             tempo-zone.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
             tempo-zone-xtask.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
@@ -328,60 +483,27 @@ jobs:
           genesis_sha=$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)
           echo "Embedding Tempo devnet genesis sha256:${genesis_sha}"
 
-      # Nitro CLI converts images from the runner's local Docker image store.
-      # Bake both independent inputs together so BuildKit can build them in parallel.
-      - name: Load tempo-zone-prover EIF inputs
+      - name: Build private-copy EIF toolchain
+        if: steps.eif_builder.outputs.hit != 'true'
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          files: |
-            docker/docker-bake.hcl
-            ${{ runner.temp }}/zones-buildcache.json
-          targets: ${{ steps.eif_builder.outputs.hit == 'true' && 'tempo-zone-prover-enclave' || 'prover-eif-inputs' }}
-          set: |
-            tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
-            tempo-zone-prover-enclave.dockerfile=docker/Dockerfile.prover-package
-            tempo-zone-prover-enclave.contexts.chef=.
-            tempo-zone-prover-enclave.contexts.prover-binary=target/prover-compiled
-            tempo-zone-prover-enclave.args.PROVER_BINARY_SHA256=${{ steps.compiled.outputs.binary_sha }}
-            tempo-zone-prover-enclave.contexts.tempo-genesis=.tempo-genesis
-            tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
-            tempo-zone-prover-eif-builder.no-cache=${{ github.event_name == 'schedule' }}
+          files: docker/docker-bake.hcl
+          targets: tempo-zone-prover-eif-builder
+          set: tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
           project: 0c6tg19qsp
           load: true
-          # Compilation was already refreshed in the first Bake call.
-          pull: ${{ github.event_name == 'schedule' }}
-
-      - name: Publish EIF builder cache
-        if: >-
-          steps.eif_builder.outputs.hit != 'true' &&
-          github.repository == 'tempoxyz/zones' &&
-          github.event_name != 'pull_request' && github.event_name != 'merge_group'
-        env:
-          BUILDER_REF: ${{ steps.eif_builder.outputs.ref }}
-        run: |
-          set -euo pipefail
-          docker tag tempo-zone-prover-eif-builder:local "$BUILDER_REF"
-          docker push "$BUILDER_REF"
 
       - name: Build tempo-zone-prover EIF
         env:
-          PROVER_IMAGE: tempo-zone-prover-enclave:eif-source
+          BUILD_BACKEND: depot
+          DEPOT_PROJECT: 0c6tg19qsp
+          PROVER_BINARY_DIR: target/prover-compiled
+          BUILD_INPUT_FILE: .tempo-genesis/genesis.json
           EIF_BUILDER_IMAGE: ${{ steps.eif_builder.outputs.image }}
-          EIF_OUTPUT_DIR: target/tempo-zone-prover-eif
+          OUT_DIR: target/tempo-zone-prover-eif
         run: |
-          set -Eeuo pipefail
-
-          mkdir -p "$EIF_OUTPUT_DIR"
-
-          docker run --rm \
-            --platform linux/amd64 \
-            --volume /var/run/docker.sock:/var/run/docker.sock \
-            --volume "$PWD/$EIF_OUTPUT_DIR:/output" \
-            "$EIF_BUILDER_IMAGE" \
-            build-enclave \
-            --docker-uri "$PROVER_IMAGE" \
-            --output-file /output/tempo-zone-prover.eif \
-            | tee "$EIF_OUTPUT_DIR/measurements.json"
+          scripts/package-prover-eif.sh
+          mv "$OUT_DIR/enclave.eif" "$OUT_DIR/tempo-zone-prover.eif"
 
       - name: Read tempo-zone-prover PCR measurements
         id: prover_measurements
@@ -400,11 +522,13 @@ jobs:
       - name: Bind measurements to this build and genesis
         env:
           PROVER_BINARY_SHA256: ${{ steps.compiled.outputs.binary_sha }}
+          EIF_BUILDER_IMAGE: ${{ steps.eif_builder.outputs.image }}
         run: |
           jq -n --arg sha "$GITHUB_SHA" --arg attempt "$GITHUB_RUN_ATTEMPT" \
             --arg genesis_sha256 "$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)" \
             --arg binary_sha256 "$PROVER_BINARY_SHA256" \
-            '{sha: $sha, attempt: $attempt, genesis_sha256: $genesis_sha256, binary_sha256: $binary_sha256}' \
+            --arg eif_builder_image "$EIF_BUILDER_IMAGE" \
+            '{sha: $sha, attempt: $attempt, genesis_sha256: $genesis_sha256, binary_sha256: $binary_sha256, eif_builder_image: $eif_builder_image}' \
             > target/tempo-zone-prover-eif/identity.json
 
       - name: Upload tempo-zone-prover PCR measurements
