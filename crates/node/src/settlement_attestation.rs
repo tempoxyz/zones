@@ -659,7 +659,7 @@ mod tests {
         let mut previous_tip = B256::ZERO;
         let mut previous_deposit = B256::ZERO;
         for number in 1_u64..=2 {
-            l1.push_success(&serde_json::json!({ "active": "T13" }));
+            l1.push_success(&serde_json::json!({ "active": "T13", "schedule": [] }));
             // The only portal values supplied are signing configuration. Neither the submitted
             // zone tip nor the submitted batch index is read, even for the second boundary.
             let metadata: Vec<Bytes> =
