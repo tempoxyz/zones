@@ -55,7 +55,7 @@ fn corrupt_token_hex(token: &str) -> String {
 }
 
 fn address_topic(address: Address) -> String {
-    format!("{:#x}", address.into_word())
+    address.into_word().to_string()
 }
 
 fn signed_sponsored_raw_transaction(
@@ -111,7 +111,7 @@ fn assert_redacted_block(block: &Value) {
         "block transactions should be empty (redacted)"
     );
 
-    let zero_root = format!("{:#x}", B256::ZERO);
+    let zero_root = B256::ZERO.to_string();
     assert_eq!(block["transactionsRoot"], zero_root);
     assert_eq!(block["receiptsRoot"], zero_root);
     assert_eq!(block["stateRoot"], zero_root);
@@ -1368,7 +1368,7 @@ async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
                 .to_owned()
         })
         .collect::<HashSet<_>>();
-    assert_eq!(owner_hashes, HashSet::from([format!("{owner_hash:#x}")]));
+    assert_eq!(owner_hashes, HashSet::from([owner_hash.to_string()]));
 
     Ok(())
 }
@@ -1505,7 +1505,7 @@ async fn test_zone_get_zone_info_returns_all_enabled_tokens() -> eyre::Result<()
 fn encryption_public_key(secret_key: &k256::SecretKey) -> (String, u8) {
     let (x, y_parity) =
         zone_precompiles::ecies::compressed_x_and_parity(secret_key.public_key().as_affine());
-    (format!("{x:#x}"), y_parity)
+    (x.to_string(), y_parity)
 }
 
 /// The method returns the latest key on Tempo L1 without waiting for the Zone
