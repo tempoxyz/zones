@@ -184,7 +184,8 @@ impl ZoneRpcApi for MockZoneRpcApi {
             }
 
             let stream = stream::iter(vec![zone_rpc::types::to_raw(&json!({
-                "hash": b256!("0x4444444444444444444444444444444444444444444444444444444444444444").to_string(),
+                "hash": b256!("0x4444444444444444444444444444444444444444444444444444444444444444")
+                    .to_string(),
                 "number": "0x42",
                 "parentHash": alloy_primitives::B256::ZERO.to_string(),
                 "logsBloom": format!("{:#x}", alloy_primitives::Bloom::ZERO),
@@ -213,11 +214,20 @@ impl ZoneRpcApi for MockZoneRpcApi {
 
             let stream = stream::iter(vec![zone_rpc::types::to_raw(&json!({
                 "address": format!("{:#x}", Address::ZERO),
-                "topics": [b256!("0x1111111111111111111111111111111111111111111111111111111111111111").to_string()],
+                "topics": [
+                    b256!("0x1111111111111111111111111111111111111111111111111111111111111111")
+                        .to_string()
+                ],
                 "data": "0x",
-                "blockHash": b256!("0x2222222222222222222222222222222222222222222222222222222222222222").to_string(),
+                "blockHash": b256!(
+                    "0x2222222222222222222222222222222222222222222222222222222222222222"
+                )
+                .to_string(),
                 "blockNumber": "0x42",
-                "transactionHash": b256!("0x3333333333333333333333333333333333333333333333333333333333333333").to_string(),
+                "transactionHash": b256!(
+                    "0x3333333333333333333333333333333333333333333333333333333333333333"
+                )
+                .to_string(),
                 "transactionIndex": "0x0",
                 "logIndex": "0x0",
                 "removed": false
