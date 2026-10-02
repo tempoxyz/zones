@@ -318,7 +318,7 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
     ensure!(
         !provider
             .get_code_at(portal)
-            .block_id(finalized_block_id)
+            .number(finalized_block)
             .await
             .wrap_err_with(|| {
                 format!(

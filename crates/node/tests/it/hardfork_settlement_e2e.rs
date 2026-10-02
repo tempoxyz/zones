@@ -90,7 +90,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
     assert_eq!(outbox.lastBatch().call().await?.withdrawalBatchIndex, 1);
     // The deposit finalizes the first batch; block eight finalizes the second T12 batch.
-    assert!(deposit_block.header.number() < 8);
+    assert!(deposit_block.number() < 8);
     while provider.get_block_number().await? < 8 {
         l1.fund_user(l1.admin_address(), 1).await?;
         zone.wait_for_tempo_block_number(l1.provider().get_block_number().await?, DEFAULT_TIMEOUT)
@@ -136,10 +136,10 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
         Default::default(),
     );
     let deposit_batch = BatchData {
-        zone_height: deposit_block.header.number(),
+        zone_height: deposit_block.number(),
         tempo_block_number: TempoState::new(TEMPO_STATE_ADDRESS, &provider)
             .tempoBlockNumber()
-            .block(BlockId::number(deposit_block.header.number()))
+            .block(BlockId::number(deposit_block.number()))
             .call()
             .await?,
         prev_block_hash: B256::ZERO,
@@ -195,7 +195,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
             Ok(zone
                 .deposit_queue()
                 .last_enqueued()
-                .filter(|anchor| anchor.number >= last_t12.header.number())
+                .filter(|anchor| anchor.number >= last_t12.number())
                 .map(|_| ()))
         },
     )

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use alloy_consensus::{
-    Signed, TxLegacy,
+    SignableTransaction as _, TxLegacy,
     transaction::{Recovered, SignerRecoverable as _},
 };
 use alloy_eips::{eip2718::Decodable2718 as _, eip4895::Withdrawals};
@@ -259,8 +259,7 @@ where
         value: U256::ZERO,
         input: calldata.into(),
     };
-    let transaction =
-        TempoTxEnvelope::Legacy(Signed::new_unhashed(transaction, TEMPO_SYSTEM_TX_SIGNATURE));
+    let transaction = TempoTxEnvelope::Legacy(transaction.into_signed(TEMPO_SYSTEM_TX_SIGNATURE));
     let recovered = Recovered::new_unchecked(transaction.clone(), TEMPO_SYSTEM_TX_SENDER);
 
     execute_recovered_transaction(
@@ -294,8 +293,7 @@ where
         value: U256::ZERO,
         input: calldata.into(),
     };
-    let transaction =
-        TempoTxEnvelope::Legacy(Signed::new_unhashed(transaction, TEMPO_SYSTEM_TX_SIGNATURE));
+    let transaction = TempoTxEnvelope::Legacy(transaction.into_signed(TEMPO_SYSTEM_TX_SIGNATURE));
     let recovered = Recovered::new_unchecked(transaction.clone(), TEMPO_SYSTEM_TX_SENDER);
     execute_recovered_transaction(
         executor,
@@ -332,8 +330,7 @@ where
         value: U256::ZERO,
         input: calldata.into(),
     };
-    let transaction =
-        TempoTxEnvelope::Legacy(Signed::new_unhashed(transaction, TEMPO_SYSTEM_TX_SIGNATURE));
+    let transaction = TempoTxEnvelope::Legacy(transaction.into_signed(TEMPO_SYSTEM_TX_SIGNATURE));
     let recovered = Recovered::new_unchecked(transaction.clone(), TEMPO_SYSTEM_TX_SENDER);
 
     execute_recovered_transaction(
