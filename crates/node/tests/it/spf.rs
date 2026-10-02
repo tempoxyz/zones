@@ -123,7 +123,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         },
         zone_blocks: vec![
             ZoneBlock {
-                number: first_built_block.header.number(),
+                number: first_built_block.number(),
                 parent_hash,
                 timestamp: first_built_block.header.timestamp(),
                 timestamp_millis_part: first_built_block.header.timestamp_millis_part,
@@ -139,7 +139,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 transactions: vec![first_raw_transaction],
             },
             ZoneBlock {
-                number: second_built_block.header.number(),
+                number: second_built_block.number(),
                 parent_hash: first_hash,
                 timestamp: second_built_block.header.timestamp(),
                 timestamp_millis_part: second_built_block.header.timestamp_millis_part,
@@ -168,7 +168,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
 
     assert_eq!(output.block_transition.prevBlockHash, B256::ZERO);
     assert_eq!(output.block_transition.nextBlockHash, expected_hash);
-    assert_eq!(output.next_zone_height, second_built_block.header.number());
+    assert_eq!(output.next_zone_height, second_built_block.number());
     assert_eq!(
         output.deposit_queue_transition.prevProcessedHash,
         B256::ZERO
@@ -373,7 +373,7 @@ async fn build_single_transaction_block(
 
     Ok(BuiltTransactionBlock {
         genesis_state_root: genesis_block.header.state_root(),
-        zone_number: built_block.header.number(),
+        zone_number: built_block.number(),
         zone_timestamp: built_block.header.timestamp(),
         zone_timestamp_millis_part: built_block.header.timestamp_millis_part,
         zone_beneficiary: built_block.header.beneficiary(),

@@ -653,7 +653,7 @@ async fn find_submitted_batch(
             let block = zone.get_block_by_hash(hash).await?.ok_or_else(|| {
                 eyre!("submitted Zone block {hash} not found on unrestricted RPC")
             })?;
-            let number = block.header.number();
+            let number = block.number();
             if number < target {
                 let (to, block_hash) =
                     end.ok_or_else(|| eyre!("no submitted batch contains Zone block {target}"))?;
@@ -906,7 +906,7 @@ async fn portal_parent_number(
     }
 
     match zone.get_block_by_hash(discovery.portal_block_hash).await? {
-        Some(block) => Ok(block.header.number()),
+        Some(block) => Ok(block.number()),
         None => {
             let tip = zone.get_block_number().await?;
             let genesis_hash = zone_header(zone, 0).await?.hash_slow();
@@ -933,7 +933,7 @@ async fn resolve_block_number(
                 .await
                 .wrap_err_with(|| format!("resolve Zone block hash {hash}"))?
                 .ok_or_else(|| eyre!("Zone block {hash} not found"))?;
-            Ok(Some(block.header.number()))
+            Ok(Some(block.number()))
         }
     }
 }

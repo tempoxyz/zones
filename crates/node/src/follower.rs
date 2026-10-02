@@ -1042,6 +1042,7 @@ fn validate_block_timestamp(timestamp_millis: u64, now: SystemTime) -> eyre::Res
 mod tests {
     use std::time::Duration;
 
+    use alloy_consensus::SignableTransaction as _;
     use alloy_eips::NumHash;
     use alloy_primitives::{Address, B256};
     use tokio_util::sync;
@@ -1089,7 +1090,7 @@ mod tests {
 
     #[test]
     fn rejects_advance_tempo_sent_to_wrong_contract() {
-        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_consensus::TxLegacy;
         use alloy_primitives::{Address, U256};
         use alloy_sol_types::SolCall as _;
         use reth_primitives_traits::SealedBlock;
@@ -1116,10 +1117,9 @@ mod tests {
         let block = SealedBlock::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
-                transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                    tx,
-                    TEMPO_SYSTEM_TX_SIGNATURE,
-                ))],
+                transactions: vec![TempoTxEnvelope::Legacy(
+                    tx.into_signed(TEMPO_SYSTEM_TX_SIGNATURE),
+                )],
                 ommers: vec![],
                 withdrawals: None,
             },
@@ -1149,7 +1149,6 @@ mod tests {
 
     #[test]
     fn rejects_non_system_advance_tempo_transaction() {
-        use alloy_consensus::{Signed, TxLegacy};
         use alloy_primitives::Signature;
         use reth_primitives_traits::{SealedBlock, SealedHeader};
         use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
@@ -1169,10 +1168,12 @@ mod tests {
         let block = SealedBlock::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
-                transactions: vec![TempoTxEnvelope::Legacy(Signed::<TxLegacy>::new_unhashed(
-                    system_tx.tx().clone(),
-                    Signature::test_signature(),
-                ))],
+                transactions: vec![TempoTxEnvelope::Legacy(
+                    system_tx
+                        .tx()
+                        .clone()
+                        .into_signed(Signature::test_signature()),
+                )],
                 ommers: vec![],
                 withdrawals: None,
             },
@@ -1184,7 +1185,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_advance_tempo_calldata() {
-        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_consensus::TxLegacy;
         use alloy_primitives::{Bytes, U256};
         use reth_primitives_traits::SealedBlock;
         use tempo_primitives::{
@@ -1200,10 +1201,9 @@ mod tests {
         let block = SealedBlock::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
-                transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                    tx,
-                    TEMPO_SYSTEM_TX_SIGNATURE,
-                ))],
+                transactions: vec![TempoTxEnvelope::Legacy(
+                    tx.into_signed(TEMPO_SYSTEM_TX_SIGNATURE),
+                )],
                 ommers: vec![],
                 withdrawals: None,
             },
@@ -1219,7 +1219,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_or_trailing_advance_tempo_header_rlp() {
-        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_consensus::TxLegacy;
         use alloy_primitives::{Bytes, U256};
         use alloy_sol_types::SolCall as _;
         use reth_primitives_traits::SealedBlock;
@@ -1244,10 +1244,9 @@ mod tests {
             SealedBlock::seal_slow(Block {
                 header: TempoHeader::default(),
                 body: alloy_consensus::BlockBody {
-                    transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                        tx,
-                        TEMPO_SYSTEM_TX_SIGNATURE,
-                    ))],
+                    transactions: vec![TempoTxEnvelope::Legacy(
+                        tx.into_signed(TEMPO_SYSTEM_TX_SIGNATURE),
+                    )],
                     ommers: vec![],
                     withdrawals: None,
                 },
