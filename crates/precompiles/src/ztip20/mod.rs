@@ -67,13 +67,18 @@ impl CallRules for TIP20Rules {
                 ITIP20::ITIP20Calls::nonces(call) => {
                     check_caller(caller, &[call.owner])
                 }
-                // Transfers are disabled during the initial permissioned Zone phase.
-                // Private asset movement is limited to the protocol-managed inbox and outbox paths.
+                // T15 activates private user transfers after the Zone inherits Tempo's
+                // scheduled fork. The upstream token still applies allowance and TIP-403
+                // policy checks; this wrapper retains fixed gas and error redaction.
                 ITIP20::ITIP20Calls::transferFrom(_)
                 | ITIP20::ITIP20Calls::transfer(_)
                 | ITIP20::ITIP20Calls::transferWithMemo(_)
                 | ITIP20::ITIP20Calls::transferFromWithMemo(_) => {
-                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    if StorageCtx::default().spec().is_t15() {
+                        CallCheck::Continue
+                    } else {
+                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    }
                 }
                 // Inbox/outbox call TIP20 internally; public mint/burn entry points stay disabled.
                 ITIP20::ITIP20Calls::mint(_)
@@ -353,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn all_transfer_calls_are_disallowed() {
+    fn transfer_calls_activate_at_t15() {
         let rules = rules();
         let caller = Address::repeat_byte(0x11);
         let recipient = Address::repeat_byte(0x22);
@@ -390,6 +395,10 @@ mod tests {
             assert!(matches!(
                 admit_at(&rules, &call, caller, TempoHardfork::T8),
                 CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+            ));
+            assert!(matches!(
+                admit_at(&rules, &call, caller, TempoHardfork::T15),
+                CallCheck::Continue
             ));
         }
     }
@@ -717,9 +726,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: re-enable once zones allow user transfers"]
     fn transfer_from_insufficient_balance_does_not_reveal_the_source_balance() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new()?;
+        let mut harness = PrecompileHarness::new_at(TempoHardfork::T15)?;
         // Craft a successful allowance return whose first four bytes collide with the upstream
         // error selector, exercising the redaction filter's revert-status guard.
         let mut allowance_bytes = [0u8; 32];
@@ -776,6 +784,70 @@ mod tests {
         );
         assert_eq!(harness.balance_of(harness.alice)?, U256::from(1_000_000u64));
 
+        Ok(())
+    }
+
+    #[test]
+    fn t15_private_transfers_move_balances_and_preserve_fixed_gas() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new_at(TempoHardfork::T15)?;
+        let direct = harness.call(
+            harness.alice,
+            ITIP20::transferCall {
+                to: harness.bob,
+                amount: U256::from(100_000u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(direct.is_success());
+        assert_eq!(direct.gas_used, TIP20_FIXED_TRANSFER_GAS);
+        assert_eq!(direct.state_gas_used, 0);
+        assert_eq!(harness.balance_of(harness.alice)?, U256::from(900_000u64));
+        assert_eq!(harness.balance_of(harness.bob)?, U256::from(100_000u64));
+
+        let delegated = harness.call(
+            harness.spender,
+            ITIP20::transferFromCall {
+                from: harness.alice,
+                to: harness.bob,
+                amount: U256::from(50_000u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(delegated.is_success());
+        assert_eq!(delegated.gas_used, TIP20_FIXED_TRANSFER_GAS);
+        assert_eq!(delegated.state_gas_used, 0);
+        assert_eq!(harness.balance_of(harness.alice)?, U256::from(850_000u64));
+        assert_eq!(harness.balance_of(harness.bob)?, U256::from(150_000u64));
+        assert_eq!(
+            harness.allowance(harness.alice, harness.spender)?,
+            U256::from(250_000u64)
+        );
+
+        let insufficient = harness.call(
+            harness.alice,
+            ITIP20::transferCall {
+                to: harness.bob,
+                amount: U256::from(1_000_000u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(insufficient.is_revert());
+        assert_eq!(insufficient.gas_used, TIP20_FIXED_TRANSFER_GAS);
+        assert_eq!(
+            insufficient.bytes,
+            Bytes::from(InsufficientBalance {}.abi_encode())
+        );
+        assert_eq!(harness.balance_of(harness.alice)?, U256::from(850_000u64));
+        assert_eq!(harness.balance_of(harness.bob)?, U256::from(150_000u64));
         Ok(())
     }
 
