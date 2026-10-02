@@ -83,7 +83,10 @@ revision in their native-payment branches.
   gas and zero payment gas.
 - **Remaining:** test delegated candidates and saturation, cover AA bundles
   without exposing arbitrary child execution, and review
-  all pool and prover classifiers. The finding is not closed.
+  all pool and prover classifiers. The new native withdrawal smoke checks a
+  forged portal-prefix `processWithdrawals` call: it reverted without child
+  calls and charged 27,910 general gas and zero payment gas. The finding is
+  not closed.
 
 ## F004: direct private TIP-20 transfers are disabled on Zones
 

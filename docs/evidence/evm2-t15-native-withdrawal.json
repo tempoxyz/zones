@@ -1,0 +1,69 @@
+{
+  "kind": "t15_native_withdrawal_smoke",
+  "full_native_payment_acceptance": false,
+  "execution_proof_verified": false,
+  "proof_mode": "NoProof (0x02)",
+  "source_revisions": {
+    "tempo": "e96f3f3bb",
+    "zones": "afbabc891"
+  },
+  "binary_sha256": {
+    "tempo": "541a4e7520f0a5b9650441399a6f520f6f3bd610b8b38cd302ef7fa78c1d54a2",
+    "zones": "169602f9dbed4598a9dbfd65ab7a5af267affd2785799c1dcd342b76f0d7b317"
+  },
+  "clients": {
+    "l1": "tempo/v1.14.0-5bb038c/x86_64-unknown-linux-gnu",
+    "zone": "tempo-zone/v0.3.1-3c64961/x86_64-unknown-linux-gnu"
+  },
+  "genesis": {
+    "l1": "0xe4c37aeabb3c011af3f06399ed6951df7c9634a9d0cc4a88e4881a941ac91d2d",
+    "zone": "0xe262193f2dfaafcf08fd0876ff08d0b22e11de9e7060077724fdf8e0448439b6"
+  },
+  "withdrawal_request": {
+    "hash": "0x62dfee5e09f557c086bc54e3697269e4542071bd4726d2220e35d58c5ac41f75",
+    "zone_block": 2430,
+    "gas_used": 1122747
+  },
+  "balances": {
+    "sender": 500000,
+    "recipient_one": 350000,
+    "recipient_two": 50000,
+    "zone_supply": 900000,
+    "backing_before": 1000000,
+    "backing_after": 900000,
+    "public_recipient_before": 18446744063706551615,
+    "public_recipient_after": 18446744063706651615
+  },
+  "fifo_queue": {
+    "head_before": 1,
+    "head_after": 2,
+    "tail_after": 2
+  },
+  "payout": {
+    "hash": "0xa4e3fc4cb850cbf71b7604dfcb75680934cf18dab089b6dafacbe511f8735e1b",
+    "l1_block": 5190,
+    "gas_used": 97468,
+    "lane_metric": {
+      "time": 1790918248.662023,
+      "payment_transactions_last": 1.0,
+      "general_gas_used_last": 0.0,
+      "payment_gas_used_last": 97468.0,
+      "gas_used_last": 97468.0,
+      "pool_transactions_included_last": 1.0
+    },
+    "native_delegate_target": "0x5ad1000000000000000000000000000000000000"
+  },
+  "forged_candidate": {
+    "hash": "0x9efd2115ff508bc896d4fda2eda00e4e0e549d4f77070ee8bed96087241c451e",
+    "l1_block": 5260,
+    "gas_used": 27910,
+    "lane_metric": {
+      "time": 1790918318.7202065,
+      "payment_transactions_last": 0.0,
+      "general_gas_used_last": 27910.0,
+      "payment_gas_used_last": 0.0,
+      "gas_used_last": 27910.0,
+      "pool_transactions_included_last": 1.0
+    }
+  }
+}

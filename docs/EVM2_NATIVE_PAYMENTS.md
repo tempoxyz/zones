@@ -91,6 +91,12 @@ reconciled supply/backing after a portal-bound deposit, a stateful restart,
 and one NoProof settlement batch using zero general-lane gas. It was
 provisioned after L1 activation and does not close the migration or proof gates.
 
+The [native withdrawal evidence](evidence/EVM2_T15_NATIVE_WITHDRAWAL.md)
+records a signed private burn, FIFO processing through a paid EVM2 delegate
+frame, exact public payout and backing reconciliation, and one isolated
+zero-general-gas payment block. A forged portal candidate reverted under
+general capacity. Callback withdrawals and real execution proofs remain open.
+
 ## Protocol requirements
 
 | ID | Required outcome | Passing evidence |
@@ -209,11 +215,12 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | --- | --- | --- |
 | Repository/upstream inventory | Started | Tempo #7871, Zones #1463, TIP-1084 #6559; local Earn invariants inspected |
 | Compatible EVM2 baseline | Partial | Real bridge receipts and backing reconciliation; NoProof mode, no scheduled native activation |
-| Shared native context and paid child work | Partial | Tempo T15 native deposit and bounded delegate-frame settlement use paid child calls; withdrawals, vault and full admission remain open |
+| Shared native context and paid child work | Partial | Tempo T15 native deposit, bounded delegate-frame settlement and FIFO withdrawal processing use paid child calls; callbacks, vault and full admission remain open |
 | Shared portal ABI | Implemented groundwork | Tempo ABI macro reused by Zones; historical selector/event tests |
 | Native reentry provider safety | Reproduced finding fixed | EVM2 #523 Miri before/after; downstream shared dispatch aligned |
 | T15 native deposit smoke | Partial | [Real native trace, private credit, backing, NoProof batch, and one zero-general-gas deposit block](evidence/EVM2_T15_NATIVE_DEPOSIT.md); Zone created after fork |
 | T15 existing-Zone L1 activation smoke | Partial | [Pre-fork private balance, scheduled L1 fork, post-fork native deposit and two payment-lane batches](evidence/EVM2_T15_SETTLEMENT_FORK.md); Zone execution stayed T14; NoProof |
 | T15 Zone private transfer smoke | Partial | [Scheduled Zone T15, three signed transfers, backing, restart and one payment-lane batch](evidence/EVM2_T15_PRIVATE_TRANSFER.md); NoProof, Zone created after L1 fork |
+| T15 native withdrawal smoke | Partial | [Private burn, paid portal payout, FIFO cursor, backing and payment lane; forged candidate charged general](evidence/EVM2_T15_NATIVE_WITHDRAWAL.md); callback and proof flows open |
 | E01–I01 | Open | No passing combined acceptance result recorded |
 | Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642, Tempo #8076, Zones #1637, Earn #354; full implementation open |
