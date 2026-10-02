@@ -14,7 +14,9 @@ the stack was reconciled at L1 block 439 using Tempo's
 [`build-native-earn-manifest.py`](https://github.com/tempoxyz/tempo/blob/dan/evm2-native-payments/scripts/native-payments/build-native-earn-manifest.py).
 Its [EIP-1186 account and storage proofs](evm2-t16-native-earn-manifest-proof.json)
 were verified against that block's state root, including the manifest's code
-hashes and vault/fee bindings. The generated `nativeEarnManifest` was inserted
+hashes, vault/fee bindings, and the vault's EarnShare issuer role. Six account
+proofs and nine storage proofs bind the role to the same manifest vault. The
+generated `nativeEarnManifest` was inserted
 into the local genesis configuration and the node restarted before T16. This
 configuration step is a devnet procedure; a production activation needs a
 published, fixed manifest and commitment before the fork. These are state
@@ -48,9 +50,8 @@ timestamp and exact receipt gas. A post-fork Zone private transfer in L2 block
 1418 moved another 10,000 units: the sender held 80,000, the recipient 20,000,
 private supply remained 100,000, and L1 portal backing remained 100,000. The
 batch covering that transfer settled in L1 block 2554 with 98,842 payment gas
-and zero general gas. It used explicit NoProof mode; this run does **not**
-demonstrate Nitro execution-proof validity or sustained mixed-workload
-throughput.
+and zero general gas. It used explicit NoProof mode and does **not**
+demonstrate Nitro execution-proof validity.
 
 A separate contract at `0x8464135c8F25Da09e49BC8782676a84730C318bC` had
 the exact dispatcher runtime hash but no system registration. Its
@@ -59,6 +60,36 @@ also included a real Earn redemption: the matched metric charged 1,000,000
 general gas to the forged call and 218,120 payment gas to the registered
 payment. Matching bytecode and selector alone therefore did not grant payment
 capacity in this run.
+
+The [30-minute mixed-load record](evm2-t16-mixed-load-summary.json) contains
+[450 complete cycles](evm2-t16-mixed-load-30m.jsonl.gz): 900 Earn
+deposits/redemptions and 450 private Zone transfers, with 18 unchanged custody
+checkpoints. [Sampled lane counters](evm2-t16-mixed-load-lane-metrics.jsonl.gz)
+match all 900 Earn blocks. General gas was zero in 898; the other two blocks
+included separate forged-dispatcher deployment/call transactions, while their
+payment gas exactly covered the Earn receipts. The last private transfer was
+in Zone block 4353. The batch through block 4360 was submitted to L1, with
+successful settlement receipt
+`0x21baa9efd6ac2817bf2f659cca8c659e282b1ac3cb29d55e8ea1454f04576038`
+in L1 block 5434. The serial workload averaged 0.25 mixed cycles per second;
+it measures sustained correctness, not maximum capacity. Its settlement was
+still in NoProof mode. The Tempo PR includes the
+[`summarize-t16-mixed-load.py`](https://github.com/tempoxyz/tempo/blob/dan/evm2-native-payments/scripts/native-payments/summarize-t16-mixed-load.py)
+checker for the compressed raw data.
+
+The [reviewed-binary fork record](evm2-t16-reviewed-fork.json) captures a
+second branch copied at the common pre-fork L1 block 1171. Its next block
+activated T16 with the reviewed Tempo binary, retaining 1,000,000 EarnShare
+and vault/venue assets. On this branch, Earn deposit, redemption, and spending
+and a new Zone 2 portal deposit all used payment gas with zero general gas.
+Zone 2 moved 1,000 of its 10,000 private pathUSD from sender to recipient;
+its covering batch settled on L1 in receipt
+`0x90a55796e214a661fc65d07df519e5ae52650ae77013703d09ad48b0fd88fd80`
+with 98,026 payment gas and zero general gas. Authenticated private balances
+and supply matched L1 portal backing. The Tempo PR's
+[`check-t16-reviewed.py`](https://github.com/tempoxyz/tempo/blob/dan/evm2-native-payments/scripts/native-payments/check-t16-reviewed.py)
+rechecks these receipts, fork code hashes, balances, and lane samples against
+the running reviewed L1 and Zone. The new Zone still uses NoProof mode.
 
 While these isolated devnets are available, rerun the public receipt and state
 checker from the Tempo checkout:
