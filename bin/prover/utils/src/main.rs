@@ -71,10 +71,27 @@ struct Cli {
 enum Command {
     /// Generate and locally validate an SPF batch witness.
     GenerateInput(GenerateInputArgs),
+    /// Replay a saved witness against a trusted Zone genesis and expected commitment.
+    ValidateInput(ValidateInputArgs),
     /// Send a saved witness to a prover and save its output and proof.
     Prove(ProveArgs),
     /// Verify a saved proof against the native L1 verifier using eth_call.
     Verify(verify::VerifyArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ValidateInputArgs {
+    /// Batch witness JSON produced by generate-input.
+    #[arg(long, short, value_name = "PATH")]
+    input: PathBuf,
+
+    /// Trusted Zone genesis JSON, not taken from the witness.
+    #[arg(long, value_name = "CHAIN_OR_PATH_OR_URL")]
+    chain: String,
+
+    /// Next Zone block hash committed by the submitted L1 batch.
+    #[arg(long, value_name = "HASH")]
+    expected_next_block_hash: B256,
 }
 
 #[derive(Debug, clap::Args)]
@@ -195,9 +212,33 @@ async fn main() -> Result<()> {
     init_tracing(&cli.log_filter)?;
     match cli.command {
         Command::GenerateInput(args) => generate_input(args).await,
+        Command::ValidateInput(args) => validate_input(args).await,
         Command::Prove(args) => prove(args).await,
         Command::Verify(args) => verify::run(args).await,
     }
+}
+
+async fn validate_input(args: ValidateInputArgs) -> Result<()> {
+    let chain = load_chain(&args.chain).await?;
+    let bytes = std::fs::read(&args.input)
+        .wrap_err_with(|| format!("read witness {}", args.input.display()))?;
+    let witness: BatchWitness = serde_json::from_slice(&bytes)
+        .wrap_err_with(|| format!("decode witness {}", args.input.display()))?;
+    let blocks = witness.zone_blocks.len();
+    let output = prove_zone_batch(&SpfConfig::new(chain), witness)
+        .context("saved witness failed SPF replay")?;
+    if output.block_transition.nextBlockHash != args.expected_next_block_hash {
+        bail!(
+            "SPF replay produced {}, expected submitted commitment {}",
+            output.block_transition.nextBlockHash,
+            args.expected_next_block_hash
+        );
+    }
+    println!(
+        "Validated {blocks} Zone blocks against submitted commitment {}",
+        args.expected_next_block_hash
+    );
+    Ok(())
 }
 
 fn init_tracing(filter: &str) -> Result<()> {

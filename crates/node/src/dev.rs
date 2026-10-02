@@ -299,6 +299,10 @@ mod command {
         #[arg(long = "dev.allowed-account")]
         allowed_accounts: Vec<Address>,
 
+        /// Match a scheduled Tempo T15 activation in the generated Zone genesis.
+        #[arg(long = "dev.t15-time")]
+        t15_time: Option<u64>,
+
         /// Directory for genesis.json, zone.json, node data, and logs. Wiped on start.
         #[arg(long, default_value_os_t = default_datadir())]
         datadir: PathBuf,
@@ -350,7 +354,7 @@ mod command {
             let allowed_accounts = self.allowed_accounts.clone();
 
             // Provision on a scoped runtime; the node builds its own afterwards.
-            let provisioned = {
+            let mut provisioned = {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()?;
@@ -366,6 +370,14 @@ mod command {
                     rpc_url: format!("http://{}:{}", self.http_addr, self.http_port),
                 }))?
             };
+
+            if let Some(timestamp) = self.t15_time {
+                provisioned
+                    .genesis
+                    .config
+                    .extra_fields
+                    .insert("t15Time".into(), serde_json::json!(timestamp));
+            }
 
             let genesis_path = self.datadir.join("genesis.json");
             std::fs::write(
@@ -512,6 +524,13 @@ mod command {
 
             assert_eq!(redacted.redacted_rpc_port, 9544);
             assert_eq!(private.redacted_rpc_port, 9544);
+        }
+
+        #[test]
+        fn scheduled_t15_time_is_accepted() {
+            let command =
+                DevCommand::try_parse_from(["dev", "--dev.t15-time", "1790913144"]).unwrap();
+            assert_eq!(command.t15_time, Some(1790913144));
         }
 
         #[test]

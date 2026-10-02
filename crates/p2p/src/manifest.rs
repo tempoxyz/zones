@@ -16,6 +16,24 @@ use serde::Deserialize;
 /// Minimum number of nodes that must be registered for the on-chain settlement quorum.
 const MIN_QUORUM_NODES: usize = 3;
 
+/// Proof policy shared by every settlement quorum member.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SettlementProofMode {
+    /// Explicit rollout mode with an empty proof.
+    #[default]
+    NoProof,
+    /// Nitro-attested settlement proof.
+    Nitro,
+}
+
+impl SettlementProofMode {
+    /// Whether this policy requires a Nitro attestation.
+    pub const fn requires_nitro(self) -> bool {
+        matches!(self, Self::Nitro)
+    }
+}
+
 /// The role a node holds for a given Tempo anchor.
 ///
 /// Which member *leads* comes from finalized L1 state; whether a member belongs to the
@@ -716,6 +734,7 @@ impl ManifestNode {
 #[derive(Debug, Clone)]
 pub struct ZoneManifest {
     leader_ed25519_public_key: PublicKey,
+    settlement_proof_mode: SettlementProofMode,
     forced_recovery: Option<ForcedRecoveryConfig>,
     nodes: Vec<ManifestNode>,
     /// Identity-only address mappings retained to resolve finalized leadership history.
@@ -871,6 +890,7 @@ impl ZoneManifest {
 
         Ok(Self {
             leader_ed25519_public_key,
+            settlement_proof_mode: raw.settlement_proof_mode,
             forced_recovery,
             nodes,
             historical_leaders,
@@ -936,6 +956,11 @@ impl ZoneManifest {
         &self.leader_ed25519_public_key
     }
 
+    /// Proof policy used when signing settlement attestations.
+    pub const fn settlement_proof_mode(&self) -> SettlementProofMode {
+        self.settlement_proof_mode
+    }
+
     /// Manifest-derived initial leadership record (epoch 0, active from genesis).
     pub fn bootstrap_leadership(&self) -> LeadershipState {
         LeadershipState::new(0, self.leader_ed25519_public_key.clone(), 0)
@@ -979,8 +1004,8 @@ impl ZoneManifest {
 
     /// Digest of the settlement-relevant membership, logged at startup.
     ///
-    /// Covers each member's Ed25519 identity, quorum standing, and the address its signatures must
-    /// recover to — everything two nodes must agree on to derive the same roles. Compare it across
+    /// Covers the proof policy and each member's Ed25519 identity, quorum standing, and the address
+    /// its signatures must recover to. Compare it across
     /// nodes to diagnose a manifest mismatch. Addresses are excluded so relocating a node does not
     /// change it. Sorted, so file order does not matter.
     pub fn membership_digest(&self) -> B256 {
@@ -997,7 +1022,8 @@ impl ZoneManifest {
             .collect::<Vec<_>>();
         members.sort();
 
-        let mut preimage = Vec::with_capacity(members.len() * 64);
+        let mut preimage = Vec::with_capacity(1 + members.len() * 64);
+        preimage.push(u8::from(self.settlement_proof_mode.requires_nitro()));
         for (ed25519_public_key, rpc_only, secp256k1_address) in members {
             preimage.extend_from_slice(&ed25519_public_key);
             preimage.push(u8::from(rpc_only));
@@ -1077,6 +1103,8 @@ struct RawManifest {
     #[serde(default, rename = "sequencer_set_version")]
     _legacy_sequencer_set_version: Option<u64>,
     leader_ed25519_public_key: String,
+    #[serde(default)]
+    settlement_proof_mode: SettlementProofMode,
     #[serde(default)]
     forced_recovery: Option<RawForcedRecovery>,
     #[serde(default)]
@@ -1234,7 +1262,8 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{
-        LeadershipSchedule, LeadershipState, MIN_QUORUM_NODES, ManifestError, Role, ZoneManifest,
+        LeadershipSchedule, LeadershipState, MIN_QUORUM_NODES, ManifestError, Role,
+        SettlementProofMode, ZoneManifest,
     };
 
     fn public_key(seed: u64) -> commonware_cryptography::ed25519::PublicKey {
@@ -1691,6 +1720,37 @@ mod tests {
     }
 
     #[test]
+    fn settlement_proof_mode_is_shared_by_quorum_manifest() {
+        let base = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower-a", "127.0.0.1:9201"),
+                (3, "follower-b", "127.0.0.1:9202"),
+            ],
+        );
+        assert_eq!(
+            ZoneManifest::parse(&base).unwrap().settlement_proof_mode(),
+            SettlementProofMode::NoProof
+        );
+        let nitro = base.replacen(
+            "\n[[nodes]]",
+            "\nsettlement_proof_mode = \"nitro\"\n\n[[nodes]]",
+            1,
+        );
+        assert_eq!(
+            ZoneManifest::parse(&nitro).unwrap().settlement_proof_mode(),
+            SettlementProofMode::Nitro
+        );
+        let invalid = base.replacen(
+            "\n[[nodes]]",
+            "\nsettlement_proof_mode = \"unknown\"\n\n[[nodes]]",
+            1,
+        );
+        assert!(ZoneManifest::parse(&invalid).is_err());
+    }
+
+    #[test]
     fn resolves_historical_leader_without_adding_an_active_node() {
         let base = manifest(
             1,
@@ -2048,6 +2108,16 @@ mod tests {
         );
         assert_ne!(
             ZoneManifest::parse(&rekeyed).unwrap().membership_digest(),
+            baseline
+        );
+
+        let nitro = manifest_with_rpc_only(1, &nodes).replacen(
+            "\n[[nodes]]",
+            "\nsettlement_proof_mode = \"nitro\"\n\n[[nodes]]",
+            1,
+        );
+        assert_ne!(
+            ZoneManifest::parse(&nitro).unwrap().membership_digest(),
             baseline
         );
     }

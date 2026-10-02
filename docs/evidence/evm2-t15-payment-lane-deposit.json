@@ -1,0 +1,78 @@
+{
+  "kind": "t15_native_portal_deposit_smoke",
+  "native_deposit_verified": true,
+  "full_native_payment_acceptance": false,
+  "proof_mode": "NoProof (0x02)",
+  "execution_proof_verified": false,
+  "payment_lane_verified": true,
+  "forged_candidate_kept_general": true,
+  "fork_time": 1790907639,
+  "source_revisions": {
+    "tempo": "0f6f54a45",
+    "zones": "393eb41cc"
+  },
+  "binary_sha256": {
+    "tempo": "48c5c4c9d992b76918f33f6a222311cf5ff30f98ce44f25286fe8a7c21450fba",
+    "zones": "f86905c407b5c3137ef092319917727cfe4fa2fb44349ccb10f782d585b8e17d"
+  },
+  "l1_client": "tempo/v1.14.0-5bb038c/x86_64-unknown-linux-gnu",
+  "zone_client": "tempo-zone/v0.3.1-3c64961/x86_64-unknown-linux-gnu",
+  "genesis": {
+    "l1": "0xe4c37aeabb3c011af3f06399ed6951df7c9634a9d0cc4a88e4881a941ac91d2d",
+    "zone": "0x4acc0cd2a915e8787c33281c15054206d29868b407d8b6d1978c4645716b968f"
+  },
+  "portal": "0x5ad0000000000000000000000000000000000001",
+  "account": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "balances": {
+    "l1_block": "0x60a",
+    "zone_block": "0x4ea",
+    "private": 2000000,
+    "portal_backing": 2000000,
+    "zone_supply": 2000000
+  },
+  "deposit": {
+    "hash": "0x7e83e9070a1008b514c5c70a251f223f33b5100d9d20c7c2b675b0b6e953d10c",
+    "block": 1546,
+    "timestamp": 1790909020,
+    "gas_used": 93267,
+    "logs": 3,
+    "native_child_calls": [
+      {
+        "to": "0x20c0000000000000000000000000000000000000",
+        "selector": "0x23b872dd"
+      }
+    ]
+  },
+  "lane_metrics": {
+    "time": 1790909020.2598984,
+    "payment_transactions_last": 1.0,
+    "general_gas_used_last": 0.0,
+    "payment_gas_used_last": 93267.0,
+    "gas_used_last": 93267.0,
+    "pool_transactions_included_last": 1.0
+  },
+  "forged_candidate": {
+    "hash": "0x3aaaa35fd26232aca5ee04781ebe80bb022222228f4628570121870d7e15b85b",
+    "portal": "0x5ad0000000000000000000000000000000000002",
+    "block": 2168,
+    "gas_used": 29850,
+    "lane_metrics": {
+      "time": 1790909642.2457914,
+      "payment_transactions_last": 0.0,
+      "general_gas_used_last": 29850.0,
+      "payment_gas_used_last": 0.0,
+      "gas_used_last": 29850.0,
+      "pool_transactions_included_last": 1.0
+    }
+  },
+  "settlement": {
+    "hash": "0xe47a1dd27b2ee9d9dbc90737082880bd8cfacb9353cb2a57de04f4cebfb4f615",
+    "block": 1610,
+    "tempo_anchor_block": 1546,
+    "deposit_cursor_before": 1,
+    "deposit_cursor_after": 2,
+    "zone_height": 1258,
+    "verifier_config": "0x02",
+    "proof_length": 0
+  }
+}

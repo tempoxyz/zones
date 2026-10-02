@@ -49,11 +49,17 @@ use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
-use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_alloy::{
+    TempoNetwork,
+    provider::ext::TempoProviderExt,
+    rpc::{ForkSchedule, TempoCallBuilderExt},
+};
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
+
+/// Temporary Tempo rollout mode for an unconfigured settlement prover.
+pub const NO_PROOF_VERIFIER_CONFIG: &[u8] = &[2];
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
@@ -321,7 +327,8 @@ impl BatchSubmitter {
     ///   future prover integration).
     ///
     /// `verifierConfig` selects the Nitro verifier policy. Configured settlement includes the
-    /// prover's Nitro attestation; the pre-T11 unconfigured path keeps `proof` empty.
+    /// prover's Nitro attestation. Without a configured prover, select the explicit
+    /// rollout NoProof mode, whose proof must be empty.
     ///
     /// Returns the `BatchSubmitted` event decoded from the confirmed receipt.
     #[instrument(skip_all, fields(
@@ -370,6 +377,7 @@ impl BatchSubmitter {
                 batch.zone_height,
                 metadata,
                 certificate,
+                &verifier_config,
             )?;
         }
         let current_l1_block = self.validate_prepared_anchor(prepared).await?;
@@ -688,6 +696,7 @@ impl BatchSubmitter {
         zone_height: u64,
         metadata: PortalSubmissionMetadata,
         certificate: &SettlementCertificate,
+        verifier_config: &Bytes,
     ) -> Result<()> {
         let batch = &prepared.batch;
         if certificate.height != zone_height {
@@ -758,7 +767,7 @@ impl BatchSubmitter {
             "certificate withdrawal queue hash changed"
         );
         eyre::ensure!(
-            attestation.verifierConfigHash == keccak256(NITRO_VERIFIER_CONFIG_V1),
+            attestation.verifierConfigHash == keccak256(verifier_config),
             "certificate verifier config changed"
         );
         eyre::ensure!(
@@ -1212,10 +1221,11 @@ pub enum SettlementAbi {
 impl SettlementAbi {
     /// Resolve the settlement selector and attestation format from the live Tempo L1 hardfork.
     pub async fn from_l1(provider: &DynProvider<TempoNetwork>) -> Result<Self> {
-        let t13_active = provider
-            .is_hardfork_active(TempoHardfork::T13)
+        let schedule = provider
+            .get_fork_schedule()
             .await
             .wrap_err("failed reading the live Tempo L1 hardfork")?;
+        let t13_active = t13_active(&schedule)?;
         Ok(if t13_active { Self::T13 } else { Self::Legacy })
     }
 
@@ -1226,6 +1236,28 @@ impl SettlementAbi {
             Self::T13 => keccak256((previous, next).abi_encode()),
         }
     }
+}
+
+fn t13_active(schedule: &ForkSchedule) -> Result<bool> {
+    if let Some(t13) = schedule.schedule.iter().find(|fork| fork.name == "T13") {
+        return Ok(t13.active);
+    }
+    if schedule.active == "Genesis" {
+        return Ok(false);
+    }
+    let name = schedule
+        .active
+        .strip_prefix('T')
+        .ok_or_else(|| eyre::eyre!("unknown active Tempo hardfork {}", schedule.active))?;
+    let number = name.trim_end_matches(|character: char| character.is_ascii_alphabetic());
+    if number.is_empty()
+        || !name[number.len()..]
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        eyre::bail!("unknown active Tempo hardfork {}", schedule.active);
+    }
+    Ok(number.parse::<u64>()? >= 13)
 }
 
 /// Data required to submit a single batch to the ZonePortal on L1.
@@ -1381,7 +1413,10 @@ struct SettlementAttestationInput<'a> {
 
 fn settlement_proof(proof_bundle: Option<&ProofBundle>) -> Result<(Bytes, Bytes)> {
     let Some(proof_bundle) = proof_bundle else {
-        return Ok((Bytes::from_static(NITRO_VERIFIER_CONFIG_V1), Bytes::new()));
+        // Canonical Tempo rejects an empty proof in Nitro mode. NoProof is
+        // a separate, temporary rollout policy; never select it for a supplied
+        // proof bundle or after a configured prover failure.
+        return Ok((Bytes::from_static(NO_PROOF_VERIFIER_CONFIG), Bytes::new()));
     };
     eyre::ensure!(
         proof_bundle.verifier_config.as_ref() == NITRO_VERIFIER_CONFIG_V1,
@@ -1906,18 +1941,41 @@ mod tests {
     #[tokio::test]
     async fn settlement_abi_follows_live_l1_hardfork() {
         let legacy = Asserter::new();
-        legacy.push_success(&serde_json::json!({ "active": "T12" }));
+        legacy.push_success(&serde_json::json!({ "active": "T12", "schedule": [] }));
         assert_eq!(
             SettlementAbi::from_l1(&mock_l1(legacy)).await.unwrap(),
             SettlementAbi::Legacy
         );
 
         let t13 = Asserter::new();
-        t13.push_success(&serde_json::json!({ "active": "T13" }));
+        t13.push_success(&serde_json::json!({ "active": "T13", "schedule": [] }));
         assert_eq!(
             SettlementAbi::from_l1(&mock_l1(t13)).await.unwrap(),
             SettlementAbi::T13
         );
+
+        let t16 = Asserter::new();
+        t16.push_success(&serde_json::json!({
+            "active": "T16",
+            "schedule": [{ "name": "T13", "activationTime": 0, "active": true }]
+        }));
+        assert_eq!(
+            SettlementAbi::from_l1(&mock_l1(t16)).await.unwrap(),
+            SettlementAbi::T13
+        );
+
+        let t16_without_schedule = Asserter::new();
+        t16_without_schedule.push_success(&serde_json::json!({ "active": "T16", "schedule": [] }));
+        assert_eq!(
+            SettlementAbi::from_l1(&mock_l1(t16_without_schedule))
+                .await
+                .unwrap(),
+            SettlementAbi::T13
+        );
+
+        let unknown = Asserter::new();
+        unknown.push_success(&serde_json::json!({ "active": "FutureFork", "schedule": [] }));
+        assert!(SettlementAbi::from_l1(&mock_l1(unknown)).await.is_err());
     }
 
     #[test]
@@ -2468,6 +2526,22 @@ mod tests {
             signatures: Vec::new(),
         };
 
+        let wrong_mode = submitter
+            .validate_certificate(
+                &prepared,
+                SettlementAbi::Legacy,
+                batch.zone_height,
+                metadata,
+                &certificate,
+                &Bytes::from_static(NO_PROOF_VERIFIER_CONFIG),
+            )
+            .unwrap_err();
+        assert!(
+            wrong_mode
+                .to_string()
+                .contains("certificate verifier config changed")
+        );
+
         let error = submitter
             .validate_certificate(
                 &prepared,
@@ -2475,6 +2549,7 @@ mod tests {
                 batch.zone_height,
                 metadata,
                 &certificate,
+                &Bytes::from_static(NITRO_VERIFIER_CONFIG_V1),
             )
             .unwrap_err();
         assert!(
@@ -2482,6 +2557,29 @@ mod tests {
                 .to_string()
                 .contains("certificate anchor block changed")
         );
+    }
+
+    #[test]
+    fn unconfigured_settlement_explicitly_selects_no_proof_mode() {
+        let (config, proof) = settlement_proof(None).unwrap();
+        assert_eq!(config.as_ref(), &[2]);
+        assert!(proof.is_empty());
+    }
+
+    #[test]
+    fn malformed_prover_bundle_cannot_fall_back_to_no_proof_mode() {
+        for bundle in [
+            ProofBundle {
+                verifier_config: Bytes::from_static(NITRO_VERIFIER_CONFIG_V1),
+                proof: Bytes::new(),
+            },
+            ProofBundle {
+                verifier_config: Bytes::from_static(&[2]),
+                proof: Bytes::from_static(&[1]),
+            },
+        ] {
+            assert!(settlement_proof(Some(&bundle)).is_err());
+        }
     }
 
     #[test]

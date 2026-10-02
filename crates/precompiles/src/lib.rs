@@ -58,12 +58,9 @@ mod chaum_pedersen;
 pub mod ecies;
 pub mod outbox;
 
-/// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
+/// Typed ABI dispatch helpers shared with Tempo.
 pub mod dispatch {
-    pub use tempo_precompiles::{
-        dispatch::typed::{mutate, mutate_void, view},
-        metadata,
-    };
+    pub use tempo_precompiles::dispatch::typed::{mutate, view};
 }
 
 mod execution;
@@ -191,7 +188,7 @@ where
     }
 
     fn execute(
-        &mut self,
+        &self,
         evm: &mut Evm<'_, T>,
         message: &Message<T>,
         gas: &mut GasTracker,

@@ -1,0 +1,139 @@
+# T16 native Earn and Zone fork smoke test
+
+The [checked record](evm2-t16-native-earn-zone-smoke.json) captures one disposable
+Tempo L1 and Zone devnet. Tempo source `2ed378214` used the binary SHA-256 in
+the record; Zones source `c494eca38` used the separately recorded binary. The
+L1 began with T15 at Unix time `1790921148` and T16 at `1790922288`. Its
+pre-fork EarnVault had 1,000,000 EarnShare and 1,000,000 pathUSD of venue
+backing. A pre-fork Zone deposit held another 100,000 pathUSD in its L1 portal,
+with 100,000 private supply. The Zone was created before L1 T16 and kept the
+same datadir and genesis block across the L1 boundary.
+
+The legacy EarnFactory does not index all deployed vaults. For this devnet,
+the stack was reconciled at L1 block 439 using Tempo's
+[`build-native-earn-manifest.py`](https://github.com/tempoxyz/tempo/blob/dan/evm2-native-payments/scripts/native-payments/build-native-earn-manifest.py).
+Its [EIP-1186 account and storage proofs](evm2-t16-native-earn-manifest-proof.json)
+were verified against that block's state root, including the manifest's code
+hashes, vault/fee bindings, and the vault's EarnShare issuer role. Six account
+proofs and nine storage proofs bind the role to the same manifest vault. The
+generated `nativeEarnManifest` was inserted
+into the local genesis configuration and the node restarted before T16. This
+configuration step is a devnet procedure; a production activation needs a
+published, fixed manifest and commitment before the fork. These are state
+proofs, not a cryptographic Zone execution proof.
+
+At L1 block 1171 the EarnVault still had its legacy proxy code hash. Block
+1172, timestamp `1790922288`, replaced the vault and EarnFees clone code with
+the pinned dispatcher hash while retaining both accounts' storage. EarnShare
+supply, vault assets, venue assets, and portal backing were identical at
+blocks 1171 and 1172. A restarted Zone batch submitter initially failed
+because its older Tempo SDK could not parse the L1's new `T16` label.
+[The Zones fix](https://github.com/tempoxyz/zones/pull/1637) reads T13 activation
+from the fork schedule and resumed queued batches on the same datadir. The
+Zone's own T15 was then scheduled for Unix time `1790922875`, after which
+signed private transfers succeeded.
+
+The isolated post-fork Earn transactions were:
+
+| Call | L1 block | Receipt | Payment gas | General gas | Accounting result |
+| --- | ---: | --- | ---: | ---: | --- |
+| `spendFromEarn(400000, …)` | 1193 | success | 222,094 | 0 | shares and venue assets 1,000,000 → 600,000; recipient +400,000 |
+| `deposit(200000, 200000)` | 1230 | success | 262,432 | 0 | shares and venue assets 600,000 → 800,000 |
+| venue yield transfer of 100,000 | 1250 | success | 39,942 | 0 | assets 800,000 → 900,000; shares stay 800,000 |
+| `redeem(100000, 112500)` | 1267 | success | 218,144 | 0 | shares 800,000 → 700,000; assets 900,000 → 787,500 |
+| `redeem(10000, 1000000)` | 1285 | revert | 457,558 | 0 | shares and custody unchanged |
+
+The spend trace contains a native vault delegate frame, a nested native
+EarnFees delegate frame, TIP-20 burn/transfer calls, and the engine and venue
+exit. The metric samples in the record match each single-transaction block by
+timestamp and exact receipt gas. A post-fork Zone private transfer in L2 block
+1418 moved another 10,000 units: the sender held 80,000, the recipient 20,000,
+private supply remained 100,000, and L1 portal backing remained 100,000. The
+batch covering that transfer settled in L1 block 2554 with 98,842 payment gas
+and zero general gas. It used explicit NoProof mode and does **not**
+demonstrate Nitro execution-proof validity.
+
+A separate contract at `0x8464135c8F25Da09e49BC8782676a84730C318bC` had
+the exact dispatcher runtime hash but no system registration. Its
+`spendFromEarn` call reverted with no child calls in L1 block 3981. That block
+also included a real Earn redemption: the matched metric charged 1,000,000
+general gas to the forged call and 218,120 payment gas to the registered
+payment. Matching bytecode and selector alone therefore did not grant payment
+capacity in this run.
+
+The [30-minute mixed-load record](evm2-t16-mixed-load-summary.json) contains
+[450 complete cycles](evm2-t16-mixed-load-30m.jsonl.gz): 900 Earn
+deposits/redemptions and 450 private Zone transfers, with 18 unchanged custody
+checkpoints. [Sampled lane counters](evm2-t16-mixed-load-lane-metrics.jsonl.gz)
+match all 900 Earn blocks. General gas was zero in 898; the other two blocks
+included separate forged-dispatcher deployment/call transactions, while their
+payment gas exactly covered the Earn receipts. The last private transfer was
+in Zone block 4353. The batch through block 4360 was submitted to L1, with
+successful settlement receipt
+`0x21baa9efd6ac2817bf2f659cca8c659e282b1ac3cb29d55e8ea1454f04576038`
+in L1 block 5434. The serial workload averaged 0.25 mixed cycles per second;
+it measures sustained correctness, not maximum capacity. Its settlement was
+still in NoProof mode. The Tempo PR includes the
+[`summarize-t16-mixed-load.py`](https://github.com/tempoxyz/tempo/blob/dan/evm2-native-payments/scripts/native-payments/summarize-t16-mixed-load.py)
+checker for the compressed raw data.
+
+The [reviewed-binary fork record](evm2-t16-reviewed-fork.json) captures a
+second branch copied at the common pre-fork L1 block 1171. Its next block
+activated T16 with the reviewed Tempo binary, retaining 1,000,000 EarnShare
+and vault/venue assets. On this branch, Earn deposit, redemption, and spending
+and a new Zone 2 portal deposit all used payment gas with zero general gas.
+Zone 2 moved 1,000 of its 10,000 private pathUSD from sender to recipient;
+its covering batch settled on L1 in receipt
+`0x90a55796e214a661fc65d07df519e5ae52650ae77013703d09ad48b0fd88fd80`
+with 98,026 payment gas and zero general gas. Authenticated private balances
+and supply matched L1 portal backing. The Tempo PR's
+[`check-t16-reviewed.py`](https://github.com/tempoxyz/tempo/blob/dan/evm2-native-payments/scripts/native-payments/check-t16-reviewed.py)
+rechecks these receipts, fork code hashes, balances, and lane samples against
+the running reviewed L1 and Zone. The new Zone still uses NoProof mode.
+
+After pinning Zones to the reviewed Tempo revision, the rebuilt Zone node
+restarted on the same datadir and resumed settlement. A 1,000-unit transfer
+from an account with 1,000 private units reverted with
+`InsufficientBalance()` after its 1-unit fee. Sending the remaining 998
+succeeded, and authenticated balances plus private supply reconciled to the
+10,000-unit L1 portal backing. The covering batch settled in L1 receipt
+`0x4bfe04db2f936fed8b7249e1986d8e70e236ec9f4ec699a6187917e0916e7b8a`.
+Both private receipts and the settlement are in the reviewed record.
+
+The pinned Zone's submitted batch covering the successful retry was replayed
+through the stateless proof function. The
+[saved witness](evm2-t16-pinned-zone-batch-witness.json.gz) covers Zone blocks
+2191–2200 and includes 89 Zone state nodes, 25 Tempo state nodes, and the
+relevant execution code. Local replay against the
+[trusted Zone genesis](evm2-t16-reviewed-zone-genesis.json.gz) reproduced the
+L1-submitted next-block commitment
+`0x6dc39b1476fcfcc99c8e694f19190cd233b7c7ea213239dd80b96321a36c6322`.
+Changing the witness Zone ID to 3 failed chain-ID validation; changing the
+expected commitment failed the output check. The replay validates execution
+and state witnesses, while this devnet's L1 batch still used NoProof and has
+no Nitro attestation.
+
+```bash
+gzip -dc docs/evidence/evm2-t16-pinned-zone-batch-witness.json.gz > /tmp/t16-zone-witness.json
+gzip -dc docs/evidence/evm2-t16-reviewed-zone-genesis.json.gz > /tmp/t16-zone-genesis.json
+tempo-zone-prover-utils validate-input \
+  --input /tmp/t16-zone-witness.json \
+  --chain /tmp/t16-zone-genesis.json \
+  --expected-next-block-hash 0x6dc39b1476fcfcc99c8e694f19190cd233b7c7ea213239dd80b96321a36c6322
+```
+
+While these isolated devnets are available, rerun the public receipt and state
+checker from the Tempo checkout:
+
+```bash
+python3 scripts/native-payments/check-t16-combined.py
+cargo run --quiet -p tempo-evm --example verify_native_earn_proofs -- \
+  docs/evidence/evm2-t16-native-earn-manifest-proof.json
+```
+
+For private Zone balance verification, set `EVM2_ZONE_SENDER_KEY` and
+`EVM2_ZONE_RECIPIENT_KEY` to the two disposable devnet signers before running
+the checker. It derives short-lived authenticated RPC tokens locally and reads
+the historical L2 state at block 1418. The checked run verified 12 L1
+accounting snapshots, six Earn receipts, the fork code transition, two Zone
+private transfers, portal backing, and the zero-general-lane settlement sample.

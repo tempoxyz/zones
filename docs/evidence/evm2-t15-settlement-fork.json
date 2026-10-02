@@ -1,0 +1,120 @@
+{
+  "kind": "t15_zone_settlement_fork_boundary_smoke",
+  "full_native_payment_acceptance": false,
+  "execution_proof_verified": false,
+  "preexisting_zone_crossed_activation": true,
+  "fork_time": 1790913144,
+  "activation_boundary": [
+    {
+      "number": 176,
+      "timestamp": 1790913085,
+      "hash": "0xc28f60849aacbfcd6d058a30ebab0505e07ebf2f7fffb68c1fbb69da6814b539"
+    },
+    {
+      "number": 177,
+      "timestamp": 1790913223,
+      "hash": "0xc389fafc84941cb8433ab0eece4ba95d16da2b1c473ff05e6ee92d7da72a80f7"
+    }
+  ],
+  "clients": {
+    "l1": "tempo/v1.14.0-5bb038c/x86_64-unknown-linux-gnu",
+    "zone": "tempo-zone/v0.3.1-3c64961/x86_64-unknown-linux-gnu"
+  },
+  "genesis": {
+    "l1": "0xe4c37aeabb3c011af3f06399ed6951df7c9634a9d0cc4a88e4881a941ac91d2d",
+    "zone": "0x47237e24773a5e54b2f299917a6101692f1e5951ea744455107a54a842768588"
+  },
+  "binary_sha256": {
+    "tempo": "53dc87813725edd3caf0841e9c174d2eb1c7643309a2ad987aa5c59fb731ca4c",
+    "zones": "f86905c407b5c3137ef092319917727cfe4fa2fb44349ccb10f782d585b8e17d"
+  },
+  "portal": "0x5ad0000000000000000000000000000000000001",
+  "account": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "pre_fork": {
+    "deposit": {
+      "hash": "0xff4bc89c1a8e628a33b4324b6818bb5b2953ab222da19679b79bd16c19d043c5",
+      "block": 72,
+      "timestamp": 1790912981,
+      "gas_used": 838514,
+      "trace_children": [
+        {
+          "type": "DELEGATECALL",
+          "to": "0x5ad1000000000000000000000000000000000000"
+        }
+      ],
+      "lane_sample": null
+    },
+    "zone_balance_block": 50,
+    "private_balance": 1000000,
+    "portal_backing": 1000000,
+    "zone_supply": 1000000
+  },
+  "post_fork": {
+    "deposit": {
+      "hash": "0x770feeb0bbdef79bb442f4ed24c60aab61b32c19a687b2333998bf12cc4d9bce",
+      "block": 239,
+      "timestamp": 1790913285,
+      "gas_used": 88367,
+      "trace_children": [
+        {
+          "type": "CALL",
+          "to": "0x20c0000000000000000000000000000000000000"
+        }
+      ],
+      "lane_sample": {
+        "time": 1790913286.01592,
+        "payment_transactions_last": 1.0,
+        "general_gas_used_last": 0.0,
+        "payment_gas_used_last": 88367.0,
+        "gas_used_last": 88367.0,
+        "pool_transactions_included_last": 1.0
+      }
+    },
+    "first_batch": {
+      "hash": "0x2dd101da491fa9f55f90a83fc151f7b32ea94e80b25e45f744a4cdbdfa21c5ad",
+      "block": 182,
+      "timestamp": 1790913228,
+      "gas_used": 98818,
+      "anchor": 176,
+      "deposit_cursor_before": 1,
+      "deposit_cursor_after": 1,
+      "proof_mode": "NoProof (0x02)",
+      "proof_length": 0,
+      "delegate_target": "0x5ad1000000000000000000000000000000000000",
+      "verifier_target": "0x5a56000000000000000000000000000000000000",
+      "lane_sample": {
+        "time": 1790913229.0361772,
+        "payment_transactions_last": 1.0,
+        "general_gas_used_last": 0.0,
+        "payment_gas_used_last": 98818.0,
+        "gas_used_last": 98818.0,
+        "pool_transactions_included_last": 1.0
+      }
+    },
+    "second_batch": {
+      "hash": "0x19051cdcb4a1a2310c629ad09f2bf82a329096df5e9f21b92b3ff6092c4c9419",
+      "block": 303,
+      "timestamp": 1790913349,
+      "gas_used": 98794,
+      "anchor": 239,
+      "deposit_cursor_before": 1,
+      "deposit_cursor_after": 2,
+      "proof_mode": "NoProof (0x02)",
+      "proof_length": 0,
+      "delegate_target": "0x5ad1000000000000000000000000000000000000",
+      "verifier_target": "0x5a56000000000000000000000000000000000000",
+      "lane_sample": {
+        "time": 1790913350.0396705,
+        "payment_transactions_last": 1.0,
+        "general_gas_used_last": 0.0,
+        "payment_gas_used_last": 98794.0,
+        "gas_used_last": 98794.0,
+        "pool_transactions_included_last": 1.0
+      }
+    },
+    "zone_balance_block": 163,
+    "private_balance": 2000000,
+    "portal_backing": 2000000,
+    "zone_supply": 2000000
+  }
+}

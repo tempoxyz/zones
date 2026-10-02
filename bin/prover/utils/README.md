@@ -50,6 +50,21 @@ execution witnesses, and the Tempo RPC to retain batch logs.
 or `--wait-timeout`. Without `--block`, the existing range selection defaults to the
 blocks after the portal's latest commitment through the current Zone tip.
 
+## Replay a saved witness locally
+
+```bash
+cargo run --release -p tempo-zone-prover-utils -- validate-input \
+  --input witness.json \
+  --chain "$ZONE_GENESIS" \
+  --expected-next-block-hash "$SUBMITTED_NEXT_BLOCK_HASH"
+```
+
+This re-executes the witness against a trusted Zone genesis and requires the
+resulting next-block hash to match the commitment from the L1 batch. It needs
+no RPC or Nitro hardware. Local SPF validation establishes execution
+consistency; settlement still requires a Nitro attestation accepted by the L1
+verifier.
+
 ## Prove a saved witness
 
 ```bash

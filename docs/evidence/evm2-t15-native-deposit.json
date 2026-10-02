@@ -1,0 +1,56 @@
+{
+  "kind": "t15_native_portal_deposit_smoke",
+  "native_deposit_verified": true,
+  "full_native_payment_acceptance": false,
+  "proof_mode": "NoProof (0x02)",
+  "execution_proof_verified": false,
+  "payment_lane_verified": false,
+  "fork_time": 1790907639,
+  "source_revisions": {
+    "tempo": "5bb038c865a7938589731e7e593add402732afbb",
+    "zones": "393eb41cc"
+  },
+  "binary_sha256": {
+    "tempo": "da556a423a683fd7facf88bbcbb952cccf6149e68eaeb29826941dff259a423c",
+    "zones": "f86905c407b5c3137ef092319917727cfe4fa2fb44349ccb10f782d585b8e17d"
+  },
+  "l1_client": "tempo/v1.14.0-5bb038c/x86_64-unknown-linux-gnu",
+  "zone_client": "tempo-zone/v0.3.1-3c64961/x86_64-unknown-linux-gnu",
+  "genesis": {
+    "l1": "0xe4c37aeabb3c011af3f06399ed6951df7c9634a9d0cc4a88e4881a941ac91d2d",
+    "zone": "0x4acc0cd2a915e8787c33281c15054206d29868b407d8b6d1978c4645716b968f"
+  },
+  "portal": "0x5ad0000000000000000000000000000000000001",
+  "account": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "balances": {
+    "l1_block": "0x153",
+    "zone_block": "0x6b",
+    "private": 1000000,
+    "portal_backing": 1000000,
+    "zone_supply": 1000000
+  },
+  "deposit": {
+    "hash": "0x4bb4bbd364e91c04074cc64ecf0cac1e435cc7c777d0a2710c12cac2fe41cd57",
+    "block": 339,
+    "timestamp": 1790907803,
+    "gas_used": 586967,
+    "logs": 3,
+    "native_child_calls": [
+      {
+        "to": "0x20c0000000000000000000000000000000000000",
+        "selector": "0x23b872dd"
+      }
+    ]
+  },
+  "lane_metrics": null,
+  "settlement": {
+    "hash": "0x21188db6234c5ad0872284b826875baca09fc9ba788a9c782d85974d5a6dc244",
+    "block": 403,
+    "tempo_anchor_block": 339,
+    "deposit_cursor_before": 0,
+    "deposit_cursor_after": 1,
+    "zone_height": 107,
+    "verifier_config": "0x02",
+    "proof_length": 0
+  }
+}

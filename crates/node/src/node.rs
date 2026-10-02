@@ -777,6 +777,13 @@ where
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
+            let use_nitro_prover = config.manifest().settlement_proof_mode().requires_nitro();
+            if let Some(sequencer) = self.sequencer_config.as_ref() {
+                eyre::ensure!(
+                    sequencer.enable_prover == use_nitro_prover,
+                    "sequencer prover setting conflicts with manifest settlement_proof_mode"
+                );
+            }
             Some(
                 Self::start_p2p(
                     config,
@@ -796,6 +803,7 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.retry_connection_interval,
                     self.encryption_keys.clone().unwrap_or_default(),
+                    use_nitro_prover,
                     &task_executor,
                     &sequencer_rpc_slot,
                 )
@@ -1299,6 +1307,7 @@ where
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         encryption_keys: EncryptionKeyRing,
+        use_nitro_prover: bool,
         task_executor: &TaskExecutor,
         sequencer_rpc_slot: &Arc<OnceLock<SequencerRpcContext>>,
     ) -> eyre::Result<P2PRuntime> {
@@ -1322,6 +1331,7 @@ where
             config.block_attestation_addresses(),
             l1_provider.clone(),
             anchor_config,
+            use_nitro_prover,
         );
         let schedule = config.leadership();
         let local_ed25519_public_key = config.ed25519_public_key();
@@ -1342,6 +1352,7 @@ where
                 attestation.l1_provider.clone(),
                 attestation.anchor_config,
                 commands.clone(),
+                use_nitro_prover,
             )
         });
 
