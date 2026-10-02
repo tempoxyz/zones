@@ -315,6 +315,8 @@ interface IVerifier {
     ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueHash
     ///      7. Deposit processing is correct (validated via Tempo state read inside proof)
     ///      8. The final executed Zone block number equals nextZoneHeight
+    ///      Not `view`: the native verifier emits an event recording the PCRs it accepted, so the
+    ///      portal must not call it with STATICCALL.
     /// @param zoneId Unique identifier of the zone whose batch is being verified
     /// @param tempoBlockNumber Block zone committed to (from TempoState)
     /// @param anchorBlockNumber Block whose hash is verified (tempoBlockNumber or recent block)
@@ -341,7 +343,6 @@ interface IVerifier {
         bytes calldata proof
     )
         external
-        view
         returns (bool);
 
 }
