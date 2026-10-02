@@ -2111,14 +2111,12 @@ mod tests {
     use alloy_primitives::{Bytes, Signature, TxKind, U256, address};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
-
+    use reth_primitives_traits::SignedTransaction;
     use tempo_primitives::transaction::{Call, TempoTransaction};
     use zone_chainspec::tempo_chain_spec_for_l1;
 
     fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
-        TempoPooledTransaction::new(reth_primitives_traits::SignedTransaction::with_signer(
-            envelope, sender,
-        ))
+        TempoPooledTransaction::new(SignedTransaction::with_signer(envelope, sender))
     }
 
     fn aa_transaction(sender: Address, calls: Vec<Call>) -> TempoPooledTransaction {
