@@ -23,7 +23,7 @@ use crate::{
         AttestationDomain, SettlementAttestation, SettlementCertificate,
         SignedSettlementAttestation,
     },
-    settlement::BatchSubmitError,
+    settlement::{BatchSubmitError, NO_PROOF_VERIFIER_CONFIG},
 };
 
 const SETTLEMENT_REBROADCAST_INTERVAL: Duration = Duration::from_millis(500);
@@ -39,6 +39,7 @@ pub struct SettlementManager {
     anchor_config: BatchAnchorConfig,
     p2p_tx: mpsc::Sender<P2pCommand>,
     pending: PendingSettlements,
+    verifier_config_hash: B256,
 }
 
 impl std::fmt::Debug for SettlementManager {
@@ -50,6 +51,7 @@ impl std::fmt::Debug for SettlementManager {
 }
 
 impl SettlementManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         domain: AttestationDomain,
         pinned_sequencer_set_version: Option<u64>,
@@ -58,6 +60,7 @@ impl SettlementManager {
         l1_provider: DynProvider<TempoNetwork>,
         anchor_config: BatchAnchorConfig,
         p2p_tx: mpsc::Sender<P2pCommand>,
+        use_nitro_prover: bool,
     ) -> Self {
         Self {
             domain,
@@ -68,6 +71,11 @@ impl SettlementManager {
             anchor_config,
             p2p_tx,
             pending: PendingSettlements::default(),
+            verifier_config_hash: keccak256(if use_nitro_prover {
+                NITRO_VERIFIER_CONFIG_V1
+            } else {
+                NO_PROOF_VERIFIER_CONFIG
+            }),
         }
     }
 
@@ -84,7 +92,8 @@ impl SettlementManager {
         let mut threshold = status.threshold;
 
         self.validate_anchor(prepared).await?;
-        let attestation = settlement_attestation(self.domain, &config, prepared);
+        let attestation =
+            settlement_attestation(self.domain, &config, prepared, self.verifier_config_hash);
         let signed =
             SignedSettlementAttestation::sign(attestation.clone(), self.domain, &self.signer)?;
         let digest = self.domain.settlement_digest(&attestation);
@@ -262,6 +271,7 @@ fn settlement_attestation(
     domain: AttestationDomain,
     config: &SettlementConfig,
     prepared: &PreparedBatch,
+    verifier_config_hash: B256,
 ) -> SettlementAttestation {
     let batch = &prepared.batch;
     SettlementAttestation {
@@ -288,7 +298,7 @@ fn settlement_attestation(
             batch.next_processed_token_count,
         ),
         withdrawalQueueHash: batch.withdrawal_queue_hash,
-        verifierConfigHash: keccak256(NITRO_VERIFIER_CONFIG_V1),
+        verifierConfigHash: verifier_config_hash,
     }
 }
 

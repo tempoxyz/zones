@@ -23,6 +23,7 @@ use zone_prover::NITRO_VERIFIER_CONFIG_V1;
 use zone_sequencer::{
     BatchAnchorConfig, SettlementAbi,
     attestation::{AttestationDomain, SettlementAttestation},
+    settlement::NO_PROOF_VERIFIER_CONFIG,
 };
 
 /// Shared signing and L1-validation context for settlement attestations.
@@ -36,6 +37,7 @@ pub(crate) struct AttestationContext {
     pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
     pub(crate) anchor_config: BatchAnchorConfig,
+    pub(crate) verifier_config_hash: B256,
 }
 
 impl AttestationContext {
@@ -46,6 +48,7 @@ impl AttestationContext {
         addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
         l1_provider: DynProvider<TempoNetwork>,
         anchor_config: BatchAnchorConfig,
+        use_nitro_prover: bool,
     ) -> Self {
         Self {
             domain,
@@ -54,6 +57,11 @@ impl AttestationContext {
             addresses,
             l1_provider,
             anchor_config,
+            verifier_config_hash: alloy_primitives::keccak256(if use_nitro_prover {
+                NITRO_VERIFIER_CONFIG_V1
+            } else {
+                NO_PROOF_VERIFIER_CONFIG
+            }),
         }
     }
 }
@@ -339,7 +347,7 @@ where
         tokenEnablementTransitionHash: settlement_abi
             .token_transition_hash(previous_token_count, commitments.processed_token_count),
         withdrawalQueueHash: withdrawal_queue_hash,
-        verifierConfigHash: alloy_primitives::keccak256(NITRO_VERIFIER_CONFIG_V1),
+        verifierConfigHash: context.verifier_config_hash,
     }))
 }
 
@@ -639,6 +647,7 @@ mod tests {
                 .connect_mocked_client(l1.clone())
                 .erased(),
             BatchAnchorConfig::default(),
+            true,
         );
         (provider, context, l1, l1_header)
     }

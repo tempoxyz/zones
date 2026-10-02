@@ -59,7 +59,7 @@ use tracing::{info, instrument, warn};
 use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
 
 /// Temporary Tempo rollout mode for an unconfigured settlement prover.
-const NO_PROOF_VERIFIER_CONFIG: &[u8] = &[2];
+pub const NO_PROOF_VERIFIER_CONFIG: &[u8] = &[2];
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
@@ -377,6 +377,7 @@ impl BatchSubmitter {
                 batch.zone_height,
                 metadata,
                 certificate,
+                &verifier_config,
             )?;
         }
         let current_l1_block = self.validate_prepared_anchor(prepared).await?;
@@ -695,6 +696,7 @@ impl BatchSubmitter {
         zone_height: u64,
         metadata: PortalSubmissionMetadata,
         certificate: &SettlementCertificate,
+        verifier_config: &Bytes,
     ) -> Result<()> {
         let batch = &prepared.batch;
         if certificate.height != zone_height {
@@ -765,7 +767,7 @@ impl BatchSubmitter {
             "certificate withdrawal queue hash changed"
         );
         eyre::ensure!(
-            attestation.verifierConfigHash == keccak256(NITRO_VERIFIER_CONFIG_V1),
+            attestation.verifierConfigHash == keccak256(verifier_config),
             "certificate verifier config changed"
         );
         eyre::ensure!(
@@ -2524,6 +2526,22 @@ mod tests {
             signatures: Vec::new(),
         };
 
+        let wrong_mode = submitter
+            .validate_certificate(
+                &prepared,
+                SettlementAbi::Legacy,
+                batch.zone_height,
+                metadata,
+                &certificate,
+                &Bytes::from_static(NO_PROOF_VERIFIER_CONFIG),
+            )
+            .unwrap_err();
+        assert!(
+            wrong_mode
+                .to_string()
+                .contains("certificate verifier config changed")
+        );
+
         let error = submitter
             .validate_certificate(
                 &prepared,
@@ -2531,6 +2549,7 @@ mod tests {
                 batch.zone_height,
                 metadata,
                 &certificate,
+                &Bytes::from_static(NITRO_VERIFIER_CONFIG_V1),
             )
             .unwrap_err();
         assert!(

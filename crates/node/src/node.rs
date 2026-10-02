@@ -796,6 +796,9 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.retry_connection_interval,
                     self.encryption_keys.clone().unwrap_or_default(),
+                    self.sequencer_config
+                        .as_ref()
+                        .is_some_and(|config| config.enable_prover),
                     &task_executor,
                     &sequencer_rpc_slot,
                 )
@@ -1299,6 +1302,7 @@ where
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         encryption_keys: EncryptionKeyRing,
+        use_nitro_prover: bool,
         task_executor: &TaskExecutor,
         sequencer_rpc_slot: &Arc<OnceLock<SequencerRpcContext>>,
     ) -> eyre::Result<P2PRuntime> {
@@ -1322,6 +1326,7 @@ where
             config.block_attestation_addresses(),
             l1_provider.clone(),
             anchor_config,
+            use_nitro_prover,
         );
         let schedule = config.leadership();
         let local_ed25519_public_key = config.ed25519_public_key();
@@ -1342,6 +1347,7 @@ where
                 attestation.l1_provider.clone(),
                 attestation.anchor_config,
                 commands.clone(),
+                use_nitro_prover,
             )
         });
 
