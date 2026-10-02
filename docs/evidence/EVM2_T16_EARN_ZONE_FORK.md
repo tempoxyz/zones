@@ -100,6 +100,28 @@ succeeded, and authenticated balances plus private supply reconciled to the
 `0x4bfe04db2f936fed8b7249e1986d8e70e236ec9f4ec699a6187917e0916e7b8a`.
 Both private receipts and the settlement are in the reviewed record.
 
+The pinned Zone's submitted batch covering the successful retry was replayed
+through the stateless proof function. The
+[saved witness](evm2-t16-pinned-zone-batch-witness.json.gz) covers Zone blocks
+2191–2200 and includes 89 Zone state nodes, 25 Tempo state nodes, and the
+relevant execution code. Local replay against the
+[trusted Zone genesis](evm2-t16-reviewed-zone-genesis.json.gz) reproduced the
+L1-submitted next-block commitment
+`0x6dc39b1476fcfcc99c8e694f19190cd233b7c7ea213239dd80b96321a36c6322`.
+Changing the witness Zone ID to 3 failed chain-ID validation; changing the
+expected commitment failed the output check. The replay validates execution
+and state witnesses, while this devnet's L1 batch still used NoProof and has
+no Nitro attestation.
+
+```bash
+gzip -dc docs/evidence/evm2-t16-pinned-zone-batch-witness.json.gz > /tmp/t16-zone-witness.json
+gzip -dc docs/evidence/evm2-t16-reviewed-zone-genesis.json.gz > /tmp/t16-zone-genesis.json
+tempo-zone-prover-utils validate-input \
+  --input /tmp/t16-zone-witness.json \
+  --chain /tmp/t16-zone-genesis.json \
+  --expected-next-block-hash 0x6dc39b1476fcfcc99c8e694f19190cd233b7c7ea213239dd80b96321a36c6322
+```
+
 While these isolated devnets are available, rerun the public receipt and state
 checker from the Tempo checkout:
 

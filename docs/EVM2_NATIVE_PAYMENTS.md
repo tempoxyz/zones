@@ -93,8 +93,10 @@ and storage proofs bind the Earn manifest and issuer role to one L1 state root.
 The same evidence includes 450 mixed cycles over 30 minutes and a reviewed
 binary replay from the saved pre-fork block. The Zone was rebuilt against that
 Tempo revision and restarted on its existing datadir; a fee-sensitive failed
-private transfer and its successful retry both settled. The settlement mode is
-NoProof, so these proofs do not establish execution-proof validity or capacity.
+private transfer and its successful retry both settled. The submitted batch
+containing the retry passed offline SPF replay against saved Zone and Tempo
+state witnesses. The settlement mode is NoProof, so the replay does not
+establish Nitro-attested L1 proof validity or capacity.
 
 The [fork-boundary settlement evidence](evidence/EVM2_T15_SETTLEMENT_FORK.md)
 records a preexisting Zone balance across scheduled T15 activation, post-fork
@@ -240,6 +242,6 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | T15 existing-Zone L1 activation smoke | Partial | [Pre-fork private balance, scheduled L1 fork, post-fork native deposit and two payment-lane batches](evidence/EVM2_T15_SETTLEMENT_FORK.md); Zone execution stayed T14; NoProof |
 | T15 Zone private transfer smoke | Partial | [Scheduled Zone T15, three signed transfers, backing, restart and one payment-lane batch](evidence/EVM2_T15_PRIVATE_TRANSFER.md); NoProof, Zone created after L1 fork |
 | T15 native withdrawal smoke | Partial | [Private burn, paid portal payout, FIFO cursor, backing and payment lane; forged candidate charged general](evidence/EVM2_T15_NATIVE_WITHDRAWAL.md); callback and proof flows open |
-| T16 Earn/Zone fork and mixed-load smoke | Partial | [Funded vault and Zone cross T16; 450 mixed cycles over 30 minutes, reviewed-binary fork replay, pinned Zones SDK restart, accounting and lane samples](evidence/EVM2_T16_EARN_ZONE_FORK.md); NoProof, dynamic registration, async flows, and capacity testing open |
+| T16 Earn/Zone fork and mixed-load smoke | Partial | [Funded vault and Zone cross T16; 450 mixed cycles over 30 minutes, reviewed-binary fork replay, pinned SDK restart, and offline SPF validation](evidence/EVM2_T16_EARN_ZONE_FORK.md); NoProof, dynamic registration, async flows, and capacity testing open |
 | E01–I01 | Open | No passing combined acceptance result recorded |
 | Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642, Tempo #8076, Zones #1637, Earn #354; full implementation open |
