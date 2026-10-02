@@ -296,7 +296,7 @@ impl P2pHandle {
     }
 
     /// Requests shutdown, waits for the Commonware runtime, and joins its OS thread.
-    pub async fn shutdown(mut self) -> eyre::Result<()> {
+    pub async fn shutdown(self) -> eyre::Result<()> {
         let P2pHandleParts {
             shutdown,
             stopped,
