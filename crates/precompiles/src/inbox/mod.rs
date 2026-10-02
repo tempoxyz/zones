@@ -96,12 +96,12 @@ impl ZoneInbox {
         let deposit_count = u64::try_from(call.deposits.len())
             .map_err(|_| TempoPrecompileError::under_overflow())?;
         let deposits = decode_deposits(call.deposits)?;
-        // TODO: Replace temporary T13 with the coordinated post-prover Tempo fork before merge.
+        // Forced exits activate at T14, after the T13 prover transition.
         // Reject the whole transition before anchoring L1 or changing any inbox state.
         let has_forced_exits = deposits
             .iter()
             .any(|entry| matches!(entry, DecodedQueuedDeposit::ForcedExit(_)));
-        if has_forced_exits && !self.storage.spec().is_t13() {
+        if has_forced_exits && !self.storage.spec().is_t14() {
             return Err(ZonePrecompileError::MalformedCalldata);
         }
 

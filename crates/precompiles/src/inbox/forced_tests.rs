@@ -45,7 +45,7 @@ fn activate(h: &Harness, block: u64, version: u64) -> eyre::Result<()> {
 fn active_harness() -> eyre::Result<Harness> {
     let mut h = Harness::new()?;
     h.ctx.cfg.chain_id = zone_chain_id();
-    set_spec(&mut h, TempoHardfork::T13);
+    set_spec(&mut h, TempoHardfork::T14);
     activate(&h, 1, 1)?;
     Ok(h)
 }
@@ -884,10 +884,11 @@ fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
     ];
     for (spec, version) in [
         (TempoHardfork::T12, 1),
-        (TempoHardfork::T13, 0),
-        (TempoHardfork::T13, 2),
-        (TempoHardfork::T13, u64::MAX),
         (TempoHardfork::T13, 1),
+        (TempoHardfork::T14, 0),
+        (TempoHardfork::T14, 2),
+        (TempoHardfork::T14, u64::MAX),
+        (TempoHardfork::T14, 1),
     ] {
         for (balance, result) in expected.clone() {
             let mut h = active_harness()?;
@@ -908,23 +909,23 @@ fn activation_gate_rejects_the_whole_transition() -> eyre::Result<()> {
             let case = format!("{spec:?} version={version} {result:?}");
             let portal = ForcedExitPortalStorage::new(PORTAL);
             // The fork check precedes anchoring, so a pre-fork transition reads nothing.
-            let t13 = spec == TempoHardfork::T13;
+            let t14 = spec.is_t14();
             assert_eq!(
                 h.l1.requested(1, &portal.forced_exit_version),
-                t13,
+                t14,
                 "{case}"
             );
             assert!(!h.l1.requested(0, &portal.forced_exit_version), "{case}");
             assert!(!h.l1.requested(2, &portal.forced_exit_version), "{case}");
-            if t13 && version == 1 {
+            if t14 && version == 1 {
                 assert_eq!(executed.results, [result], "{case}");
                 continue;
             }
             assert!(executed.output.is_revert(), "{case}");
             assert_eq!(snapshot(&mut h)?, before, "{case}");
-            if !t13 {
+            if !t14 {
                 // The same entry executes as soon as the fork is active.
-                set_spec(&mut h, TempoHardfork::T13);
+                set_spec(&mut h, TempoHardfork::T14);
                 assert_eq!(execute(&mut h, vec![entry])?.results, [result], "{case}");
             }
         }

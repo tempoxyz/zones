@@ -966,7 +966,7 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
 {
     use tempo_precompiles::account_keychain::AccountKeychain;
     let mut h = Harness::new()?;
-    h.ctx.cfg.spec = TempoHardfork::T13;
+    h.ctx.cfg.spec = TempoHardfork::T14;
     // Leave an ordinary withdrawal pending to check its encoding/stride survives the new path.
     assert!(!h.request(100, BOB, B256::repeat_byte(3))?.is_revert());
     let ordinary = h.pending()?.remove(0);
@@ -1090,7 +1090,7 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
 #[test]
 fn forced_withdrawal_policy_and_fatal_failures_leave_no_partial_state() -> eyre::Result<()> {
     let mut h = Harness::new()?;
-    h.ctx.cfg.spec = TempoHardfork::T13;
+    h.ctx.cfg.spec = TempoHardfork::T14;
     assert!(matches!(
         h.forced(ALICE, 1_000_000),
         Err(ForcedWithdrawalError::Fatal(_))
@@ -1151,7 +1151,7 @@ fn forced_withdrawal_enforces_native_pause_sender_and_receive_policies() -> eyre
     use tempo_precompiles::{RECEIVE_POLICY_GUARD_ADDRESS, tip403_registry::TIP403Registry};
     for policy in 0..3 {
         let mut h = Harness::new()?;
-        h.ctx.cfg.spec = TempoHardfork::T13;
+        h.ctx.cfg.spec = TempoHardfork::T14;
         {
             let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> TempoResult<()> {
@@ -1200,7 +1200,7 @@ fn forced_withdrawal_enforces_native_pause_sender_and_receive_policies() -> eyre
 #[test]
 fn forced_withdrawal_preserves_outer_rollback() -> eyre::Result<()> {
     let mut h = Harness::new()?;
-    h.ctx.cfg.spec = TempoHardfork::T13;
+    h.ctx.cfg.spec = TempoHardfork::T14;
     let l1 = L1State::new(h.l1.clone(), PORTAL);
     let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -1235,7 +1235,7 @@ fn forced_withdrawal_preserves_outer_rollback() -> eyre::Result<()> {
 fn forced_withdrawal_missing_l1_state_and_out_of_gas_are_fatal() -> eyre::Result<()> {
     for missing_l1 in [false, true] {
         let mut h = Harness::new()?;
-        h.ctx.cfg.spec = TempoHardfork::T13;
+        h.ctx.cfg.spec = TempoHardfork::T14;
         let l1 = L1State::new(
             if missing_l1 {
                 MockL1Reader::failing_storage()
@@ -1276,7 +1276,7 @@ fn forced_withdrawal_missing_l1_state_and_out_of_gas_are_fatal() -> eyre::Result
 #[test]
 fn forced_withdrawal_rejects_before_fork_without_state_changes() -> eyre::Result<()> {
     let mut h = Harness::new()?;
-    h.ctx.cfg.spec = TempoHardfork::T12;
+    h.ctx.cfg.spec = TempoHardfork::T13;
     let logs_before = h.ctx.journaled_state.logs().to_vec();
     // Missing L1 data must not be read before the activation check.
     let l1 = L1State::new(MockL1Reader::failing_storage(), PORTAL);
@@ -1306,7 +1306,7 @@ fn forced_withdrawal_rejects_before_fork_without_state_changes() -> eyre::Result
     assert_eq!(h.last_fallback_nonce()?, 0);
     assert!(h.pending()?.is_empty());
     // The same funded state can execute as soon as the selected fork is active.
-    h.ctx.cfg.spec = TempoHardfork::T13;
+    h.ctx.cfg.spec = TempoHardfork::T14;
     h.forced(ZONE_INBOX_ADDRESS, 1_000_000).unwrap();
     assert_eq!(h.balance_of(ALICE)?, U256::ZERO);
     assert_eq!(h.last_fallback_nonce()?, 1);
