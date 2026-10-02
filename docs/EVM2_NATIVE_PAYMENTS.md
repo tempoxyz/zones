@@ -73,9 +73,9 @@ self-review; they do not substitute for the remaining protocol reviews.
 The [real bridge baseline](evidence/EVM2_BRIDGE_BASELINE.md) records successful
 public transfer, encrypted deposit, private balance, restart, withdrawal payout,
 canonical settlement receipts and exact backing reconciliation. It uses the
-explicit temporary NoProof mode. Real execution-proof settlement, historical
-replay, scheduled native activation/migration and mixed Earn/Zone throughput
-remain open. No full acceptance gate in the table has passed.
+explicit temporary NoProof mode. That baseline alone does not demonstrate
+execution-proof settlement, historical replay, scheduled native activation,
+or mixed Earn/Zone throughput. No full acceptance gate in the table has passed.
 
 The [T15 native deposit evidence](evidence/EVM2_T15_NATIVE_DEPOSIT.md) records
 real native child calls, private Zone credit, NoProof settlement, and one
@@ -99,6 +99,18 @@ private transfer and its successful retry both settled. The submitted batch
 containing the retry passed offline SPF replay against saved Zone and Tempo
 state witnesses. The settlement mode is NoProof, so the replay does not
 establish Nitro-attested L1 proof validity or capacity.
+
+The later [T16 native factory devnet](https://github.com/tempoxyz/tempo/blob/dan/evm2-native-payments/docs/evidence/EVM2_T16_NATIVE_FACTORY_DEVNET.md)
+records a same-chain 240-second run of 12,000 Earn payments and 6,000 private
+Zone transfers. All workload receipts succeeded; Earn and portal custody
+reconciled, 26 NoProof batches settled, and sampled Earn blocks had zero
+general gas. Its checked summary reports 74.97 client-observed transactions
+per second and p50/p95/p99 completion times for 100-transaction legs. The
+Tempo PR includes a repeatable load runner, raw receipts, lane samples, and
+offline checkers. A local Veda Queue request also settled through production
+VedaEngine and VedaForwardingSolver, but the other Veda periphery contracts
+were local fixtures. Nitro settlement, licensed production periphery, and a
+matched current-revm throughput baseline remain open.
 
 The [fork-boundary settlement evidence](evidence/EVM2_T15_SETTLEMENT_FORK.md)
 records a preexisting Zone balance across scheduled T15 activation, post-fork
@@ -237,13 +249,13 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | --- | --- | --- |
 | Repository/upstream inventory | Started | Tempo #7871, Zones #1463, TIP-1084 #6559; local Earn invariants inspected |
 | Compatible EVM2 baseline | Partial | Real bridge receipts and backing reconciliation; NoProof mode, no scheduled native activation |
-| Shared native context and paid child work | Partial | Tempo T15 native deposit, bounded delegate-frame settlement and FIFO withdrawal processing use paid child calls; callbacks, vault and full admission remain open |
+| Shared native context and paid child work | Partial | Tempo T15 portal and T16 vault/fee/solver handlers use bounded paid EVM2 child calls; complete adversarial admission review remains open |
 | Shared portal ABI | Implemented groundwork | Tempo ABI macro reused by Zones; historical selector/event tests |
 | Native reentry provider safety | Reproduced finding fixed | EVM2 #523 Miri before/after; downstream shared dispatch aligned |
 | T15 native deposit smoke | Partial | [Real native trace, private credit, backing, NoProof batch, and one zero-general-gas deposit block](evidence/EVM2_T15_NATIVE_DEPOSIT.md); Zone created after fork |
 | T15 existing-Zone L1 activation smoke | Partial | [Pre-fork private balance, scheduled L1 fork, post-fork native deposit and two payment-lane batches](evidence/EVM2_T15_SETTLEMENT_FORK.md); Zone execution stayed T14; NoProof |
 | T15 Zone private transfer smoke | Partial | [Scheduled Zone T15, three signed transfers, backing, restart and one payment-lane batch](evidence/EVM2_T15_PRIVATE_TRANSFER.md); NoProof, Zone created after L1 fork |
 | T15 native withdrawal smoke | Partial | [Private burn, paid portal payout, FIFO cursor, backing and payment lane; forged candidate charged general](evidence/EVM2_T15_NATIVE_WITHDRAWAL.md); callback and proof flows open |
-| T16 Earn/Zone fork and mixed-load smoke | Partial | [Funded vault and Zone cross T16; 450 mixed cycles over 30 minutes, reviewed-binary fork replay, pinned SDK restart, and offline SPF validation](evidence/EVM2_T16_EARN_ZONE_FORK.md); NoProof, dynamic-registration devnet, async settlement, and capacity testing open |
+| T16 Earn/Zone fork and mixed-load smoke | Partial | [Funded vault and Zone cross T16; 450 mixed cycles over 30 minutes, reviewed-binary fork replay, pinned SDK restart, and offline SPF validation](evidence/EVM2_T16_EARN_ZONE_FORK.md); [factory devnet](https://github.com/tempoxyz/tempo/blob/dan/evm2-native-payments/docs/evidence/EVM2_T16_NATIVE_FACTORY_DEVNET.md) adds 18,000 mixed transactions over 240 seconds, native registration, checked lane gas, and local async settlement; Nitro and licensed Veda remain open |
 | E01–I01 | Open | No passing combined acceptance result recorded |
 | Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642, Tempo #8076, Zones #1637, Earn #354; full implementation open |
