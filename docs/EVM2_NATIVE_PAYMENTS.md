@@ -55,8 +55,10 @@ non-replenishment across native roots. T15 adds native portal deposit dispatch
 and verified top-level payment admission. It also bounds canonical AA
 `submitBatch`, checks portal and implementation identity, and executes the
 existing implementation in a paid EVM2 delegate frame. T15 also bounds
-canonical FIFO withdrawal processing and its paid child calls. Earn vault
-dispatch and complete payment admission remain open; this slice
+canonical FIFO withdrawal processing and its paid child calls. T16 adds
+manifest-bound EarnVault and EarnFees runtime migration, paid native vault
+dispatch, and verified top-level payment admission. New stack registration,
+asynchronous callbacks, and complete payment admission remain open; this slice
 does not pass E02/E03.
 
 Tempo and Zones generate the complete portal bindings from one ABI definition,
@@ -79,12 +81,16 @@ single-transaction block with zero general-lane gas. It does not establish
 private Earn, native withdrawal, real proofs, fork migration, or sustained
 combined throughput.
 
-TIP-1128 now specifies code-identity dispatch for legacy EarnVault proxies and
-EarnFees clones at a future fork boundary. Earn #354 includes a versioned
-dispatcher fallback runtime and a test that replaces a funded vault proxy and
-its fee clone with that runtime, then checks retained storage, shares, engine
-position, spending, and redemption. This is a Solidity migration simulation;
-Tempo has not installed the runtime at a fork or admitted Earn payments natively.
+TIP-1128 specifies code-identity dispatch for legacy EarnVault proxies and
+EarnFees clones at proposed T16. Earn #354 includes the versioned dispatcher
+fallback runtime and a funded-position migration test. Tempo #8076 installs
+that runtime at T16 and dispatches registered payment selectors through a
+bounded EVM2 delegate frame. The [T16 Earn and Zone fork smoke test](evidence/EVM2_T16_EARN_ZONE_FORK.md)
+records an existing funded vault and Zone crossing L1 T16, post-fork Earn
+spending, deposit, yield recognition, redemption, failed redemption, Zone
+private transfers, and payment-lane settlement. The checked pre-fork account
+and storage proofs bind the Earn manifest to one L1 state root. The settlement
+mode is NoProof; these proofs do not establish execution-proof validity.
 
 The [fork-boundary settlement evidence](evidence/EVM2_T15_SETTLEMENT_FORK.md)
 records a preexisting Zone balance across scheduled T15 activation, post-fork
@@ -230,6 +236,6 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | T15 existing-Zone L1 activation smoke | Partial | [Pre-fork private balance, scheduled L1 fork, post-fork native deposit and two payment-lane batches](evidence/EVM2_T15_SETTLEMENT_FORK.md); Zone execution stayed T14; NoProof |
 | T15 Zone private transfer smoke | Partial | [Scheduled Zone T15, three signed transfers, backing, restart and one payment-lane batch](evidence/EVM2_T15_PRIVATE_TRANSFER.md); NoProof, Zone created after L1 fork |
 | T15 native withdrawal smoke | Partial | [Private burn, paid portal payout, FIFO cursor, backing and payment lane; forged candidate charged general](evidence/EVM2_T15_NATIVE_WITHDRAWAL.md); callback and proof flows open |
-| Earn dispatcher migration simulation | Groundwork | Earn #354 replaces funded vault and fee-clone code in a Foundry test, then checks storage and redemption; no Tempo fork transition or native Earn lane yet |
+| T16 Earn/Zone fork smoke | Partial | [Funded vault and Zone cross L1 T16; native Earn lifecycle and Zone settlement have exact zero-general-lane samples](evidence/EVM2_T16_EARN_ZONE_FORK.md); NoProof and isolated transactions, with dynamic registration and sustained load open |
 | E01–I01 | Open | No passing combined acceptance result recorded |
 | Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642, Tempo #8076, Zones #1637, Earn #354; full implementation open |
