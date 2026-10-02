@@ -1965,7 +1965,9 @@ mod tests {
         let t16_without_schedule = Asserter::new();
         t16_without_schedule.push_success(&serde_json::json!({ "active": "T16", "schedule": [] }));
         assert_eq!(
-            SettlementAbi::from_l1(&mock_l1(t16_without_schedule)).await.unwrap(),
+            SettlementAbi::from_l1(&mock_l1(t16_without_schedule))
+                .await
+                .unwrap(),
             SettlementAbi::T13
         );
 

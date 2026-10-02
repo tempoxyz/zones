@@ -28,7 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sender,
         portal,
         key_index,
-    ).ok_or("invalid key or failed encryption")?;
+    )
+    .ok_or("invalid key or failed encryption")?;
     let calldata = ZonePortal::depositCall {
         token,
         amount,
@@ -41,7 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tag: encrypted.tag.into(),
         },
         tempoRefundRecipient: sender,
-    }.abi_encode();
+    }
+    .abi_encode();
     println!("0x{}", alloy_primitives::hex::encode(calldata));
     Ok(())
 }
