@@ -64,14 +64,14 @@ revision in their native-payment branches.
 - **Invariant:** only a top-level, factory-registered, initialized portal with
   the exact canonical proxy runtime may receive payment capacity. A child call
   or AA bundle cannot launder unrelated execution into that classification.
-- **Fix in progress:** Tempo `0f6f54a45` admits canonical, bounded direct
+- **Fix:** Tempo `0f6f54a45` admits canonical, bounded direct
   deposits as candidates. The native handler records successful identity checks
   before paid child execution, and consensus classifies the transaction only
   after execution confirms that marker. The payload builder uses the executed
   classification for lane counters and invalidates candidates that exceed the
   general limit when native identity fails. The transaction marker resets with
   the transaction-owned call budget.
-- **Regression so far:** malformed and oversized candidate ABI tests, actual
+- **Regression:** malformed and oversized candidate ABI tests, actual
   T15 provider success and rollback tests, 242 primitive, 1,092 precompile,
   307 EVM, and 28 payload-builder tests pass; affected clippy checks pass.
 - **Devnet regression:** the upgraded Tempo binary's second deposit is the only
@@ -81,9 +81,8 @@ revision in their native-payment branches.
   [the T15 evidence](EVM2_T15_NATIVE_DEPOSIT.md). A forged Zone ID 2 deposit
   reverted with no child calls, while its isolated block used 29,850 general
   gas and zero payment gas.
-- **Remaining:** test delegated candidates and saturation, cover AA bundles
-  without exposing arbitrary child execution, and review
-  all pool and prover classifiers. The new native withdrawal smoke checks a
+- **Remaining:** review delegated candidates and AA bundles across all pool
+  and prover classifiers. The native withdrawal smoke checks a
   forged portal-prefix `processWithdrawals` call: it reverted without child
   calls and charged 27,910 general gas and zero payment gas. The finding is
   not closed.
@@ -122,8 +121,28 @@ revision in their native-payment branches.
   datadir is no longer available for live checker replay. Its genesis was
   reconstructed from the recorded L1 anchor with the exact archived genesis
   hash, but the current datadir contains the newly provisioned Zone 2.
-- **Partial fix:** explicit `--dev.t15-time` writes the local Zone schedule
+- **Fix:** explicit `--dev.t15-time` writes the local Zone schedule
   at provisioning. A new Zone 3 started with T15 active, transferred funds,
   settled a batch, and restarted with `tempo-zone node` using its saved genesis
-  and datadir. A fresh devnet must still run an existing Zone through its own
-  scheduled fork with funded pre-fork positions and replay/sync verification.
+  and datadir. The later [combined fork run](EVM2_T16_EARN_ZONE_FORK.md) took a
+  funded pre-fork Zone through its scheduled T15 activation on the same datadir,
+  then accepted private transfers and settled their batch.
+
+## F006: settlement signers inferred proof mode from local prover state
+
+- **Severity:** quorum liveness failure at a proof-policy transition; a
+  mismatched signer cannot produce the leader's settlement digest.
+- **Trigger:** configure Nitro proving on a leader while a follower has no
+  local prover. The two nodes hash different `verifierConfig` values into the
+  same batch attestation, so the leader cannot collect that follower's share.
+- **Invariant:** every quorum member must sign the same verifier configuration
+  while the submitting leader must supply the matching proof mode.
+- **Fix:** the shared manifest now declares `settlement_proof_mode`, defaulting
+  to the existing NoProof rollout policy. Every quorum node derives the
+  attestation hash from it, logs the mode in its diagnostic membership digest,
+  and rejects a local sequencer prover setting that conflicts with the manifest.
+- **Regression:** manifest parsing, digest, focused Clippy, and the real
+  three-node NoProof quorum submission pass against the pinned Tempo revision.
+- **Limit:** Nitro mode requires a configured attesting prover on each quorum
+  node that may become leader; this host has no Nitro NSM for an end-to-end
+  attested settlement run.
