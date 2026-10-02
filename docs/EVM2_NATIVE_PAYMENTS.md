@@ -57,8 +57,10 @@ and verified top-level payment admission. It also bounds canonical AA
 existing implementation in a paid EVM2 delegate frame. T15 also bounds
 canonical FIFO withdrawal processing and its paid child calls. T16 adds
 manifest-bound EarnVault and EarnFees runtime migration, paid native vault
-dispatch, and verified top-level payment admission. New stack registration,
-asynchronous callbacks, and complete payment admission remain open; this slice
+dispatch, and verified top-level payment admission. A scheduled factory and
+governor can now register new stacks atomically and approve exact engine code
+identities; this path has unit tests but no devnet transaction. Asynchronous
+settlement callbacks and complete payment admission remain open; this slice
 does not pass E02/E03.
 
 Tempo and Zones generate the complete portal bindings from one ABI definition,
@@ -242,6 +244,6 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | T15 existing-Zone L1 activation smoke | Partial | [Pre-fork private balance, scheduled L1 fork, post-fork native deposit and two payment-lane batches](evidence/EVM2_T15_SETTLEMENT_FORK.md); Zone execution stayed T14; NoProof |
 | T15 Zone private transfer smoke | Partial | [Scheduled Zone T15, three signed transfers, backing, restart and one payment-lane batch](evidence/EVM2_T15_PRIVATE_TRANSFER.md); NoProof, Zone created after L1 fork |
 | T15 native withdrawal smoke | Partial | [Private burn, paid portal payout, FIFO cursor, backing and payment lane; forged candidate charged general](evidence/EVM2_T15_NATIVE_WITHDRAWAL.md); callback and proof flows open |
-| T16 Earn/Zone fork and mixed-load smoke | Partial | [Funded vault and Zone cross T16; 450 mixed cycles over 30 minutes, reviewed-binary fork replay, pinned SDK restart, and offline SPF validation](evidence/EVM2_T16_EARN_ZONE_FORK.md); NoProof, dynamic registration, async flows, and capacity testing open |
+| T16 Earn/Zone fork and mixed-load smoke | Partial | [Funded vault and Zone cross T16; 450 mixed cycles over 30 minutes, reviewed-binary fork replay, pinned SDK restart, and offline SPF validation](evidence/EVM2_T16_EARN_ZONE_FORK.md); NoProof, dynamic-registration devnet, async settlement, and capacity testing open |
 | E01–I01 | Open | No passing combined acceptance result recorded |
 | Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642, Tempo #8076, Zones #1637, Earn #354; full implementation open |
