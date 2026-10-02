@@ -182,8 +182,9 @@ resolved review findings. Any unmet row keeps this delivery contract incomplete.
 | --- | --- | --- |
 | Repository/upstream inventory | Started | Tempo #7871, Zones #1463, TIP-1084 #6559; local Earn invariants inspected |
 | Compatible EVM2 baseline | Partial | Real bridge receipts and backing reconciliation; NoProof mode, no scheduled native activation |
-| Shared native context and paid child work | Partial | Tempo adapter and reservation regressions; native portal/vault entrypoints remain open |
+| Shared native context and paid child work | Partial | Tempo T15 native portal deposit uses paid TIP-20 child calls; withdrawals, settlement, vault and full admission remain open |
 | Shared portal ABI | Implemented groundwork | Tempo ABI macro reused by Zones; historical selector/event tests |
 | Native reentry provider safety | Reproduced finding fixed | EVM2 #523 Miri before/after; downstream shared dispatch aligned |
-| E01–I01 | Open | No passing result recorded |
-| Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, EVM2 #523, Reth #27642; remaining full implementation PRs open |
+| T15 native deposit smoke | Partial | [Real native trace, private credit, backing, NoProof batch, and one zero-general-gas deposit block](evidence/EVM2_T15_NATIVE_DEPOSIT.md); Zone created after fork |
+| E01–I01 | Open | No passing combined acceptance result recorded |
+| Draft TIPs / implementation PRs | Partial | TIP-1125 #8068, TIP-1127 #8073, TIP-1128 #8074, TIP-1129 #8075, EVM2 #523, Reth #27642; full Tempo/Zones implementation PRs open |

@@ -30,6 +30,10 @@ accounting, lane admission, and proof settlement still need their own reviews.
 The [EVM2 draft PR](https://github.com/alloy-rs/evm2/pull/523) contains the
 implementation and a checked-in reproducer description.
 
+The later selector-aware provider revision is
+`1e4dbf287df62e5b24fef4f7dbae32deb14b4fc5`; Tempo and Reth pin that
+revision in their native-payment branches.
+
 ## F002: unconfigured local prover submits an invalid proof-mode payload
 
 - **Severity:** medium for local development liveness; production proof
@@ -49,3 +53,34 @@ implementation and a checked-in reproducer description.
 - **Limits:** explicit NoProof mode is temporary baseline development behavior.
   It supplies no execution-proof security and cannot satisfy the native upgrade
   or final devnet acceptance gates.
+
+## F003: portal-looking calldata cannot confer payment-lane authority
+
+- **Severity:** high if a prefix-only classifier admits arbitrary code to the
+  payment lane; the observed T15 smoke transaction used general capacity in the
+  earlier devnet binary.
+- **Trigger:** submit canonical `deposit` calldata to a forged portal-prefix
+  address, or to an account executing delegated code.
+- **Invariant:** only a top-level, factory-registered, initialized portal with
+  the exact canonical proxy runtime may receive payment capacity. A child call
+  or AA bundle cannot launder unrelated execution into that classification.
+- **Fix in progress:** Tempo `0f6f54a45` admits canonical, bounded direct
+  deposits as candidates. The native handler records successful identity checks
+  before paid child execution, and consensus classifies the transaction only
+  after execution confirms that marker. The payload builder uses the executed
+  classification for lane counters and invalidates candidates that exceed the
+  general limit when native identity fails. The transaction marker resets with
+  the transaction-owned call budget.
+- **Regression so far:** malformed and oversized candidate ABI tests, actual
+  T15 provider success and rollback tests, 242 primitive, 1,092 precompile,
+  307 EVM, and 28 payload-builder tests pass; affected clippy checks pass.
+- **Devnet regression:** the upgraded Tempo binary's second deposit is the only
+  transaction in L1 block 1546. Its receipt used 93,267 gas, and the matched
+  payload metric recorded one payment transaction, 93,267 payment gas, and zero
+  general gas. Zone credit and backing also reconciled; see
+  [the T15 evidence](EVM2_T15_NATIVE_DEPOSIT.md). A forged Zone ID 2 deposit
+  reverted with no child calls, while its isolated block used 29,850 general
+  gas and zero payment gas.
+- **Remaining:** test delegated candidates and saturation, cover AA bundles
+  without exposing arbitrary child execution, and review
+  all pool and prover classifiers. The finding is not closed.
