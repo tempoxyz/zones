@@ -55,8 +55,7 @@ impl ZoneOutbox {
             return Err(ZonePrecompileError::from(ZoneOutboxError::only_zone_inbox()).into());
         }
         // A pre-fork invocation is an invalid transition, never a terminal policy rejection.
-        // TODO: Figure out which Hardfork Forced Exit will go into. Use T13 for now.
-        if !self.storage.spec().is_t13() {
+        if !self.storage.spec().is_t14() {
             return Err(ZonePrecompileError::MalformedCalldata.into());
         }
         let checkpoint = self.storage.checkpoint();
