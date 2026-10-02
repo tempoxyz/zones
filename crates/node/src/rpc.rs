@@ -443,7 +443,7 @@ fn spf_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
             .storage
             .insert(keccak256(slot.to_be_bytes::<32>()), hash.into());
     }
-    if !history_storage.storage.is_empty() {
+    if !history_storage.is_empty() {
         targets.extend(HashedPostState::from_hashed_storage(
             keccak256(HISTORY_STORAGE_ADDRESS),
             history_storage,
@@ -566,13 +566,13 @@ where
     let status = context.status.lock().expect("poisoned").clone();
     let latest = context.schedule.latest();
     let active_leader = latest.as_ref().map(|record| {
-        let node = context.manifest.node_by_ed25519_public_key(&record.leader);
+        let node = context.manifest.node_by_ed25519_public_key(record.leader());
         ActiveLeaderInfo {
             name: node.map(|node| node.name().to_owned()),
             sequencer_address: node.and_then(|node| node.secp256k1_address()),
             p2p_public_key: record.leader.to_string(),
-            epoch: U64::from(record.epoch),
-            activation_tempo_block: U64::from(record.activation_tempo_block),
+            epoch: U64::from(record.epoch()),
+            activation_tempo_block: U64::from(record.activation_tempo_block()),
         }
     });
 

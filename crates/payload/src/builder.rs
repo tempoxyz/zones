@@ -865,12 +865,11 @@ mod tests {
     use alloy_consensus::{Header, SignableTransaction as _, TxLegacy};
     use alloy_primitives::{Address, B256, U256, address};
     use alloy_sol_types::SolCall;
-    use reth_primitives_traits::{Recovered, SealedHeader};
+    use reth_primitives_traits::SealedHeader;
     use reth_tasks::cancel::CancelOnDrop;
     use reth_transaction_pool::{
         BestTransactions, TransactionOrigin, ValidPoolTransaction,
-        error::InvalidPoolTransactionError,
-        identifier::{SenderId, TransactionId},
+        error::InvalidPoolTransactionError, identifier::SenderId,
     };
     use std::{collections::VecDeque, sync::Arc, time::Instant};
     use tempo_primitives::{
@@ -981,10 +980,13 @@ mod tests {
             input: vec![0u8; input_len].into(),
         };
         let envelope = TempoTxEnvelope::Legacy(tx.into_signed(TEMPO_SYSTEM_TX_SIGNATURE));
-        let recovered = Recovered::new_unchecked(envelope, TEMPO_SYSTEM_TX_SENDER);
+        let recovered = reth_primitives_traits::SignedTransaction::with_signer(
+            envelope,
+            TEMPO_SYSTEM_TX_SENDER,
+        );
         Arc::new(ValidPoolTransaction {
             transaction: TempoPooledTransaction::new(recovered),
-            transaction_id: TransactionId::new(SenderId::from(0u64), nonce),
+            transaction_id: SenderId::from(0u64).into_transaction_id(nonce),
             propagate: false,
             timestamp: Instant::now(),
             origin: TransactionOrigin::External,

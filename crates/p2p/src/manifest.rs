@@ -171,7 +171,7 @@ impl LeadershipScheduleState {
     fn is_retained_leader(&self, peer: &PublicKey) -> bool {
         self.transitions
             .values()
-            .any(|record| &record.leader == peer)
+            .any(|record| record.leader() == peer)
             || self
                 .forced_recovery
                 .as_ref()
@@ -208,11 +208,11 @@ impl LeadershipScheduleState {
         let Some(record) = self
             .transitions
             .values()
-            .find(|record| record.epoch >= recovery.epoch)
+            .find(|record| record.epoch() >= recovery.epoch)
         else {
             return false;
         };
-        let activation = record.activation_tempo_block;
+        let activation = record.activation_tempo_block();
         self.forced_recovery
             .as_mut()
             .expect("recovery was read above")
@@ -302,21 +302,21 @@ impl LeadershipSchedule {
         } else {
             record
         };
-        if let Some(existing) = state.transitions.get(&record.activation_tempo_block) {
+        if let Some(existing) = state.transitions.get(&record.activation_tempo_block()) {
             eyre::ensure!(
                 *existing == record,
                 "conflicting leadership transition at activation {}: existing epoch {} leader \
                  {}, new epoch {} leader {}",
-                record.activation_tempo_block,
-                existing.epoch,
+                record.activation_tempo_block(),
+                existing.epoch(),
                 existing.leader,
-                record.epoch,
+                record.epoch(),
                 record.leader,
             );
             return Ok(false);
         }
         if let Some((&last_activation, last)) = state.transitions.last_key_value() {
-            if record.epoch == last.epoch {
+            if record.epoch() == last.epoch() {
                 // A re-observation of the clamped initial record at its true activation is
                 // the same authority; anything else with a duplicate epoch is corrupt.
                 if record.leader == last.leader
@@ -327,27 +327,27 @@ impl LeadershipSchedule {
                 }
                 eyre::bail!(
                     "duplicate leadership epoch {} at a different activation: retained {}, new {}",
-                    record.epoch,
+                    record.epoch(),
                     last_activation,
-                    record.activation_tempo_block,
+                    record.activation_tempo_block(),
                 );
             }
             eyre::ensure!(
-                record.epoch == last.epoch + 1,
+                record.epoch() == last.epoch() + 1,
                 "non-contiguous leadership epoch: retained {}, new {}",
-                last.epoch,
-                record.epoch,
+                last.epoch(),
+                record.epoch(),
             );
             eyre::ensure!(
-                record.activation_tempo_block > last_activation,
+                record.activation_tempo_block() > last_activation,
                 "leadership activation moved backwards: retained {}, new {}",
                 last_activation,
-                record.activation_tempo_block,
+                record.activation_tempo_block(),
             );
         }
         state
             .transitions
-            .insert(record.activation_tempo_block, record);
+            .insert(record.activation_tempo_block(), record);
         state.maybe_bound_forced_recovery();
         drop(state);
         self.changed.send_replace(());
@@ -459,7 +459,7 @@ impl LeadershipSchedule {
     /// Derived: `publish` requires `epoch == last.epoch + 1` and pruning never drops the last
     /// entry, so the highest observed epoch is always the last retained transition's.
     pub fn latest_observed_epoch(&self) -> Option<u64> {
-        self.latest().map(|record| record.epoch)
+        self.latest().map(|record| record.epoch())
     }
 
     /// Epoch whose activation boundary the locally applied checkpoint has crossed.
@@ -472,7 +472,7 @@ impl LeadershipSchedule {
             .transitions
             .range(..=applied)
             .next_back()
-            .map(|(_, record)| record.epoch)
+            .map(|(_, record)| record.epoch())
     }
 
     /// Number of observed transitions whose activation the applied checkpoint has not crossed.
@@ -547,7 +547,7 @@ impl LeadershipSchedule {
         let record = self.leader_for(tempo_anchor)?;
         Some(role_of(
             ed25519_public_key,
-            &record.leader,
+            record.leader(),
             &self.rpc_followers,
         ))
     }
@@ -1651,8 +1651,8 @@ mod tests {
             ],
         );
         let manifest = ZoneManifest::parse(&input).unwrap();
-        let leader = PrivateKey::from_seed(1).public_key();
-        let follower = PrivateKey::from_seed(2).public_key();
+        let leader = public_key(1);
+        let follower = public_key(2);
         let leadership = manifest.bootstrap_leadership();
 
         assert_eq!(leadership.epoch(), 0);
@@ -2126,7 +2126,7 @@ mod tests {
             ],
         ))
         .unwrap();
-        let follower = PrivateKey::from_seed(2).public_key();
+        let follower = public_key(2);
         assert!(matches!(
             valid.validate_node(
                 &follower,
@@ -2135,7 +2135,7 @@ mod tests {
             ),
             Err(ManifestError::RoleMismatch { .. })
         ));
-        let unknown = PrivateKey::from_seed(99).public_key();
+        let unknown = public_key(99);
         assert!(matches!(
             valid.validate_node(&unknown, Some(secp256k1_address(99).parse().unwrap()), None,),
             Err(ManifestError::LocalNodeNotFound(_))

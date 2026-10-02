@@ -474,7 +474,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 matches!(
-                    classify_rpc_error(RpcError::ErrorResp(payload)),
+                    classify_rpc_error(RpcError::err_resp(payload)),
                     AttemptError::Retry(_)
                 ),
                 retryable,
