@@ -183,8 +183,8 @@ The manifest loader validates that:
 
 `settlement_proof_mode` selects the proof policy every quorum member signs: `no-proof` for
 the explicit rollout mode or `nitro` for attested settlement. It defaults to `no-proof` for
-existing manifests. The active sequencer's `--sequencer.enable-prover` setting must match this
-policy; followers use the manifest policy even when they do not run a prover locally. Change
+existing manifests. Every quorum node's `--sequencer.enable-prover` setting must match this
+policy, so any member promoted to leader can submit under the same policy. Change
 the manifest on every quorum node together before switching the portal verifier.
 
 At P2P startup, the node requires the configured `ZonePortal` to be deployed at the current L1 tip,
