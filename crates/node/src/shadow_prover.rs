@@ -400,7 +400,7 @@ mod tests {
             withdrawalQueueHash: B256::repeat_byte(3),
             verifierConfig: Default::default(),
             proof: Default::default(),
-            nextZoneHeight: U256::from(1),
+            nextZoneHeight: U256::ONE,
             signatures: Vec::new(),
         };
         let mut event = BatchSubmitted {

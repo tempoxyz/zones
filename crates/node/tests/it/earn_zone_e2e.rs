@@ -629,7 +629,7 @@ impl EarnZoneFixture {
         let supply_before = earn_vault.totalEarnShares().call().await?;
 
         let unauthorized = EarnVault::new(self.earn_vault, self.user.l1_provider())
-            .migrateEngine(Address::ZERO, U256::from(1), U256::from(1))
+            .migrateEngine(Address::ZERO, U256::ONE, U256::ONE)
             .from(self.user.address())
             .call()
             .await;
@@ -642,7 +642,7 @@ impl EarnZoneFixture {
         let operator_vault = EarnVault::new(self.earn_vault, &provider);
         eyre::ensure!(
             operator_vault
-                .migrateEngine(Address::ZERO, U256::from(1), U256::from(1))
+                .migrateEngine(Address::ZERO, U256::ONE, U256::ONE)
                 .call()
                 .await
                 .is_err(),
@@ -650,7 +650,7 @@ impl EarnZoneFixture {
         );
         eyre::ensure!(
             operator_vault
-                .migrateEngine(engine_before, U256::from(1), U256::from(1))
+                .migrateEngine(engine_before, U256::ONE, U256::ONE)
                 .call()
                 .await
                 .is_err(),
@@ -915,12 +915,7 @@ impl EarnZoneFixture {
         eyre::ensure!(callback_success, "Earn deposit callback failed");
         let after = self
             .zone
-            .wait_for_balance(
-                self.earn_share,
-                recipient,
-                before + U256::from(1),
-                E2E_TIMEOUT,
-            )
+            .wait_for_balance(self.earn_share, recipient, before + U256::ONE, E2E_TIMEOUT)
             .await?;
         let minted = after - before;
         self.assert_private_return(
@@ -1101,7 +1096,7 @@ impl EarnZoneFixture {
             .wait_for_balance(
                 self.earn_share,
                 self.user.address(),
-                public_refund_before + U256::from(1),
+                public_refund_before + U256::ONE,
                 BOUNCE_TIMEOUT,
             )
             .await?;
@@ -1201,7 +1196,7 @@ impl EarnZoneFixture {
 
         let after = self
             .zone
-            .wait_for_balance(output_token, recipient, before + U256::from(1), E2E_TIMEOUT)
+            .wait_for_balance(output_token, recipient, before + U256::ONE, E2E_TIMEOUT)
             .await?;
         let returned = after - before;
         self.assert_private_return(
@@ -1626,7 +1621,7 @@ async fn zone_ineligible_private_transfer_blocked() -> eyre::Result<()> {
         .wallet(fixture.l1.user_signer())
         .connect_http(fixture.zone.http_url().clone());
     let transfer = ITIP20::new(fixture.earn_share, &user_provider)
-        .transfer(outsider, U256::from(1))
+        .transfer(outsider, U256::ONE)
         .from(user)
         .call()
         .await;
@@ -1852,7 +1847,7 @@ async fn matrix_deposit_public_public_succeeds() -> eyre::Result<()> {
         .await?;
     eyre::ensure!(receipt.status(), "public EarnVault approval failed");
     let receipt = EarnVault::new(fixture.earn_vault, provider)
-        .deposit(U256::from(AMOUNT), user, U256::from(1))
+        .deposit(U256::from(AMOUNT), user, U256::ONE)
         .send()
         .await?
         .get_receipt()
@@ -1880,7 +1875,7 @@ async fn matrix_redeem_public_public_succeeds() -> eyre::Result<()> {
         .get_receipt()
         .await?;
     EarnVault::new(fixture.earn_vault, provider)
-        .deposit(U256::from(AMOUNT), user, U256::from(1))
+        .deposit(U256::from(AMOUNT), user, U256::ONE)
         .send()
         .await?
         .get_receipt()
@@ -1895,7 +1890,7 @@ async fn matrix_redeem_public_public_succeeds() -> eyre::Result<()> {
         .await?;
     eyre::ensure!(receipt.status(), "public EarnShare approval failed");
     let receipt = EarnVault::new(fixture.earn_vault, provider)
-        .redeem(earn_shares, user, U256::from(1))
+        .redeem(earn_shares, user, U256::ONE)
         .send()
         .await?
         .get_receipt()
@@ -1917,7 +1912,7 @@ async fn matrix_deposit_public_private_rejects_retired_router_surface() -> eyre:
         .depositToZone(
             fixture.earn_vault,
             U256::from(AMOUNT),
-            U256::from(1),
+            U256::ONE,
             legacy_delivery(fixture.portal, user),
         )
         .call()
@@ -1937,7 +1932,7 @@ async fn matrix_redeem_public_private_rejects_retired_router_surface() -> eyre::
         .redeemToZone(
             fixture.earn_vault,
             U256::from(AMOUNT),
-            U256::from(1),
+            U256::ONE,
             legacy_delivery(fixture.portal, user),
         )
         .call()

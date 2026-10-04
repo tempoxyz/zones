@@ -822,6 +822,7 @@ where
 
 #[cfg(test)]
 mod tests {
+
     use std::{
         io,
         net::{SocketAddr, TcpListener},
@@ -829,7 +830,7 @@ mod tests {
         time::Duration,
     };
 
-    use alloy_primitives::{B256, address};
+    use alloy_primitives::{Address, B256};
     use commonware_actor::Feedback;
     use commonware_codec::Encode as _;
     use commonware_cryptography::{
@@ -1168,7 +1169,7 @@ mod tests {
             ))
             .unwrap(),
         );
-        let network_id = P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let network_id = P2pNetworkId::new(1, Address::repeat_byte(0x11));
         let config = |index: usize| P2pConfig {
             zone_id: 9,
             manifest: manifest.clone(),
@@ -1434,7 +1435,7 @@ mod tests {
                             manifest.bootstrap_leadership(),
                         ),
                     },
-                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                    P2pNetworkId::new(1, Address::repeat_byte(0x11)),
                 )
                 .unwrap()
             })
@@ -1779,7 +1780,7 @@ mod tests {
                         storage_directory: None,
                         leadership,
                     },
-                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                    P2pNetworkId::new(1, Address::repeat_byte(0x11)),
                 )
                 .unwrap()
             })
@@ -1992,7 +1993,7 @@ mod tests {
                         storage_directory: None,
                         leadership,
                     },
-                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                    P2pNetworkId::new(1, Address::repeat_byte(0x11)),
                 )
                 .unwrap()
             })
@@ -2168,7 +2169,7 @@ mod tests {
                             manifest.bootstrap_leadership(),
                         ),
                     },
-                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                    P2pNetworkId::new(1, Address::repeat_byte(0x11)),
                 )
                 .unwrap()
             })
@@ -2268,7 +2269,7 @@ mod tests {
                             manifest.bootstrap_leadership(),
                         ),
                     },
-                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                    P2pNetworkId::new(1, Address::repeat_byte(0x11)),
                 )
                 .unwrap()
             })
@@ -2342,7 +2343,7 @@ mod tests {
             ));
         }
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
-        let network_id = P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let network_id = P2pNetworkId::new(1, Address::repeat_byte(0x11));
         let leader_peer = identities[0].ed25519_public_key();
 
         let spawn_node = |index: usize| {
@@ -2522,7 +2523,7 @@ mod tests {
             ));
         }
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
-        let network_id = P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let network_id = P2pNetworkId::new(1, Address::repeat_byte(0x11));
         let leader_peer = identities[0].ed25519_public_key();
         let sender_peer = identities[1].ed25519_public_key();
 

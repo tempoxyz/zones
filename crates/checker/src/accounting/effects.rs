@@ -373,7 +373,7 @@ mod tests {
     fn tempo_refund_replaces_failed_deposit_liability_until_claimed() {
         let token = Address::repeat_byte(1);
         let amount = U256::from(10);
-        let fee = U256::from(1);
+        let fee = U256::ONE;
         let mut state = crate::accounting::State::default();
         state
             .apply(&[

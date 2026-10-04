@@ -306,7 +306,7 @@ mod tests {
     }
 
     fn assert_validates_shared_runtimes([portal, verifier, messenger]: [Bytes; 3]) {
-        let owner = address!("0x0000000000000000000000000000000000000001");
+        let owner = Address::with_last_byte(1);
         let mut genesis = Genesis::default();
         genesis.alloc.insert(
             ZONE_FACTORY_ADDRESS,
@@ -361,7 +361,7 @@ mod tests {
     }
 
     fn assert_rejects_shared_runtime(address: Address, account: GenesisAccount) {
-        let owner = address!("0x0000000000000000000000000000000000000001");
+        let owner = Address::with_last_byte(1);
         let mut genesis = Genesis::default();
         genesis.alloc.insert(address, account.clone());
 

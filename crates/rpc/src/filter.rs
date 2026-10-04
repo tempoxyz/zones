@@ -358,8 +358,8 @@ mod tests {
 
     #[test]
     fn transfer_eligible_as_sender() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let log = make_log(
             Address::ZERO,
             vec![TRANSFER_TOPIC, caller.into_word(), other.into_word()],
@@ -369,8 +369,8 @@ mod tests {
 
     #[test]
     fn transfer_eligible_as_receiver() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let log = make_log(
             Address::ZERO,
             vec![TRANSFER_TOPIC, other.into_word(), caller.into_word()],
@@ -380,9 +380,9 @@ mod tests {
 
     #[test]
     fn transfer_rejected_when_not_participant() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let a = address!("0x0000000000000000000000000000000000000002");
-        let b = address!("0x0000000000000000000000000000000000000003");
+        let caller = Address::with_last_byte(1);
+        let a = Address::with_last_byte(2);
+        let b = Address::with_last_byte(3);
         let log = make_log(
             Address::ZERO,
             vec![TRANSFER_TOPIC, a.into_word(), b.into_word()],
@@ -396,8 +396,8 @@ mod tests {
 
     #[test]
     fn approval_eligible_as_owner() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let spender = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let spender = Address::with_last_byte(2);
         let log = make_log(
             Address::ZERO,
             vec![APPROVAL_TOPIC, caller.into_word(), spender.into_word()],
@@ -407,8 +407,8 @@ mod tests {
 
     #[test]
     fn approval_eligible_as_spender() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let owner = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let owner = Address::with_last_byte(2);
         let log = make_log(
             Address::ZERO,
             vec![APPROVAL_TOPIC, owner.into_word(), caller.into_word()],
@@ -418,9 +418,9 @@ mod tests {
 
     #[test]
     fn approval_rejected_when_not_participant() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let a = address!("0x0000000000000000000000000000000000000002");
-        let b = address!("0x0000000000000000000000000000000000000003");
+        let caller = Address::with_last_byte(1);
+        let a = Address::with_last_byte(2);
+        let b = Address::with_last_byte(3);
         let log = make_log(
             Address::ZERO,
             vec![APPROVAL_TOPIC, a.into_word(), b.into_word()],
@@ -434,8 +434,8 @@ mod tests {
 
     #[test]
     fn transfer_with_memo_eligible_as_sender() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let log = make_log(
             Address::ZERO,
             vec![
@@ -449,8 +449,8 @@ mod tests {
 
     #[test]
     fn transfer_with_memo_eligible_as_receiver() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let log = make_log(
             Address::ZERO,
             vec![
@@ -464,9 +464,9 @@ mod tests {
 
     #[test]
     fn transfer_with_memo_rejected_when_not_participant() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let a = address!("0x0000000000000000000000000000000000000002");
-        let b = address!("0x0000000000000000000000000000000000000003");
+        let caller = Address::with_last_byte(1);
+        let a = Address::with_last_byte(2);
+        let b = Address::with_last_byte(3);
         let log = make_log(
             Address::ZERO,
             vec![TRANSFER_WITH_MEMO_TOPIC, a.into_word(), b.into_word()],
@@ -480,30 +480,30 @@ mod tests {
 
     #[test]
     fn mint_eligible_as_recipient() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
+        let caller = Address::with_last_byte(1);
         let log = make_log(Address::ZERO, vec![MINT_TOPIC, caller.into_word()]);
         assert!(is_caller_eligible(&log, &caller));
     }
 
     #[test]
     fn mint_rejected_when_not_recipient() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let log = make_log(Address::ZERO, vec![MINT_TOPIC, other.into_word()]);
         assert!(!is_caller_eligible(&log, &caller));
     }
 
     #[test]
     fn burn_eligible_as_burner() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
+        let caller = Address::with_last_byte(1);
         let log = make_log(Address::ZERO, vec![BURN_TOPIC, caller.into_word()]);
         assert!(is_caller_eligible(&log, &caller));
     }
 
     #[test]
     fn burn_rejected_when_not_burner() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let log = make_log(Address::ZERO, vec![BURN_TOPIC, other.into_word()]);
         assert!(!is_caller_eligible(&log, &caller));
     }
@@ -514,10 +514,10 @@ mod tests {
 
     #[test]
     fn transfer_blocked_visibility_is_receipt_scoped() {
-        let receiver = address!("0x0000000000000000000000000000000000000001");
-        let originator = address!("0x0000000000000000000000000000000000000002");
-        let recovery = address!("0x0000000000000000000000000000000000000003");
-        let outsider = address!("0x0000000000000000000000000000000000000004");
+        let receiver = Address::with_last_byte(1);
+        let originator = Address::with_last_byte(2);
+        let recovery = Address::with_last_byte(3);
+        let outsider = Address::with_last_byte(4);
         let log =
             make_transfer_blocked_log(RECEIVE_POLICY_GUARD_ADDRESS, receiver, originator, recovery);
 
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn unknown_topic_rejected() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
+        let caller = Address::with_last_byte(1);
         let unknown = B256::with_last_byte(0xff);
         let log = make_log(Address::ZERO, vec![unknown, caller.into_word()]);
         assert!(!is_caller_eligible(&log, &caller));
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn empty_topics_rejected() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
+        let caller = Address::with_last_byte(1);
         let log = make_log(Address::ZERO, vec![]);
         assert!(!is_caller_eligible(&log, &caller));
     }
@@ -564,8 +564,8 @@ mod tests {
     #[test]
     fn filter_logs_keeps_eligible_and_drops_others() {
         let zone_token = address!("0x000000000000000000000000000000000000aaaa");
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
 
         let eligible = make_log(
             zone_token,
@@ -592,7 +592,7 @@ mod tests {
 
     #[test]
     fn filter_logs_empty_input() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
+        let caller = Address::with_last_byte(1);
         let result = filter_logs(vec![], &caller);
         assert!(result.is_empty());
     }
@@ -600,8 +600,8 @@ mod tests {
     #[test]
     fn filter_logs_renumbers_log_index_per_transaction() {
         let zone_token = address!("0x000000000000000000000000000000000000aaaa");
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
 
         let tx_a = B256::with_last_byte(0xaa);
         let tx_b = B256::with_last_byte(0xbb);
@@ -663,8 +663,8 @@ mod tests {
         // time (the `eth_subscribe("logs")` stream path) must agree, so a log's
         // `(transactionHash, logIndex)` is identical regardless of which RPC
         // surfaced it.
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let tx_a = B256::with_last_byte(0xaa);
         let tx_b = B256::with_last_byte(0xbb);
 
@@ -712,9 +712,9 @@ mod tests {
 
     #[test]
     fn filter_receipt_logs_recomputes_logs_and_bloom() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
-        let third = address!("0x0000000000000000000000000000000000000003");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
+        let third = Address::with_last_byte(3);
         let hidden_topic = keccak256(b"PolicyUpdated(address,uint256)");
 
         let visible = make_log(
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn scope_filter_for_caller_rejects_broad_filter() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
+        let caller = Address::with_last_byte(1);
         let mut filter = Filter::default();
 
         let err = scope_filter_for_caller(&mut filter, &caller).unwrap_err();
@@ -810,8 +810,8 @@ mod tests {
 
     #[test]
     fn scope_filter_for_caller_scopes_topic1_caller() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let caller_topic = caller.into_word();
         let other_topic = other.into_word();
         let mut filter = Filter::default();
@@ -828,8 +828,8 @@ mod tests {
 
     #[test]
     fn scope_filter_for_caller_scopes_topic2_caller_for_two_party_events() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
         let caller_topic = caller.into_word();
         let other_topic = other.into_word();
         let mut filter = Filter::default();
@@ -850,9 +850,9 @@ mod tests {
 
     #[test]
     fn scope_filter_for_caller_rejects_wrong_caller() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let a = address!("0x0000000000000000000000000000000000000002");
-        let b = address!("0x0000000000000000000000000000000000000003");
+        let caller = Address::with_last_byte(1);
+        let a = Address::with_last_byte(2);
+        let b = Address::with_last_byte(3);
         let mut filter = Filter::default();
         filter.topics[0] = FilterSet::from(TRANSFER_TOPIC);
         filter.topics[1] = FilterSet::from(a.into_word());
@@ -866,7 +866,7 @@ mod tests {
 
     #[test]
     fn scope_filter_for_caller_rejects_topic2_only_for_one_party_events() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
+        let caller = Address::with_last_byte(1);
         let mut filter = Filter::default();
         filter.topics[0] = FilterSet::from(MINT_TOPIC);
         filter.topics[2] = FilterSet::from(caller.into_word());
@@ -879,8 +879,8 @@ mod tests {
 
     #[test]
     fn scope_filter_addresses_scopes_omitted_address() {
-        let token_a = address!("0x00000000000000000000000000000000000000aa");
-        let token_b = address!("0x00000000000000000000000000000000000000bb");
+        let token_a = Address::with_last_byte(0xaa);
+        let token_b = Address::with_last_byte(0xbb);
         let mut filter = Filter::default();
 
         scope_filter_addresses(&mut filter, &[token_a, token_b]).unwrap();
@@ -893,7 +893,7 @@ mod tests {
 
     #[test]
     fn scope_filter_addresses_allows_enabled_addresses() {
-        let token = address!("0x00000000000000000000000000000000000000aa");
+        let token = Address::with_last_byte(0xaa);
         for address in [token, RECEIVE_POLICY_GUARD_ADDRESS] {
             let mut filter = Filter {
                 address: FilterSet::from(address),
@@ -908,8 +908,8 @@ mod tests {
 
     #[test]
     fn scope_filter_addresses_rejects_non_zone_token_address() {
-        let token = address!("0x00000000000000000000000000000000000000aa");
-        let other = address!("0x00000000000000000000000000000000000000cc");
+        let token = Address::with_last_byte(0xaa);
+        let other = Address::with_last_byte(0xcc);
         let mut filter = Filter {
             address: FilterSet::from(vec![token, other]),
             ..Default::default()

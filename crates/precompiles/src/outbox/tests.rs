@@ -25,12 +25,12 @@ const GAS: u64 = 10_000_000;
 const ANCHOR: u64 = 42;
 const TEST_MAX_TEMPO_GAS_RATE: u128 = 1_000_000_000_000_000_000;
 const TX_HASH: B256 = B256::repeat_byte(0x42);
-const PORTAL: Address = address!("0x7777777777777777777777777777777777777777");
-const ALICE: Address = address!("0x00000000000000000000000000000000000000a1");
-const BOB: Address = address!("0x00000000000000000000000000000000000000b2");
-const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000c3");
-const FEE_PAYER: Address = address!("0x00000000000000000000000000000000000000d4");
-const GATEWAY: Address = address!("0x00000000000000000000000000000000000000e5");
+const PORTAL: Address = Address::repeat_byte(0x77);
+const ALICE: Address = Address::with_last_byte(0xa1);
+const BOB: Address = Address::with_last_byte(0xb2);
+const SEQUENCER: Address = Address::with_last_byte(0xc3);
+const FEE_PAYER: Address = Address::with_last_byte(0xd4);
+const GATEWAY: Address = Address::with_last_byte(0xe5);
 
 struct Harness {
     ctx: TestContext,

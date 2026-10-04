@@ -2106,9 +2106,10 @@ where
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
-    use alloy_primitives::{Bytes, Signature, TxKind, U256, address};
+    use alloy_primitives::{Bytes, Signature, TxKind, U256};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
@@ -2180,8 +2181,8 @@ mod tests {
         };
 
         sink.apply_leader_transition(&LeaderTransition {
-            previous_leader: address!("0x0000000000000000000000000000000000000001"),
-            new_leader: address!("0x0000000000000000000000000000000000000009"),
+            previous_leader: Address::with_last_byte(1),
+            new_leader: Address::with_last_byte(9),
             epoch: 2,
             activation_tempo_block: 100,
         })
@@ -2190,8 +2191,8 @@ mod tests {
         assert_eq!(schedule.leader_for(100).unwrap().leader, peer(9));
 
         sink.apply_leader_transition(&LeaderTransition {
-            previous_leader: address!("0x0000000000000000000000000000000000000009"),
-            new_leader: address!("0x0000000000000000000000000000000000000002"),
+            previous_leader: Address::with_last_byte(9),
+            new_leader: Address::with_last_byte(2),
             epoch: 3,
             activation_tempo_block: 200,
         })
@@ -2200,8 +2201,8 @@ mod tests {
 
         assert!(
             sink.apply_leader_transition(&LeaderTransition {
-                previous_leader: address!("0x0000000000000000000000000000000000000002"),
-                new_leader: address!("0x0000000000000000000000000000000000000009"),
+                previous_leader: Address::with_last_byte(2),
+                new_leader: Address::with_last_byte(9),
                 epoch: 4,
                 activation_tempo_block: 300,
             })

@@ -56,14 +56,14 @@ pub use precompiles::*;
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
+    use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
     use alloy_sol_types::{SolCall, SolValue};
 
     #[test]
     fn test_withdrawal_bounce_back_abi_encode_vs_params() {
         let d = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            to: address!("0x0000000000000000000000000000000000000002"),
+            to: Address::with_last_byte(2),
             amount: 1000u128,
         };
 
@@ -84,7 +84,7 @@ mod tests {
     fn test_queued_withdrawal_bounce_back_encoding() {
         let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            to: address!("0x0000000000000000000000000000000000000002"),
+            to: Address::with_last_byte(2),
             amount: 1000u128,
         };
 
@@ -142,7 +142,7 @@ mod tests {
     fn test_withdrawal_bounce_back_hash_chain_matches_solidity() {
         let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            to: address!("0x0000000000000000000000000000000000000002"),
+            to: Address::with_last_byte(2),
             amount: 1000u128,
         };
         let prev_hash = B256::ZERO;
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_sender_tag_matches_plaintext_hash() {
-        let sender = address!("0x0000000000000000000000000000000000000001");
+        let sender = Address::with_last_byte(1);
         let tx_hash = B256::repeat_byte(0x22);
         let fallback_nonce = 7u64;
         let plaintext = Withdrawal::authenticated_sender_plaintext(sender, tx_hash);

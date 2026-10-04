@@ -1014,7 +1014,7 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
             NONCE_PRECOMPILE_ADDRESS,
             INonce::getNonceCall {
                 account: owner,
-                nonceKey: U256::from(1),
+                nonceKey: U256::ONE,
             }
             .abi_encode(),
             "NonceManager.getNonce",

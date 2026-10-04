@@ -148,7 +148,7 @@ impl VerifyClosedLoop {
                 .call()
                 .await
             {
-                Ok(threshold) if threshold <= U256::from(1) => println!(
+                Ok(threshold) if threshold <= U256::ONE => println!(
                     "  WARNING: admin contract reports a low Safe-compatible threshold \
                      ({threshold}; expected greater than 1)"
                 ),

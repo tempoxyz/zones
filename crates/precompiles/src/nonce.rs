@@ -61,7 +61,7 @@ mod tests {
         let rules = NonceRules;
         let call = INonce::getNonceCall {
             account: owner,
-            nonceKey: U256::from(1),
+            nonceKey: U256::ONE,
         };
         let mut ctx = test_context();
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
@@ -86,7 +86,7 @@ mod tests {
         let outsider = Address::repeat_byte(0x22);
         let mut data = INonce::getNonceCall {
             account: owner,
-            nonceKey: U256::from(1),
+            nonceKey: U256::ONE,
         }
         .abi_encode();
         data[4] = 1;

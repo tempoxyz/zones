@@ -1090,7 +1090,7 @@ mod tests {
 
     #[test]
     fn single_withdrawal_queue_hash() {
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
+        let w = test_withdrawal(Address::with_last_byte(0x42), 1000);
         let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
 
         let expected = keccak256((w, B256::ZERO).abi_encode_params());
@@ -1099,8 +1099,8 @@ mod tests {
 
     #[test]
     fn two_withdrawal_queue_hash() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000043"), 200);
+        let w0 = test_withdrawal(Address::with_last_byte(0x42), 100);
+        let w1 = test_withdrawal(Address::with_last_byte(0x43), 200);
 
         let hash = abi::Withdrawal::queue_hash(&[w0.clone(), w1.clone()]);
 
@@ -1222,7 +1222,7 @@ mod tests {
     #[test]
     fn store_operations() {
         let mut store = WithdrawalStore::new();
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
+        let w = test_withdrawal(Address::with_last_byte(0x42), 100);
 
         assert_eq!(store.batch_count(), 0);
         assert!(!store.has_batch(0));
@@ -1247,7 +1247,7 @@ mod tests {
         // at tail=5, withdrawals end up in slot 0 while the withdrawal processor
         // looks for them in slot 5.
         let mut store = WithdrawalStore::new();
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
+        let w = test_withdrawal(Address::with_last_byte(0x42), 100);
 
         // Simulate storing under the wrong slot (tail=0 when portal is at 5).
         store.add_withdrawal(0, w.clone());
@@ -1266,7 +1266,7 @@ mod tests {
     #[test]
     fn store_add_batch() {
         let mut store = WithdrawalStore::new();
-        let addr = address!("0x0000000000000000000000000000000000000042");
+        let addr = Address::with_last_byte(0x42);
         let batch: Vec<_> = (0..3).map(|i| test_withdrawal(addr, i * 100)).collect();
 
         store.add_batch(0, batch);
@@ -1300,7 +1300,7 @@ mod tests {
     #[test]
     fn store_reconciles_head_page_and_preserves_tail() {
         let mut store = WithdrawalStore::new();
-        let addr = address!("0x0000000000000000000000000000000000000042");
+        let addr = Address::with_last_byte(0x42);
 
         store.add_batch(0, vec![test_withdrawal(addr, 100)]);
         store.add_batch(9, vec![test_withdrawal(addr, 900)]);
@@ -1514,13 +1514,9 @@ mod tests {
         l1.push_success(&abi_encode_b256(B256::repeat_byte(0xde)));
 
         let store = SharedWithdrawalStore::new();
-        store.lock().add_batch(
-            5,
-            vec![test_withdrawal(
-                address!("0x0000000000000000000000000000000000000042"),
-                100,
-            )],
-        );
+        store
+            .lock()
+            .add_batch(5, vec![test_withdrawal(Address::with_last_byte(0x42), 100)]);
 
         let repair_notify = Arc::new(Notify::new());
         let processor = test_processor(l1.clone(), store, repair_notify.clone());
@@ -1550,13 +1546,9 @@ mod tests {
         l1.push_success(&abi_encode_b256(B256::ZERO));
 
         let store = SharedWithdrawalStore::new();
-        store.lock().add_batch(
-            5,
-            vec![test_withdrawal(
-                address!("0x0000000000000000000000000000000000000042"),
-                100,
-            )],
-        );
+        store
+            .lock()
+            .add_batch(5, vec![test_withdrawal(Address::with_last_byte(0x42), 100)]);
 
         let repair_notify = Arc::new(Notify::new());
         let processor = test_processor(l1.clone(), store.clone(), repair_notify.clone());

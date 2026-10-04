@@ -25,10 +25,10 @@ use crate::test_utils::{
 };
 
 const GAS: u64 = 30_000_000;
-const PORTAL: Address = address!("0x4242424242424242424242424242424242424242");
-const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000a1");
-const ALICE: Address = address!("0x00000000000000000000000000000000000000a2");
-const BOB: Address = address!("0x00000000000000000000000000000000000000b0");
+const PORTAL: Address = Address::repeat_byte(0x42);
+const SEQUENCER: Address = Address::with_last_byte(0xa1);
+const ALICE: Address = Address::with_last_byte(0xa2);
+const BOB: Address = Address::with_last_byte(0xb0);
 
 struct Harness {
     ctx: TestContext,

@@ -4,7 +4,7 @@
 //! finalized raw L1 storage via `L1StateCache` and rejects mutating calls. The cache is populated
 //! directly in tests (no L1 subscriber).
 
-use alloy::primitives::{U256, address};
+use alloy::primitives::{Address, U256, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
@@ -324,10 +324,7 @@ async fn test_policy_proxy_reverts_mutating_calls() -> eyre::Result<()> {
 
     // createPolicy should revert
     let result = registry
-        .createPolicy(
-            address!("0x0000000000000000000000000000000000000001"),
-            PolicyType::WHITELIST,
-        )
+        .createPolicy(Address::with_last_byte(1), PolicyType::WHITELIST)
         .call()
         .await;
 
