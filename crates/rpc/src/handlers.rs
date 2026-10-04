@@ -737,8 +737,11 @@ fn normalize_block_id(block: BlockId) -> BlockId {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::Address;
+    use alloy_network::TransactionBuilder as _;
+    use alloy_primitives::{Address, Bytes};
+    use alloy_provider::EthCallParams;
     use serde_json::json;
+    use tempo_alloy::TempoNetwork;
 
     use super::*;
     use crate::types::to_raw;
@@ -841,7 +844,7 @@ mod tests {
         }
     }
 
-    fn request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
+    fn request(method: &str, params: impl serde::Serialize) -> JsonRpcRequest {
         serde_json::from_value(json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -962,11 +965,13 @@ mod tests {
         let resp = dispatch(
             &request(
                 "eth_call",
-                json!([
-                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
-                    "latest",
-                    {}
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_to(Address::repeat_byte(0x11))
+                        .with_input(Bytes::new()),
+                )
+                .with_block(BlockId::latest())
+                .with_overrides(Default::default()),
             ),
             &auth(),
             &api,
@@ -985,11 +990,13 @@ mod tests {
         let resp = dispatch(
             &request(
                 "eth_estimateGas",
-                json!([
-                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
-                    "latest",
-                    {}
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_to(Address::repeat_byte(0x11))
+                        .with_input(Bytes::new()),
+                )
+                .with_block(BlockId::latest())
+                .with_overrides(Default::default()),
             ),
             &auth(),
             &api,
@@ -1008,17 +1015,19 @@ mod tests {
         for method in ["eth_call", "eth_estimateGas"] {
             // The mock echoes the block it is asked to run against.
             for (requested, forwarded) in [
-                (json!("pending"), json!("latest")),
-                (json!("latest"), json!("latest")),
-                (json!("0x10"), json!("0x10")),
+                (BlockId::pending(), json!("latest")),
+                (BlockId::latest(), json!("latest")),
+                (BlockId::number(16), json!("0x10")),
             ] {
                 let resp = dispatch(
                     &request(
                         method,
-                        json!([
-                            {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
-                            requested,
-                        ]),
+                        EthCallParams::<TempoNetwork>::new(
+                            TempoTransactionRequest::default()
+                                .with_to(Address::repeat_byte(0x11))
+                                .with_input(Bytes::new()),
+                        )
+                        .with_block(requested),
                     ),
                     &auth(),
                     &api,
@@ -1027,7 +1036,7 @@ mod tests {
 
                 let block: serde_json::Value =
                     serde_json::from_str(resp.result.expect("should dispatch").get()).unwrap();
-                assert_eq!(block, forwarded, "{method} at {requested}");
+                assert_eq!(block, forwarded, "{method} at {requested:?}");
             }
         }
     }
@@ -1038,12 +1047,14 @@ mod tests {
         let resp = dispatch(
             &request(
                 "eth_call",
-                json!([
-                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
-                    "latest",
-                    {},
-                    {}
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_to(Address::repeat_byte(0x11))
+                        .with_input(Bytes::new()),
+                )
+                .with_block(BlockId::latest())
+                .with_overrides(Default::default())
+                .with_block_overrides(Default::default()),
             ),
             &auth(),
             &api,

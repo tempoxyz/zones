@@ -12,11 +12,12 @@ use crate::utils::{
     start_zone_with_redacted_rpc_l1, start_zone_with_redacted_rpc_l1_with_encryption,
 };
 use alloy::{
-    primitives::{Address, B256, TxKind, U256, address, hex},
+    primitives::{Address, B256, Bytes, TxKind, U256, address, hex},
     signers::local::PrivateKeySigner,
 };
-use alloy_eips::eip2718::Encodable2718;
-use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
+use alloy_eips::{BlockId, eip2718::Encodable2718};
+use alloy_network::TransactionBuilder as _;
+use alloy_provider::{EthCallParams, ProviderBuilder, bindings::IMulticall3};
 use alloy_signer::SignerSync;
 use alloy_sol_types::{SolCall, SolError};
 use futures::{SinkExt, StreamExt};
@@ -24,6 +25,7 @@ use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
+use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
 use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
 use tempo_contracts::precompiles::{
     IAccountKeychain, INonce, IStorageCredits, ITIP20 as ContractTip20, ITIP403Registry,
@@ -400,14 +402,13 @@ async fn test_keychain_auth_tokens_v1_and_v2() -> eyre::Result<()> {
         let resp = ctx
             .call(
                 "eth_call",
-                serde_json::json!([
-                    {
-                        "from": format!("{:#x}", root_signer.address()),
-                        "to": format!("{:#x}", root_signer.address()),
-                        "input": "0x"
-                    },
-                    "latest"
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_from(root_signer.address())
+                        .with_to(root_signer.address())
+                        .with_input(Bytes::new()),
+                )
+                .with_block(BlockId::latest()),
                 &token,
             )
             .await?;
@@ -667,7 +668,7 @@ async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
         policyId: ALLOW_ALL_POLICY_ID,
         user: user.address(),
     };
-    let data = hex::encode_prefixed(call.abi_encode());
+    let data = Bytes::from(call.abi_encode());
     let operator_provider = ctx.zone.provider();
     let operator_registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &operator_provider);
 
@@ -692,11 +693,13 @@ async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
     let response = ctx
         .call_as_user(
             "eth_call",
-            json!([{
-                "from": Address::ZERO,
-                "to": TIP403_REGISTRY_ADDRESS,
-                "data": &data,
-            }, "latest"]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_from(Address::ZERO)
+                    .with_to(TIP403_REGISTRY_ADDRESS)
+                    .with_input(data.clone()),
+            )
+            .with_block(BlockId::latest()),
             &user,
         )
         .await?;
@@ -707,10 +710,12 @@ async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
     let response = ctx
         .call_as_user(
             "eth_call",
-            json!([{
-                "to": TIP403_REGISTRY_ADDRESS,
-                "data": &data,
-            }, "latest"]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(TIP403_REGISTRY_ADDRESS)
+                    .with_input(data),
+            )
+            .with_block(BlockId::latest()),
             &user,
         )
         .await?;
@@ -752,20 +757,19 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
     let balance_call = PrecompileTip20::balanceOfCall { account: owner };
-    let balance_data = hex::encode_prefixed(balance_call.abi_encode());
+    let balance_data = Bytes::from(balance_call.abi_encode());
     let allowance_call = PrecompileTip20::allowanceCall { owner, spender };
-    let allowance_data = hex::encode_prefixed(allowance_call.abi_encode());
+    let allowance_data = Bytes::from(allowance_call.abi_encode());
 
     let outsider_balance = ctx
         .call_as_user(
             "eth_call",
-            serde_json::json!([
-                {
-                    "to": format!("{PATH_USD_ADDRESS:#x}"),
-                    "data": balance_data,
-                },
-                "latest"
-            ]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(PATH_USD_ADDRESS)
+                    .with_input(balance_data),
+            )
+            .with_block(BlockId::latest()),
             &outsider_signer,
         )
         .await?;
@@ -777,13 +781,12 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let outsider_allowance = ctx
         .call_as_user(
             "eth_call",
-            serde_json::json!([
-                {
-                    "to": format!("{PATH_USD_ADDRESS:#x}"),
-                    "data": allowance_data,
-                },
-                "latest"
-            ]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(PATH_USD_ADDRESS)
+                    .with_input(allowance_data),
+            )
+            .with_block(BlockId::latest()),
             &outsider_signer,
         )
         .await?;
@@ -795,14 +798,13 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let sequencer_balance = ctx
         .call_as_sequencer(
             "eth_call",
-            serde_json::json!([
-                {
-                    "from": format!("{:#x}", ctx.sequencer_signer.address()),
-                    "to": format!("{PATH_USD_ADDRESS:#x}"),
-                    "data": hex::encode_prefixed(balance_call.abi_encode()),
-                },
-                "latest"
-            ]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_from(ctx.sequencer_signer.address())
+                    .with_to(PATH_USD_ADDRESS)
+                    .with_input(balance_call.abi_encode()),
+            )
+            .with_block(BlockId::latest()),
         )
         .await?;
     assert!(
@@ -813,14 +815,13 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let sequencer_allowance = ctx
         .call_as_sequencer(
             "eth_call",
-            serde_json::json!([
-                {
-                    "from": format!("{:#x}", ctx.sequencer_signer.address()),
-                    "to": format!("{PATH_USD_ADDRESS:#x}"),
-                    "data": hex::encode_prefixed(allowance_call.abi_encode()),
-                },
-                "latest"
-            ]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_from(ctx.sequencer_signer.address())
+                    .with_to(PATH_USD_ADDRESS)
+                    .with_input(allowance_call.abi_encode()),
+            )
+            .with_block(BlockId::latest()),
         )
         .await?;
     assert!(
@@ -847,10 +848,12 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
     let outsider = ctx
         .call_as_user(
             "eth_call",
-            json!([{
-                "to": format!("{PATH_USD_ADDRESS:#x}"),
-                "data": hex::encode_prefixed(&calldata),
-            }, "latest"]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(PATH_USD_ADDRESS)
+                    .with_input(Bytes::copy_from_slice(&calldata)),
+            )
+            .with_block(BlockId::latest()),
             &outsider_signer,
         )
         .await?;
@@ -863,10 +866,12 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
     let owner_response = ctx
         .call_as_user(
             "eth_call",
-            json!([{
-                "to": format!("{PATH_USD_ADDRESS:#x}"),
-                "data": hex::encode_prefixed(&calldata),
-            }, "latest"]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(PATH_USD_ADDRESS)
+                    .with_input(Bytes::copy_from_slice(&calldata)),
+            )
+            .with_block(BlockId::latest()),
             &owner_signer,
         )
         .await?;
@@ -890,10 +895,12 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
     let forwarded = ctx
         .call_as_user(
             "eth_call",
-            json!([{
-                "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
-                "data": hex::encode_prefixed(multicall.abi_encode()),
-            }, "latest"]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(alloy_provider::MULTICALL3_ADDRESS)
+                    .with_input(multicall.abi_encode()),
+            )
+            .with_block(BlockId::latest()),
             &outsider_signer,
         )
         .await?;
@@ -921,18 +928,17 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
         token: ZONE_TOKEN_ADDRESS,
         owner,
     };
-    let refunds_data = hex::encode_prefixed(refunds_call.abi_encode());
+    let refunds_data = Bytes::from(refunds_call.abi_encode());
 
     let outsider_refunds = ctx
         .call_as_user(
             "eth_call",
-            json!([
-                {
-                    "to": format!("{ZONE_INBOX_ADDRESS:#x}"),
-                    "data": refunds_data,
-                },
-                "latest"
-            ]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(ZONE_INBOX_ADDRESS)
+                    .with_input(refunds_data),
+            )
+            .with_block(BlockId::latest()),
             &outsider_signer,
         )
         .await?;
@@ -948,13 +954,12 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let owner_refunds = ctx
         .call_as_user(
             "eth_call",
-            json!([
-                {
-                    "to": format!("{ZONE_INBOX_ADDRESS:#x}"),
-                    "data": hex::encode_prefixed(refunds_call.abi_encode()),
-                },
-                "latest"
-            ]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(ZONE_INBOX_ADDRESS)
+                    .with_input(refunds_call.abi_encode()),
+            )
+            .with_block(BlockId::latest()),
             &owner_signer,
         )
         .await?;
@@ -979,13 +984,12 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let forwarded_refunds = ctx
         .call_as_user(
             "eth_call",
-            json!([
-                {
-                    "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
-                    "data": hex::encode_prefixed(multicall.abi_encode()),
-                },
-                "latest"
-            ]),
+            EthCallParams::<TempoNetwork>::new(
+                TempoTransactionRequest::default()
+                    .with_to(alloy_provider::MULTICALL3_ADDRESS)
+                    .with_input(multicall.abi_encode()),
+            )
+            .with_block(BlockId::latest()),
             &outsider_signer,
         )
         .await?;
@@ -1039,13 +1043,12 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
         let direct = ctx
             .call_as_user(
                 "eth_call",
-                json!([
-                    {
-                        "to": format!("{target:#x}"),
-                        "data": hex::encode_prefixed(&calldata),
-                    },
-                    "latest"
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_to(target)
+                        .with_input(Bytes::copy_from_slice(&calldata)),
+                )
+                .with_block(BlockId::latest()),
                 &outsider_signer,
             )
             .await?;
@@ -1058,13 +1061,12 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
         let own = ctx
             .call_as_user(
                 "eth_call",
-                json!([
-                    {
-                        "to": format!("{target:#x}"),
-                        "data": hex::encode_prefixed(&calldata),
-                    },
-                    "latest"
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_to(target)
+                        .with_input(Bytes::copy_from_slice(&calldata)),
+                )
+                .with_block(BlockId::latest()),
                 &owner_signer,
             )
             .await?;
@@ -1082,13 +1084,12 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
         let forwarded = ctx
             .call_as_user(
                 "eth_call",
-                json!([
-                    {
-                        "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
-                        "data": hex::encode_prefixed(multicall.abi_encode()),
-                    },
-                    "latest"
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_to(alloy_provider::MULTICALL3_ADDRESS)
+                        .with_input(multicall.abi_encode()),
+                )
+                .with_block(BlockId::latest()),
                 &outsider_signer,
             )
             .await?;
@@ -1108,18 +1109,17 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
 
     let ctx = start_zone_with_redacted_rpc().await?;
     let user_signer = PrivateKeySigner::random();
-    let simulation_target = format!("{:#x}", Address::repeat_byte(0x11));
+    let simulation_target = Address::repeat_byte(0x11);
 
     for method in ["eth_call", "eth_estimateGas"] {
         let create_resp = ctx
             .call_as_user(
                 method,
-                json!([
-                    {
-                        "data": "0x60006000f3",
-                    },
-                    "latest"
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_input(Bytes::from_static(&hex!("60006000f3"))),
+                )
+                .with_block(BlockId::latest()),
                 &user_signer,
             )
             .await?;
@@ -1136,14 +1136,13 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
         let user_override_resp = ctx
             .call_as_user(
                 method,
-                json!([
-                    {
-                        "to": simulation_target.clone(),
-                        "data": "0x"
-                    },
-                    "latest",
-                    {}
-                ]),
+                EthCallParams::<TempoNetwork>::new(
+                    TempoTransactionRequest::default()
+                        .with_to(simulation_target)
+                        .with_input(Bytes::new()),
+                )
+                .with_block(BlockId::latest())
+                .with_overrides(Default::default()),
                 &user_signer,
             )
             .await?;
@@ -1161,11 +1160,7 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
     let fill_resp = ctx
         .call_as_user(
             "eth_fillTransaction",
-            json!([
-                {
-                    "gas": "0x5208",
-                }
-            ]),
+            (TempoTransactionRequest::default().with_gas_limit(21_000),),
             &user_signer,
         )
         .await?;

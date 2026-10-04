@@ -4415,7 +4415,7 @@ fn build_keychain_auth_token(
 async fn redacted_rpc_call(
     url: &url::Url,
     method: &str,
-    params: serde_json::Value,
+    params: impl serde::Serialize,
     auth_token: &str,
 ) -> eyre::Result<serde_json::Value> {
     let body = serde_json::json!({
@@ -4448,7 +4448,7 @@ async fn redacted_rpc_call(
 async fn redacted_rpc_call_raw(
     url: &url::Url,
     method: &str,
-    params: serde_json::Value,
+    params: impl serde::Serialize,
     auth_token: &str,
 ) -> eyre::Result<(reqwest::StatusCode, String)> {
     let body = serde_json::json!({
@@ -4474,7 +4474,7 @@ async fn redacted_rpc_call_raw(
 async fn redacted_rpc_call_no_auth(
     url: &url::Url,
     method: &str,
-    params: serde_json::Value,
+    params: impl serde::Serialize,
 ) -> eyre::Result<(reqwest::StatusCode, String)> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -4597,7 +4597,7 @@ impl RedactedRpcTestCtx {
     pub(crate) async fn call(
         &self,
         method: &str,
-        params: serde_json::Value,
+        params: impl serde::Serialize,
         auth_token: &str,
     ) -> eyre::Result<serde_json::Value> {
         redacted_rpc_call(&self.redacted_rpc_url, method, params, auth_token).await
@@ -4607,7 +4607,7 @@ impl RedactedRpcTestCtx {
     pub(crate) async fn call_as_sequencer(
         &self,
         method: &str,
-        params: serde_json::Value,
+        params: impl serde::Serialize,
     ) -> eyre::Result<serde_json::Value> {
         let token = self.sequencer_token();
         self.call(method, params, &token).await
@@ -4617,7 +4617,7 @@ impl RedactedRpcTestCtx {
     pub(crate) async fn call_as_user(
         &self,
         method: &str,
-        params: serde_json::Value,
+        params: impl serde::Serialize,
         signer: &alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<serde_json::Value> {
         let token = self.user_token(signer);
@@ -4628,7 +4628,7 @@ impl RedactedRpcTestCtx {
     pub(crate) async fn call_raw(
         &self,
         method: &str,
-        params: serde_json::Value,
+        params: impl serde::Serialize,
         auth_token: &str,
     ) -> eyre::Result<(reqwest::StatusCode, String)> {
         redacted_rpc_call_raw(&self.redacted_rpc_url, method, params, auth_token).await
@@ -4638,7 +4638,7 @@ impl RedactedRpcTestCtx {
     pub(crate) async fn call_no_auth(
         &self,
         method: &str,
-        params: serde_json::Value,
+        params: impl serde::Serialize,
     ) -> eyre::Result<(reqwest::StatusCode, String)> {
         redacted_rpc_call_no_auth(&self.redacted_rpc_url, method, params).await
     }

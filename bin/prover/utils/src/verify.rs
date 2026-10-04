@@ -1,5 +1,4 @@
 use super::*;
-use alloy_network::Ethereum;
 use alloy_provider::EthCallParams;
 use serde_json::Value;
 
@@ -73,10 +72,16 @@ pub(super) async fn run(args: VerifyArgs) -> Result<()> {
 
 async fn call_verifier(
     provider: &DynProvider<TempoNetwork>,
-    params: EthCallParams<Ethereum>,
+    params: EthCallParams<TempoNetwork>,
 ) -> Result<()> {
+    let block = params.block();
+    let overrides = params.overrides().cloned();
+    let block_overrides = params.block_overrides().cloned();
     let result: Bytes = provider
-        .raw_request("eth_call".into(), params)
+        .call(params.into_data())
+        .block_opt(block)
+        .overrides_opt(overrides)
+        .with_block_overrides_opt(block_overrides)
         .await
         .context("native verifier eth_call failed")?;
     if result.as_ref() != B256::with_last_byte(1) {
