@@ -476,7 +476,7 @@ mod tests {
     use reth_chainspec::EthChainSpec;
     use revm::{
         context::result::ExecutionResult,
-        database::{CacheDB, EmptyDB},
+        database::{EmptyDB, InMemoryDB},
     };
     use tempo_chainspec::{
         hardfork::TempoHardfork,
@@ -552,7 +552,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_HASH, genesis_hash.into())
             .unwrap();
         db.insert_account_storage(

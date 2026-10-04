@@ -7,7 +7,7 @@ use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::ops::Reduce};
 use revm::{
     Context,
     context::{CfgEnv, TxEnv},
-    database::{CacheDB, EmptyDB},
+    database::{CacheDB, EmptyDB, InMemoryDB},
     precompile::PrecompileResult,
 };
 use std::{cell::RefCell, rc::Rc};
@@ -37,7 +37,7 @@ pub(crate) fn test_context() -> TestContext {
 
 /// Create a test EVM context with the specified hardfork.
 pub(crate) fn test_context_with_hardfork(hardfork: TempoHardfork) -> TestContext {
-    Context::new(CacheDB::new(EmptyDB::new()), hardfork)
+    Context::new(InMemoryDB::default(), hardfork)
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.

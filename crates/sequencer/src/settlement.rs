@@ -1647,7 +1647,7 @@ pub(crate) fn find_processed_offset(
     withdrawals: &[abi::Withdrawal],
     current_slot_hash: B256,
 ) -> Option<usize> {
-    if current_slot_hash == B256::ZERO {
+    if current_slot_hash.is_zero() {
         return Some(withdrawals.len());
     }
 

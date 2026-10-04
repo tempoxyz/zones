@@ -59,7 +59,7 @@ mod tests {
             TxEnv,
             result::{EVMError, ExecutionResult, HaltReason},
         },
-        database::{EmptyDB, in_memory_db::CacheDB},
+        database::{EmptyDB, InMemoryDB, in_memory_db::CacheDB},
         inspector::NoOpInspector,
         state::AccountInfo,
     };
@@ -86,7 +86,7 @@ mod tests {
     }
 
     fn test_db(contracts: impl IntoIterator<Item = (Address, Bytes)>) -> TestDb {
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
         for (address, code) in contracts {
             db.insert_account_info(address, AccountInfo::from_bytecode(Bytecode::new_raw(code)));
         }

@@ -109,7 +109,7 @@ impl WsSession {
     }
 
     fn activate_subscription(&mut self, subscription_id: FilterId, task: JoinHandle<()>) {
-        self.pending_subscription_count = self.pending_subscription_count.saturating_sub(1);
+        self.discard_pending_subscriptions(1);
         self.subscriptions
             .insert(subscription_id, ActiveSubscription { task });
     }

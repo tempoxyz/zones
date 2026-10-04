@@ -421,7 +421,7 @@ impl ZoneEngine {
             eyre::bail!("No payload");
         };
 
-        let header = payload.block().sealed_header().clone();
+        let header = payload.block().clone_sealed_header();
         let block_number = header.number();
         let res = self.to_engine.new_payload(payload.into()).await?;
 
