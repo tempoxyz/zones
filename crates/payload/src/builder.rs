@@ -869,8 +869,7 @@ mod tests {
     use reth_tasks::cancel::CancelOnDrop;
     use reth_transaction_pool::{
         BestTransactions, TransactionOrigin, ValidPoolTransaction,
-        error::InvalidPoolTransactionError,
-        identifier::{SenderId, TransactionId},
+        error::InvalidPoolTransactionError, identifier::SenderId,
     };
     use std::{collections::VecDeque, sync::Arc, time::Instant};
     use tempo_primitives::{
@@ -984,7 +983,7 @@ mod tests {
         let recovered = Recovered::new_unchecked(envelope, TEMPO_SYSTEM_TX_SENDER);
         Arc::new(ValidPoolTransaction {
             transaction: TempoPooledTransaction::new(recovered),
-            transaction_id: TransactionId::new(SenderId::from(0u64), nonce),
+            transaction_id: SenderId::from(0u64).into_transaction_id(nonce),
             propagate: false,
             timestamp: Instant::now(),
             origin: TransactionOrigin::External,

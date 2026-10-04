@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn scope_filter_scopes_topic0() {
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
         scope_filter(&mut filter);
         for topic in &WHITELISTED_TOPICS {
             assert!(filter.topics[0].contains(topic));
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn scope_filter_intersects_topic0() {
         let bogus_topic = B256::with_last_byte(0xff);
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
         filter.topics[0] = FilterSet::from(vec![TRANSFER_TOPIC, bogus_topic]);
         scope_filter(&mut filter);
         assert!(filter.topics[0].contains(&TRANSFER_TOPIC));
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn scope_filter_empty_intersection() {
         let bogus = B256::with_last_byte(0xff);
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
         filter.topics[0] = FilterSet::from(bogus);
         scope_filter(&mut filter);
         assert_eq!(filter.topics[0], FilterSet::from(B256::ZERO));
@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn scope_filter_for_caller_rejects_broad_filter() {
         let caller = Address::with_last_byte(1);
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
 
         let err = scope_filter_for_caller(&mut filter, &caller).unwrap_err();
 
@@ -814,7 +814,7 @@ mod tests {
         let other = Address::with_last_byte(2);
         let caller_topic = caller.into_word();
         let other_topic = other.into_word();
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
         filter.topics[1] = FilterSet::from(vec![caller_topic, other_topic]);
         filter.topics[2] = FilterSet::from(other_topic);
 
@@ -832,7 +832,7 @@ mod tests {
         let other = Address::with_last_byte(2);
         let caller_topic = caller.into_word();
         let other_topic = other.into_word();
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
         filter.topics[0] =
             FilterSet::from(vec![TRANSFER_TOPIC, TRANSFER_BLOCKED_TOPIC, MINT_TOPIC]);
         filter.topics[1] = FilterSet::from(other_topic);
@@ -853,7 +853,7 @@ mod tests {
         let caller = Address::with_last_byte(1);
         let a = Address::with_last_byte(2);
         let b = Address::with_last_byte(3);
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
         filter.topics[0] = FilterSet::from(TRANSFER_TOPIC);
         filter.topics[1] = FilterSet::from(a.into_word());
         filter.topics[2] = FilterSet::from(b.into_word());
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn scope_filter_for_caller_rejects_topic2_only_for_one_party_events() {
         let caller = Address::with_last_byte(1);
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
         filter.topics[0] = FilterSet::from(MINT_TOPIC);
         filter.topics[2] = FilterSet::from(caller.into_word());
 
@@ -881,7 +881,7 @@ mod tests {
     fn scope_filter_addresses_scopes_omitted_address() {
         let token_a = Address::with_last_byte(0xaa);
         let token_b = Address::with_last_byte(0xbb);
-        let mut filter = Filter::default();
+        let mut filter = Filter::new();
 
         scope_filter_addresses(&mut filter, &[token_a, token_b]).unwrap();
 
