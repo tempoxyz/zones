@@ -737,11 +737,11 @@ fn normalize_block_id(block: BlockId) -> BlockId {
 
 #[cfg(test)]
 mod tests {
-    use alloy_network::TransactionBuilder as _;
+    use alloy_network::{Ethereum, TransactionBuilder as _};
     use alloy_primitives::{Address, Bytes};
     use alloy_provider::EthCallParams;
+    use alloy_rpc_types_eth::TransactionRequest;
     use serde_json::json;
-    use tempo_alloy::TempoNetwork;
 
     use super::*;
     use crate::types::to_raw;
@@ -965,8 +965,8 @@ mod tests {
         let resp = dispatch(
             &request(
                 "eth_call",
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_to(Address::repeat_byte(0x11))
                         .with_input(Bytes::new()),
                 )
@@ -990,8 +990,8 @@ mod tests {
         let resp = dispatch(
             &request(
                 "eth_estimateGas",
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_to(Address::repeat_byte(0x11))
                         .with_input(Bytes::new()),
                 )
@@ -1022,8 +1022,8 @@ mod tests {
                 let resp = dispatch(
                     &request(
                         method,
-                        EthCallParams::<TempoNetwork>::new(
-                            TempoTransactionRequest::default()
+                        EthCallParams::<Ethereum>::new(
+                            TransactionRequest::default()
                                 .with_to(Address::repeat_byte(0x11))
                                 .with_input(Bytes::new()),
                         )
@@ -1047,8 +1047,8 @@ mod tests {
         let resp = dispatch(
             &request(
                 "eth_call",
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_to(Address::repeat_byte(0x11))
                         .with_input(Bytes::new()),
                 )

@@ -1,13 +1,13 @@
 //! Inspectable arguments and eth_call parameters for the native Nitro verifier.
 
 use alloy_eips::BlockId;
+use alloy_network::Ethereum;
 use alloy_primitives::{Address, Bytes};
 use alloy_provider::EthCallParams;
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
 use eyre::{Context, Result, bail};
 use serde_json::{Value, json};
-use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
 use tempo_precompiles::zone_factory::portal_address;
 use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
 
@@ -53,7 +53,7 @@ sol! {
 pub(super) struct VerifierRequest {
     pub chain_id: u64,
     pub arguments: verifyCall,
-    pub params: EthCallParams<TempoNetwork>,
+    pub params: EthCallParams<Ethereum>,
 }
 
 pub(super) fn build(witness: &Value, response: &Value) -> Result<VerifierRequest> {
@@ -100,7 +100,7 @@ pub(super) fn build(witness: &Value, response: &Value) -> Result<VerifierRequest
     Ok(VerifierRequest {
         chain_id,
         arguments: call,
-        params: EthCallParams::new(TempoTransactionRequest::from(tx)).with_block(BlockId::latest()),
+        params: EthCallParams::new(tx).with_block(BlockId::latest()),
     })
 }
 
@@ -148,10 +148,6 @@ mod tests {
                 "to": ZONE_VERIFIER_ADDRESS,
                 "data": data,
                 "gas": "0x1c9c380",
-                "feeToken": null,
-                "calls": [],
-                "keyType": null,
-                "keyData": null,
             }, "latest"])
         );
         // IZoneVerifier.verify includes nextZoneHeight after expectedWithdrawalBatchIndex.

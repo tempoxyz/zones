@@ -16,8 +16,9 @@ use alloy::{
     signers::local::PrivateKeySigner,
 };
 use alloy_eips::{BlockId, eip2718::Encodable2718};
-use alloy_network::TransactionBuilder as _;
+use alloy_network::{Ethereum, TransactionBuilder as _};
 use alloy_provider::{EthCallParams, ProviderBuilder, bindings::IMulticall3};
+use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer::SignerSync;
 use alloy_sol_types::{SolCall, SolError};
 use futures::{SinkExt, StreamExt};
@@ -25,7 +26,6 @@ use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
-use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
 use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
 use tempo_contracts::precompiles::{
     IAccountKeychain, INonce, IStorageCredits, ITIP20 as ContractTip20, ITIP403Registry,
@@ -402,8 +402,8 @@ async fn test_keychain_auth_tokens_v1_and_v2() -> eyre::Result<()> {
         let resp = ctx
             .call(
                 "eth_call",
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_from(root_signer.address())
                         .with_to(root_signer.address())
                         .with_input(Bytes::new()),
@@ -693,8 +693,8 @@ async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
     let response = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_from(Address::ZERO)
                     .with_to(TIP403_REGISTRY_ADDRESS)
                     .with_input(data.clone()),
@@ -710,8 +710,8 @@ async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
     let response = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(TIP403_REGISTRY_ADDRESS)
                     .with_input(data),
             )
@@ -764,8 +764,8 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let outsider_balance = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(PATH_USD_ADDRESS)
                     .with_input(balance_data),
             )
@@ -781,8 +781,8 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let outsider_allowance = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(PATH_USD_ADDRESS)
                     .with_input(allowance_data),
             )
@@ -798,8 +798,8 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let sequencer_balance = ctx
         .call_as_sequencer(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_from(ctx.sequencer_signer.address())
                     .with_to(PATH_USD_ADDRESS)
                     .with_input(balance_call.abi_encode()),
@@ -815,8 +815,8 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let sequencer_allowance = ctx
         .call_as_sequencer(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_from(ctx.sequencer_signer.address())
                     .with_to(PATH_USD_ADDRESS)
                     .with_input(allowance_call.abi_encode()),
@@ -848,8 +848,8 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
     let outsider = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(PATH_USD_ADDRESS)
                     .with_input(Bytes::copy_from_slice(&calldata)),
             )
@@ -866,8 +866,8 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
     let owner_response = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(PATH_USD_ADDRESS)
                     .with_input(Bytes::copy_from_slice(&calldata)),
             )
@@ -895,8 +895,8 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
     let forwarded = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(alloy_provider::MULTICALL3_ADDRESS)
                     .with_input(multicall.abi_encode()),
             )
@@ -933,8 +933,8 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let outsider_refunds = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(ZONE_INBOX_ADDRESS)
                     .with_input(refunds_data),
             )
@@ -954,8 +954,8 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let owner_refunds = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(ZONE_INBOX_ADDRESS)
                     .with_input(refunds_call.abi_encode()),
             )
@@ -984,8 +984,8 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let forwarded_refunds = ctx
         .call_as_user(
             "eth_call",
-            EthCallParams::<TempoNetwork>::new(
-                TempoTransactionRequest::default()
+            EthCallParams::<Ethereum>::new(
+                TransactionRequest::default()
                     .with_to(alloy_provider::MULTICALL3_ADDRESS)
                     .with_input(multicall.abi_encode()),
             )
@@ -1043,8 +1043,8 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
         let direct = ctx
             .call_as_user(
                 "eth_call",
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_to(target)
                         .with_input(Bytes::copy_from_slice(&calldata)),
                 )
@@ -1061,8 +1061,8 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
         let own = ctx
             .call_as_user(
                 "eth_call",
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_to(target)
                         .with_input(Bytes::copy_from_slice(&calldata)),
                 )
@@ -1084,8 +1084,8 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
         let forwarded = ctx
             .call_as_user(
                 "eth_call",
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_to(alloy_provider::MULTICALL3_ADDRESS)
                         .with_input(multicall.abi_encode()),
                 )
@@ -1115,8 +1115,8 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
         let create_resp = ctx
             .call_as_user(
                 method,
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_input(Bytes::from_static(&hex!("60006000f3"))),
                 )
                 .with_block(BlockId::latest()),
@@ -1136,8 +1136,8 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
         let user_override_resp = ctx
             .call_as_user(
                 method,
-                EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default()
+                EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default()
                         .with_to(simulation_target)
                         .with_input(Bytes::new()),
                 )
@@ -1160,7 +1160,7 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
     let fill_resp = ctx
         .call_as_user(
             "eth_fillTransaction",
-            (TempoTransactionRequest::default().with_gas_limit(21_000),),
+            (TransactionRequest::default().with_gas_limit(21_000),),
             &user_signer,
         )
         .await?;

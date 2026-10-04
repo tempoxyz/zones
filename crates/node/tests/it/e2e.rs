@@ -10,11 +10,10 @@ use std::{net::TcpListener, time::Duration};
 use alloy::primitives::{Address, B256, Bytes, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::{BlockId, NumHash};
-use alloy_network::{ReceiptResponse, TransactionBuilder as _};
+use alloy_network::{Ethereum, ReceiptResponse, TransactionBuilder as _};
 use alloy_provider::{DynProvider, EthCallParams, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
-use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
@@ -81,8 +80,8 @@ async fn test_sequencer_exposes_simulation_endpoints() -> eyre::Result<()> {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": method,
-                "params": EthCallParams::<TempoNetwork>::new(
-                    TempoTransactionRequest::default().with_to(Address::repeat_byte(0x11))
+                "params": EthCallParams::<Ethereum>::new(
+                    TransactionRequest::default().with_to(Address::repeat_byte(0x11))
                 ).with_block(BlockId::latest()),
             }))
             .send()
