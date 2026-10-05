@@ -474,10 +474,7 @@ mod tests {
     use alloy_primitives::{B256, U256, address};
     use alloy_sol_types::SolCall;
     use reth_chainspec::EthChainSpec;
-    use revm::{
-        context::result::ExecutionResult,
-        database::{CacheDB, EmptyDB},
-    };
+    use revm::database::{CacheDB, EmptyDB};
     use tempo_chainspec::{
         hardfork::TempoHardfork,
         spec::{MODERATO, TempoHardforks},
@@ -578,7 +575,7 @@ mod tests {
         let result = evm
             .transact_system_call(Address::ZERO, ZONE_INBOX_ADDRESS, calldata.into())
             .expect("advanceTempo execution must not fail");
-        assert!(matches!(result.result, ExecutionResult::Success { .. }));
+        assert!(result.result.is_success());
         assert_eq!(
             evm.ctx().journaled_state.database.l1_state().get_anchor(),
             None,

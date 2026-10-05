@@ -102,7 +102,7 @@ fn is_transfer_blocked_caller_eligible(log: &Log, caller: &Address) -> bool {
 
     *caller == event.receiver
         || *caller == receipt.originator
-        || (receipt.recoveryAuthority != Address::ZERO && *caller == receipt.recoveryAuthority)
+        || (!receipt.recoveryAuthority.is_zero() && *caller == receipt.recoveryAuthority)
 }
 
 /// Filters logs to only those the caller is allowed to see.

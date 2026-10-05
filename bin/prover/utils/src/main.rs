@@ -703,7 +703,7 @@ async fn discover(
                 .context("read Tempo portal from unrestricted Zone RPC")
         }
     )?;
-    if portal_address == Address::ZERO {
+    if portal_address.is_zero() {
         bail!("ZoneInbox reports a zero Tempo portal address");
     }
     let (zone_id, portal) = tokio::try_join!(

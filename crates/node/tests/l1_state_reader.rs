@@ -111,7 +111,7 @@ async fn l1_provider_reads_multiple_slots() {
     // Slot 0 should be non-zero (contains init data)
     let v0 = provider.cache().lock().get(ZONE_PORTAL, B256::ZERO, block);
     assert!(
-        v0.is_some_and(|v| v != B256::ZERO),
+        v0.is_some_and(|v| !v.is_zero()),
         "slot 0 should be non-zero"
     );
 }
