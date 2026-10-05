@@ -40,6 +40,10 @@ pub enum WitnessDatabaseError {
     /// The initial Tempo header is not a complete RLP-encoded Tempo header.
     #[error("invalid initial Tempo header in witness")]
     InvalidTempoHeader,
+    /// The QMDB operation history or commitment is invalid.
+    #[cfg(feature = "qmdb")]
+    #[error(transparent)]
+    Qmdb(#[from] crate::qmdb::QmdbError),
 }
 
 impl revm::database_interface::DBErrorMarker for WitnessDatabaseError {}
@@ -47,7 +51,7 @@ impl revm::database_interface::DBErrorMarker for WitnessDatabaseError {}
 /// REVM database backed by a root-bound, fully revealed Zone state trie.
 #[derive(Debug)]
 pub struct WitnessDatabase {
-    state: StatelessSparseTrie,
+    state: WitnessState,
     accounts: AddressMap<Option<AccountInfo>>,
     storage: AddressMap<U256Map<U256>>,
     code_by_hash: B256Map<Bytecode>,
@@ -79,7 +83,7 @@ impl WitnessDatabase {
         }
 
         Ok(Self {
-            state,
+            state: WitnessState::Mpt(state),
             accounts: AddressMap::default(),
             storage: AddressMap::default(),
             code_by_hash,
@@ -88,15 +92,26 @@ impl WitnessDatabase {
 
     /// Apply one block's execution changes to the current Zone state trie and
     /// return the resulting post-state root.
-    pub(crate) fn state_root(
-        &mut self,
-        bundle_state: BundleState,
-    ) -> Result<B256, StatelessSparseTrieError> {
+    pub(crate) fn state_root(&mut self, bundle_state: BundleState) -> Result<B256, Error> {
         // Advance the trie from the previous block's root using this block's changes.
         let state = reth_trie_common::HashedPostState::from_bundle_state::<
             reth_trie_common::KeccakKeyHasher,
         >(bundle_state.state());
-        let state_root = self.state.calculate_state_root(state)?;
+        let state_root = match &mut self.state {
+            WitnessState::Mpt(trie) => trie.calculate_state_root(state)?,
+            #[cfg(feature = "qmdb")]
+            WitnessState::Qmdb(database) => {
+                let wiped = bundle_state
+                    .state()
+                    .iter()
+                    .filter(|(_, account)| account.status.is_storage_known())
+                    .map(|(address, _)| keccak256(address))
+                    .collect::<Vec<_>>();
+                database
+                    .apply_state(state, &wiped)
+                    .map_err(WitnessDatabaseError::from)?
+            }
+        };
 
         // Keep database read caches coherent with the newly advanced trie.
         for (address, account) in bundle_state.state() {
@@ -124,7 +139,12 @@ impl Database for WitnessDatabase {
             return Ok(account.clone());
         }
 
-        let account = self.state.account(address)?.map(|account| AccountInfo {
+        let account = match &self.state {
+            WitnessState::Mpt(trie) => trie.account(address)?,
+            #[cfg(feature = "qmdb")]
+            WitnessState::Qmdb(database) => database.account(address)?,
+        }
+        .map(|account| AccountInfo {
             balance: account.balance,
             nonce: account.nonce,
             code_hash: account.code_hash,
@@ -151,7 +171,11 @@ impl Database for WitnessDatabase {
             return Ok(*value);
         }
 
-        let value = self.state.storage(address, slot)?;
+        let value = match &self.state {
+            WitnessState::Mpt(trie) => trie.storage(address, slot)?,
+            #[cfg(feature = "qmdb")]
+            WitnessState::Qmdb(database) => database.storage(address, slot)?,
+        };
         self.storage.entry(address).or_default().insert(slot, value);
         Ok(value)
     }
@@ -162,6 +186,45 @@ impl Database for WitnessDatabase {
         // proves the returned value against the parent header's state root.
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
         Ok(self.storage(HISTORY_STORAGE_ADDRESS, slot)?.into())
+    }
+}
+
+#[derive(Debug)]
+enum WitnessState {
+    Mpt(StatelessSparseTrie),
+    #[cfg(feature = "qmdb")]
+    Qmdb(crate::qmdb::QmdbState),
+}
+
+#[cfg(feature = "qmdb")]
+impl WitnessDatabase {
+    /// Reconstruct a complete QMDB history and bind it to the committed parent root.
+    pub fn from_qmdb_state_witness(
+        history: crate::qmdb::QmdbStateWitness,
+        witness: ZoneStateWitness,
+        state_root: B256,
+    ) -> Result<Self, Error> {
+        if !witness.node_pool.is_empty() {
+            return Err(WitnessDatabaseError::from(crate::qmdb::QmdbError::MixedWitness).into());
+        }
+        let state =
+            crate::qmdb::QmdbState::new(history, state_root).map_err(WitnessDatabaseError::from)?;
+        let mut code_by_hash = B256Map::default();
+        for code in witness.bytecodes {
+            let code_hash = keccak256(&code);
+            if code_by_hash
+                .insert(code_hash, Bytecode::new_raw(code))
+                .is_some()
+            {
+                return Err(WitnessDatabaseError::DuplicateBytecodeHash { code_hash }.into());
+            }
+        }
+        Ok(Self {
+            state: WitnessState::Qmdb(state),
+            accounts: AddressMap::default(),
+            storage: AddressMap::default(),
+            code_by_hash,
+        })
     }
 }
 

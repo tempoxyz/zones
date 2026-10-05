@@ -27,6 +27,9 @@ pub use execution::database::{TempoWitnessDatabase, WitnessDatabase, WitnessData
 pub use mpt::StatelessSparseTrieError;
 pub use types::*;
 
+#[cfg(feature = "qmdb")]
+pub mod qmdb;
+
 /// Execute a Zone batch witness and return its public commitments.
 ///
 /// `config` is trusted network configuration chosen by the verifier. Every
@@ -34,6 +37,20 @@ pub use types::*;
 /// execution. The prover launches with TIP-1096, so every batch must end at a full
 /// block's withdrawal finalization boundary.
 pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<BatchOutput, Error> {
+    prove_zone_batch_with_backend(config, witness, ZoneStateBackendWitness::Mpt)
+}
+
+enum ZoneStateBackendWitness {
+    Mpt,
+    #[cfg(feature = "qmdb")]
+    Qmdb(qmdb::QmdbStateWitness),
+}
+
+fn prove_zone_batch_with_backend(
+    config: &SpfConfig,
+    witness: BatchWitness,
+    backend: ZoneStateBackendWitness,
+) -> Result<BatchOutput, Error> {
     // The parent header is the committed starting point for this batch. Its
     // hash binds the witness to the previously submitted Zone block, and its
     // state root selects the initial Zone state.
@@ -55,10 +72,18 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // The Zone database is backed by the parent state root and the supplied
     // trie nodes. Reads performed during execution are therefore limited to
     // state proven by the witness, while writes remain in REVM's overlay.
-    let zone_database = WitnessDatabase::from_zone_state_witness(
-        witness.zone_state_witness,
-        witness.parent_header.state_root(),
-    )?;
+    let zone_database = match backend {
+        ZoneStateBackendWitness::Mpt => WitnessDatabase::from_zone_state_witness(
+            witness.zone_state_witness,
+            witness.parent_header.state_root(),
+        )?,
+        #[cfg(feature = "qmdb")]
+        ZoneStateBackendWitness::Qmdb(history) => WitnessDatabase::from_qmdb_state_witness(
+            history,
+            witness.zone_state_witness,
+            witness.parent_header.state_root(),
+        )?,
+    };
     let mut zone_state = State::builder()
         .with_database(zone_database)
         .with_bundle_update()
