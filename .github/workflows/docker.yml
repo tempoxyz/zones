@@ -150,7 +150,7 @@ jobs:
       rebuild-output: out/tempo-zone
 
   build-and-push:
-    name: Build and Push Docker Images
+    name: Build candidate Docker images
     needs: resolve-production-build-inputs
     # Private copies retain PR image builds, but must not publish shared images
     # or run the upstream's scheduled refreshes.
@@ -161,12 +161,15 @@ jobs:
     runs-on: depot-ubuntu-latest-16
     permissions:
       contents: read
-      packages: write
+      packages: read
       id-token: write
     env:
       GIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
       SOURCE_DATE_EPOCH: ${{ needs.resolve-production-build-inputs.outputs.source_date_epoch }}
       VERSION: ${{ needs.resolve-production-build-inputs.outputs.version }}
+    outputs:
+      artifact_id: ${{ steps.images.outputs.artifact-id }}
+      builder_ref: ${{ steps.eif_builder.outputs.ref }}
     steps:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
@@ -268,19 +271,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        if: github.repository == 'tempoxyz/zones'
-        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-        with:
-          username: ${{ secrets.DOCKER_HUB_USER }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
       - id: shortsha
         run: echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Configure persistent intermediate layer cache
         env:
-          WRITE_BUILD_CACHE: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          WRITE_BUILD_CACHE: "false"
         run: |
           python3 - <<'PYTHON'
           import json, os
@@ -320,6 +316,9 @@ jobs:
             echo "hit=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Prepare candidate image exports
+        run: mkdir -p "$RUNNER_TEMP/candidate-images"
+
       - name: Compile all binaries and publish images
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
@@ -337,10 +336,12 @@ jobs:
           set: |
             tempo-zone-prover-compiled.target=compiled
             tempo-zone-prover-compiled.output=type=local,dest=target/prover-compiled
-            tempo-zone.tags=${{ env.STAGING_REPOSITORY }}:${{ needs.resolve-production-build-inputs.outputs.staging_tag }}
-            tempo-zone.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.reproducible_verify != true)) }}
-            tempo-zone-xtask.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
-            tempo-zone-prover-utils.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
+            tempo-zone.tags=tempo-zone:candidate
+            tempo-zone.output=type=docker,dest=${{ runner.temp }}/candidate-images/tempo-zone.tar
+            tempo-zone-xtask.tags=tempo-zone-xtask:candidate
+            tempo-zone-xtask.output=type=docker,dest=${{ runner.temp }}/candidate-images/tempo-zone-xtask.tar
+            tempo-zone-prover-utils.tags=tempo-zone-prover-utils:candidate
+            tempo-zone-prover-utils.output=type=docker,dest=${{ runner.temp }}/candidate-images/tempo-zone-prover-utils.tar
           # Scheduled builds refresh moving external tools and base images. All
           # commit/tag/manual builds can safely reuse Depot's content-addressed
           # layer cache and will still invalidate layers when inputs change.
@@ -416,17 +417,12 @@ jobs:
           # Compilation was already refreshed in the first Bake call.
           pull: ${{ github.event_name == 'schedule' }}
 
-      - name: Publish EIF builder cache
+      - name: Export EIF builder cache image
         if: >-
           steps.eif_builder.outputs.hit != 'true' &&
           github.repository == 'tempoxyz/zones' &&
           github.event_name != 'pull_request' && github.event_name != 'merge_group'
-        env:
-          BUILDER_REF: ${{ steps.eif_builder.outputs.ref }}
-        run: |
-          set -euo pipefail
-          docker tag tempo-zone-prover-eif-builder:local "$BUILDER_REF"
-          docker push "$BUILDER_REF"
+        run: docker save tempo-zone-prover-eif-builder:local --output "$RUNNER_TEMP/candidate-images/eif-builder.tar"
 
       - name: Build tempo-zone-prover EIF
         env:
@@ -490,17 +486,142 @@ jobs:
             ${{ steps.meta-tempo-zone-prover.outputs.bake-file }}
           targets: tempo-zone-prover
           set: |
+            tempo-zone-prover.tags=tempo-zone-prover:candidate
+            tempo-zone-prover.output=type=docker,dest=${{ runner.temp }}/candidate-images/tempo-zone-prover.tar
             tempo-zone-prover.args.NITRO_HASH_ALGORITHM=${{ steps.prover_measurements.outputs.hash_algorithm }}
             tempo-zone-prover.args.NITRO_PCR0=${{ steps.prover_measurements.outputs.pcr0 }}
             tempo-zone-prover.args.NITRO_PCR1=${{ steps.prover_measurements.outputs.pcr1 }}
             tempo-zone-prover.args.NITRO_PCR2=${{ steps.prover_measurements.outputs.pcr2 }}
           project: 0c6tg19qsp
-          push: >-
-            ${{ github.repository == 'tempoxyz/zones' &&
-                github.event_name != 'pull_request' &&
-                github.event_name != 'merge_group' }}
           no-cache: ${{ github.event_name == 'schedule' }}
           pull: ${{ github.event_name == 'schedule' }}
+
+      - name: Upload candidate image archives
+        id: images
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-docker-images
+          path: ${{ runner.temp }}/candidate-images/*.tar
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+
+  publish-companion-images:
+    name: Publish companion Docker images
+    needs: build-and-push
+    if: >-
+      github.repository == 'tempoxyz/zones' &&
+      github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+      - name: Download candidate image archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-and-push.outputs.artifact_id }}
+          path: ${{ runner.temp }}/candidate-images
+      - name: Log in to Container Registry
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Docker Hub
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          username: ${{ secrets.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      - name: Docker metadata for tempo-zone-xtask
+        id: meta-tempo-zone-xtask
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone-xtask
+            docker.io/tempoxyz/tempo-zone-xtask
+          bake-target: tempo-zone-xtask
+          tags: |
+            type=schedule,pattern=nightly
+            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=edge,branch=main
+            type=sha,prefix=sha-
+            type=ref,event=pr
+
+      - name: Docker metadata for tempo-zone-prover
+        id: meta-tempo-zone-prover
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone-prover
+            docker.io/tempoxyz/tempo-zone-prover
+          bake-target: tempo-zone-prover
+          tags: |
+            type=schedule,pattern=nightly
+            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=edge,branch=main
+            type=sha,prefix=sha-
+            type=ref,event=pr
+
+      - name: Docker metadata for tempo-zone-prover-utils
+        id: meta-tempo-zone-prover-utils
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone-prover-utils
+            docker.io/tempoxyz/tempo-zone-prover-utils
+          bake-target: tempo-zone-prover-utils
+          tags: |
+            type=schedule,pattern=nightly
+            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=edge,branch=main
+            type=sha,prefix=sha-
+            type=ref,event=pr
+
+      - name: Publish fixed companion image names
+        env:
+          XTASK_TAGS: ${{ steps.meta-tempo-zone-xtask.outputs.tags }}
+          PROVER_TAGS: ${{ steps.meta-tempo-zone-prover.outputs.tags }}
+          UTILS_TAGS: ${{ steps.meta-tempo-zone-prover-utils.outputs.tags }}
+          BUILDER_REF: ${{ needs.build-and-push.outputs.builder_ref }}
+        run: |
+          set -euo pipefail
+          publish() {
+            local image="$1" metadata="$2" tag
+            docker load --input "$RUNNER_TEMP/candidate-images/$image.tar"
+            while IFS= read -r tag; do
+              [[ -z "$tag" ]] && continue
+              [[ "$tag" == "$REGISTRY/$image:"* || "$tag" == "docker.io/tempoxyz/$image:"* ]]
+              docker tag "$image:candidate" "$tag"
+              docker push "$tag"
+            done <<< "$metadata"
+          }
+          publish tempo-zone-xtask "$XTASK_TAGS"
+          publish tempo-zone-prover "$PROVER_TAGS"
+          publish tempo-zone-prover-utils "$UTILS_TAGS"
+          if [[ -f "$RUNNER_TEMP/candidate-images/eif-builder.tar" ]]; then
+            [[ "$BUILDER_REF" =~ ^ghcr.io/tempoxyz/tempo-zone-prover-eif-builder:inputs-[0-9a-f]{64}$ ]]
+            docker load --input "$RUNNER_TEMP/candidate-images/eif-builder.tar"
+            docker tag tempo-zone-prover-eif-builder:local "$BUILDER_REF"
+            docker push "$BUILDER_REF"
+          fi
 
   production-reproducible-clean-rebuild:
     name: Rebuild production contract without Docker cache
@@ -579,7 +700,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   production-reproducible-verify:
-    name: Verify staged tempo-zone binary and runtime inputs
+    name: Verify candidate tempo-zone binary and runtime inputs
     needs:
       - resolve-production-build-inputs
       - build-and-push
@@ -591,13 +712,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-      packages: read
+      packages: write
     outputs:
       image_digest: ${{ steps.compare.outputs.image_digest }}
       image_sha256: ${{ steps.compare.outputs.image_sha256 }}
     steps:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
+      - name: Download candidate image archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-and-push.outputs.artifact_id }}
+          path: ${{ runner.temp }}/candidate-images
 
       - name: Log in to Container Registry
         uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
@@ -606,7 +733,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve the staged digest and compare runtime inputs
+      - name: Compare candidate runtime inputs and stage verified image
         id: compare
         shell: bash
         env:
@@ -688,24 +815,8 @@ jobs:
           }
           trap cleanup EXIT
 
-          tagged_image="$IMAGE_REPOSITORY:$IMAGE_TAG"
-          for attempt in {1..12}; do
-            image_digest="$(docker buildx imagetools inspect "$tagged_image" \
-              --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
-            if [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              break
-            fi
-            echo "Waiting for $tagged_image to become readable (attempt $attempt/12)"
-            sleep 5
-          done
-          if [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            failure="could not resolve staged production image digest"
-            echo "Could not resolve a valid digest for $tagged_image" >&2
-            exit 1
-          fi
-
-          immutable_image="$IMAGE_REPOSITORY@$image_digest"
-          docker pull "$immutable_image"
+          docker load --input "$RUNNER_TEMP/candidate-images/tempo-zone.tar"
+          immutable_image=tempo-zone:candidate
           container_id="$(docker create "$immutable_image")"
           docker cp "$container_id:$BINARY_PATH" "$RUNNER_TEMP/tempo-zone"
           image_sha256="$(sha256sum "$RUNNER_TEMP/tempo-zone" | awk '{print $1}')"
@@ -743,6 +854,14 @@ jobs:
             exit 1
           fi
 
+          # Registry write access exists only on this fresh verification runner.
+          # No candidate executable or build script runs here.
+          tagged_image="$IMAGE_REPOSITORY:$IMAGE_TAG"
+          docker tag "$immutable_image" "$tagged_image"
+          docker push "$tagged_image"
+          image_digest="$(docker buildx imagetools inspect "$tagged_image" --format '{{.Manifest.Digest}}')"
+          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
           {
             echo "image_digest=$image_digest"
             echo "image_sha256=$image_sha256"
@@ -763,6 +882,7 @@ jobs:
       - resolve-production-build-inputs
       - build-and-push
       - production-reproducible-verify
+      - publish-companion-images
     if: >-
       needs.production-reproducible-verify.result == 'success' &&
       github.repository == 'tempoxyz/zones' &&
