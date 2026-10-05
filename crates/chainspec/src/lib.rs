@@ -35,6 +35,13 @@ pub struct ZoneChainSpec {
 }
 
 impl ZoneChainSpec {
+    /// Whether the pinned Tempo dependency exposes the consensus fork required by same-anchor
+    /// execution. It currently does not; activation must fail closed rather than use a local
+    /// toggle that lets otherwise identical nodes disagree on valid blocks.
+    pub const fn supports_same_anchor(&self) -> bool {
+        false
+    }
+
     /// Converts a genesis configuration into a Zone chain specification.
     ///
     /// Known public and local development chains inherit their parent schedule. Custom chains
@@ -268,6 +275,7 @@ mod tests {
     fn delegates_tempo_chain_behavior() {
         let zone = dev_zone_spec(1);
 
+        assert!(!zone.supports_same_anchor());
         assert_eq!(zone.chain_id(), zone_chain_id(DEV.chain_id(), 1).unwrap());
         for &hardfork in TempoHardfork::VARIANTS {
             assert_eq!(

@@ -278,6 +278,14 @@ address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 //   slot 25: _tokensEnabledInCurrentBlock (uint64) + pauseExpiry (uint64) [packed]
 //   slot 26: tokenEnablementHash (bytes32)
 //   slot 27: abdicationEffectiveAt (mapping(Capability => uint64))
+//   slot 28: lastProcessedEnabledTokenCount (uint64)
+//            + tokenEnablementCursorInitialized (bool) + fastEpoch (uint64) [packed]
+//   slot 29: _fastEpochs (mapping(uint64 => FastEpochConfig))
+//   slot 30: _fastEpochMembers (mapping(uint64 => address[]))
+//   slot 31: _isFastEpochMember (mapping(uint64 => mapping(address => bool)))
+//   slot 32: _fastPeerBarrierRoots (mapping(uint64 => mapping(bytes32 => bytes32)))
+//   slot 33: _fastPeerBarrierWatermarks (mapping(uint64 => mapping(bytes32 => uint64)))
+//   slot 34: _fastPeerBarrierRecorded (mapping(uint64 => mapping(bytes32 => bool)))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -300,6 +308,8 @@ bytes32 constant PORTAL_LEADER_SLOT = bytes32(uint256(PORTAL_MAX_TEMPO_GAS_RATE_
 bytes32 constant PORTAL_PAUSE_SLOT = bytes32(uint256(25));
 bytes32 constant PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT =
     bytes32(uint256(PORTAL_LEADER_SLOT) + 1);
+bytes32 constant PORTAL_FAST_EPOCH_SLOT = bytes32(uint256(28));
+bytes32 constant PORTAL_FAST_EPOCHS_SLOT = bytes32(uint256(29));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -417,6 +427,19 @@ interface IZoneFactory {
 struct TokenConfig {
     bool enabled; // true once admin enables this token (permanent, irreversible)
     bool depositsActive; // admin can pause/unpause deposits; does not affect withdrawals
+}
+
+/// @notice Finalized authority and distributed-drain metadata for one fast protocol epoch.
+/// @dev Historical entries and member arrays are permanent verification material.
+struct FastEpochConfig {
+    uint32 protocolVersion;
+    uint8 threshold;
+    bool closed;
+    uint16 expectedPeerBarriers;
+    uint16 receivedPeerBarriers;
+    uint64 activatedAtTempoBlock;
+    bytes32 rosterHash;
+    bytes32 closureHash;
 }
 
 /// @title IZonePortal
@@ -538,6 +561,22 @@ interface IZonePortal {
         uint64 activationTempoBlock
     );
 
+    event FastEpochActivated(
+        uint64 indexed epoch,
+        uint32 indexed protocolVersion,
+        bytes32 indexed rosterHash,
+        uint8 threshold,
+        uint16 expectedPeerBarriers,
+        address[] members
+    );
+    event FastEpochClosed(uint64 indexed epoch, bytes32 indexed closureHash);
+    event FastPeerBarrierRecorded(
+        uint64 indexed epoch,
+        bytes32 indexed peerZone,
+        bytes32 unresolvedRoot,
+        uint64 lockLogWatermark
+    );
+
     /// @notice Emitted when the independently mutable enforcement flags are initialized or updated.
     event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
@@ -583,6 +622,11 @@ interface IZonePortal {
     error ActiveLeaderRemoved();
     error LeaderAlreadyUpdatedThisBlock();
     error StaleLeadershipEpoch(uint64 expected, uint64 actual);
+    error FastProtocolUnavailable();
+    error FastEpochActive(uint64 epoch);
+    error InvalidFastEpoch();
+    error FastEpochNotDrained(uint64 epoch, uint16 received, uint16 expected);
+    error FastPeerBarrierAlreadyRecorded(bytes32 peerZone);
     error InvalidQuorumCertificate();
     error InvalidCallbackTarget();
     error CallbackDidNotReturnToZone();
@@ -716,6 +760,53 @@ interface IZonePortal {
     /// @param newLeader The individual sequencer address of the new leader.
     /// @param expectedEpoch The finalized leaderEpoch the caller observed (compare-and-set).
     function setLeader(address newLeader, uint64 expectedEpoch) external;
+
+    /// @notice Hash pin shared by the compatible factory, native executor and proof verifier.
+    /// @dev Zero in this source revision, making activation unreachable until all seams upgrade.
+    function FAST_PROTOCOL_NATIVE_PIN() external view returns (bytes32);
+
+    function FAST_EXPECTED_PEER_BARRIERS() external view returns (uint16);
+
+    function fastEpoch() external view returns (uint64);
+
+    function fastEpochActive() external view returns (bool);
+
+    function fastEpochConfig(uint64 epoch) external view returns (FastEpochConfig memory);
+
+    function fastEpochMemberCount(uint64 epoch) external view returns (uint256);
+
+    function fastEpochMemberAt(uint64 epoch, uint256 index) external view returns (address);
+
+    function isFastEpochMember(uint64 epoch, address account) external view returns (bool);
+
+    function fastPeerBarrier(uint64 epoch, bytes32 peerZone)
+        external
+        view
+        returns (bytes32 unresolvedRoot, uint64 lockLogWatermark);
+
+    /// @notice Factory-only activation. The native pin must be nonzero and exactly match.
+    function configureFastEpoch(
+        bytes32 nativeProtocolPin,
+        uint64 epoch,
+        uint32 protocolVersion,
+        address[] calldata members,
+        uint8 threshold,
+        uint16 expectedPeerBarriers,
+        bytes32 rosterHash
+    )
+        external;
+
+    /// @notice Factory-only irreversible admission closure for the current epoch.
+    function closeFastEpoch(uint64 epoch, bytes32 closureHash) external;
+
+    /// @notice Factory-only authenticated source barrier; duplicate peers never advance drain.
+    function recordFastPeerBarrier(
+        uint64 epoch,
+        bytes32 peerZone,
+        bytes32 unresolvedRoot,
+        uint64 lockLogWatermark
+    )
+        external;
 
     /*//////////////////////////////////////////////////////////////
                           TOKEN REGISTRY

@@ -17,7 +17,9 @@ use alloy_sol_types::{SolCall as _, SolEvent as _};
 use reth_evm::block::StateDB;
 use reth_revm::{Inspector, context::result::ResultAndState};
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
-use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
+use tempo_primitives::{
+    TempoReceipt, TempoTxEnvelope, TempoTxType, transaction::envelope::TEMPO_SYSTEM_TX_SENDER,
+};
 use tempo_revm::evm::TempoContext;
 use tempo_zone_contracts::{IZoneOutbox, TempoAdvanced};
 use zone_chainspec::ZoneChainSpec;
@@ -25,7 +27,7 @@ use zone_l1::state::L1StateProvider;
 use zone_precompiles::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, L1StorageReader};
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
-use crate::{L1OverlayDB, ZoneEvm};
+use crate::{L1OverlayDB, ZoneEvm, same_anchor::is_same_anchor_opening};
 
 /// The current transaction-ordering phase of a zone block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,6 +58,7 @@ impl ZoneBlockPhase {
             (Self::AwaitingAdvanceTempo, ZoneTransactionKind::AdvanceTempoHeaders) => {
                 Ok(Self::CheckpointOnly)
             }
+            (Self::AwaitingAdvanceTempo, ZoneTransactionKind::SameAnchor) => Ok(Self::Executing),
             (Self::AwaitingAdvanceTempo, _) => Err(BlockValidationError::msg(
                 "advanceTempo must be the first transaction in a zone block",
             )
@@ -67,6 +70,10 @@ impl ZoneBlockPhase {
             (Self::Executing, ZoneTransactionKind::AdvanceTempoHeaders) => Err(
                 BlockValidationError::msg("advanceTempoHeaders must only open a zone block").into(),
             ),
+            (Self::Executing, ZoneTransactionKind::SameAnchor) => Err(BlockValidationError::msg(
+                "sameAnchor must only execute once at the start of a zone block",
+            )
+            .into()),
             (Self::Executing, ZoneTransactionKind::Regular) => Ok(Self::Executing),
             (Self::Executing, ZoneTransactionKind::FinalizeWithdrawalBatch) => {
                 Ok(Self::WithdrawalsFinalized)
@@ -99,6 +106,7 @@ impl ZoneBlockPhase {
 enum ZoneTransactionKind {
     AdvanceTempo,
     AdvanceTempoHeaders,
+    SameAnchor,
     Regular,
     FinalizeWithdrawalBatch,
     UnexpectedSystem,
@@ -121,6 +129,12 @@ impl ZoneTransactionKind {
                 && input.starts_with(&ADVANCE_TEMPO_HEADERS_SELECTOR)
         }) {
             return Self::AdvanceTempoHeaders;
+        }
+
+        if tx.calls().any(|(kind, input)| {
+            kind.to() == Some(&TEMPO_SYSTEM_TX_SENDER) && is_same_anchor_opening(input)
+        }) {
+            return Self::SameAnchor;
         }
 
         if tx.calls().any(|(kind, input)| {
@@ -166,6 +180,7 @@ where
 pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
     phase: ZoneBlockPhase,
+    same_anchor_enabled: bool,
 }
 
 impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
@@ -188,6 +203,7 @@ where
                 TempoReceiptBuilder::default(),
             ),
             phase: ZoneBlockPhase::AwaitingAdvanceTempo,
+            same_anchor_enabled: chain_spec.supports_same_anchor(),
         }
     }
 }
@@ -227,6 +243,14 @@ where
             tempo_tx_env.expiring_nonce_idx = None;
         }
 
+        if ZoneTransactionKind::classify(recovered.tx()) == ZoneTransactionKind::SameAnchor
+            && !self.same_anchor_enabled
+        {
+            return Err(BlockValidationError::msg(
+                "same-anchor execution is unsupported by the active Tempo hardfork",
+            )
+            .into());
+        }
         let next_phase = self.phase.validate_transaction(recovered.tx())?;
 
         let result = self

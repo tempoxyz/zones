@@ -54,6 +54,7 @@ pub use error::{Result, ZonePrecompileError, ZoneResult};
 mod aes_gcm;
 mod chaum_pedersen;
 pub mod ecies;
+pub mod fast_transfer;
 pub mod outbox;
 
 /// Zone dispatch helpers for generic typed operations.
@@ -106,7 +107,7 @@ use tempo_precompiles::{
 };
 #[cfg(feature = "std")]
 use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
+use tempo_zone_contracts::{FAST_TRANSFER_ADDRESS, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 
 /// Registers every precompile that is available to a Zone EVM.
 ///
@@ -134,6 +135,8 @@ pub fn extend_zone_precompiles<P>(
 
         if is_tip20_prefix(*address) {
             Some(create_tip20_precompile(*address, &env))
+        } else if *address == FAST_TRANSFER_ADDRESS && fast_transfer::fast_transfer_active() {
+            Some(fast_transfer::FastTransfer::create(l1.clone(), &env))
         } else if *address == TEMPO_STATE_ADDRESS {
             Some(TempoState::create(l1.clone(), &env))
         } else if *address == ZONE_INBOX_ADDRESS {

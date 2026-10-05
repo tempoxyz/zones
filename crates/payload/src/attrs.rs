@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tempo_node::engine::TempoEngineValidator;
 use tempo_payload_types::{TempoBuiltPayload, TempoExecutionData};
 use tempo_primitives::{Block, TempoHeader};
+use zone_evm::same_anchor::SameAnchorOpening;
 use zone_l1::PreparedL1Block;
 
 /// Explicit opening Tempo system-call variant for a Zone payload.
@@ -24,6 +25,8 @@ use zone_l1::PreparedL1Block;
 pub enum TempoImport {
     Full(Box<PreparedL1Block>),
     CheckpointOnly(Vec<SealedHeader<TempoHeader>>),
+    /// Execute ordinary transactions against the finalized checkpoint already in parent state.
+    SameAnchor(SameAnchorOpening),
 }
 
 impl TempoImport {
@@ -34,21 +37,21 @@ impl TempoImport {
     pub(crate) fn follows_checkpoint_blocks(&self) -> bool {
         match self {
             Self::Full(prepared) => prepared.follows_checkpoint_blocks,
-            Self::CheckpointOnly(_) => false,
+            Self::CheckpointOnly(_) | Self::SameAnchor(_) => false,
         }
     }
 
     pub(crate) fn total_deposits(&self) -> usize {
         match self {
             Self::Full(prepared) => prepared.queued_deposits.len(),
-            Self::CheckpointOnly(_) => 0,
+            Self::CheckpointOnly(_) | Self::SameAnchor(_) => 0,
         }
     }
 
     pub(crate) fn enabled_tokens(&self) -> usize {
         match self {
             Self::Full(prepared) => prepared.enabled_tokens.len(),
-            Self::CheckpointOnly(_) => 0,
+            Self::CheckpointOnly(_) | Self::SameAnchor(_) => 0,
         }
     }
 }

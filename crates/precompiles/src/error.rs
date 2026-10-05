@@ -3,7 +3,9 @@
 use alloy_sol_types::SolInterface;
 use revm::precompile::{PrecompileOutput, PrecompileResult};
 use tempo_precompiles::IntoPrecompileResult;
-use tempo_zone_contracts::{TempoStateError, ZoneInboxError, ZoneOutboxError, ZonePortalError};
+use tempo_zone_contracts::{
+    FastTransferError, TempoStateError, ZoneInboxError, ZoneOutboxError, ZonePortalError,
+};
 
 use crate::storage::L1StateError;
 
@@ -38,6 +40,9 @@ pub enum ZonePrecompileError {
     /// Error from the ZoneInbox.
     #[error("ZoneInbox error: {0:?}")]
     Inbox(ZoneInboxError),
+    /// Error from the native FastTransfer state machine.
+    #[error("FastTransfer error: {0:?}")]
+    FastTransfer(FastTransferError),
     /// Malformed nested ABI data, matching Solidity's empty revert.
     #[error("malformed ABI calldata")]
     MalformedCalldata,
@@ -52,6 +57,7 @@ impl IntoPrecompileResult for ZonePrecompileError {
             Self::Outbox(error) => error.abi_encode(),
             Self::TempoState(error) => error.abi_encode(),
             Self::Inbox(error) => error.abi_encode(),
+            Self::FastTransfer(error) => error.abi_encode(),
             Self::MalformedCalldata => Default::default(),
         };
         Ok(PrecompileOutput::revert(gas, data.into(), reservoir))

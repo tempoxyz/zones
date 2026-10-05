@@ -11,6 +11,7 @@ pub use tempo_zone_contracts::{
 };
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
+pub use zone_evm::same_anchor::SameAnchorOpening;
 use zone_precompiles::L1StorageReader;
 
 /// Trusted network configuration for Zone execution.
@@ -112,6 +113,10 @@ pub enum TempoImport {
     CheckpointOnly {
         headers_rlp: Vec<Bytes>,
     },
+    /// Reuse the parent state's finalized checkpoint without replaying any import effects.
+    SameAnchor {
+        opening: SameAnchorOpening,
+    },
 }
 
 impl TempoImport {
@@ -119,13 +124,14 @@ impl TempoImport {
         match self {
             Self::Full { header_rlp, .. } => core::slice::from_ref(header_rlp),
             Self::CheckpointOnly { headers_rlp } => headers_rlp,
+            Self::SameAnchor { .. } => &[],
         }
     }
 
     pub fn deposits(&self) -> &[QueuedDeposit] {
         match self {
             Self::Full { deposits, .. } => deposits,
-            Self::CheckpointOnly { .. } => &[],
+            Self::CheckpointOnly { .. } | Self::SameAnchor { .. } => &[],
         }
     }
 }

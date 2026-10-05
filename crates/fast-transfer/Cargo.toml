@@ -1,0 +1,21 @@
+[package]
+name = "zone-fast-transfer"
+description = "Instant Zone transfer protocol verification and durable service state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-consensus = { workspace = true, features = ["k256"] }
+alloy-primitives = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+zone-primitives = { workspace = true }
+
+[dev-dependencies]
+alloy-signer = { workspace = true }
+alloy-signer-local = { workspace = true }

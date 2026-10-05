@@ -90,6 +90,9 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // The initial Tempo header supplies the root for Tempo-side reads. The
     // Zone's own TempoState must already contain the same number and hash;
     // otherwise the witness would describe a different L1 checkpoint.
+    let mut current_tempo_header: TempoHeader =
+        alloy_rlp::decode_exact(&witness.tempo_state_witness.initial_tempo_header_rlp)
+            .map_err(|_| Error::InvalidTempoReplayHeader { block_index: None })?;
     let mut tempo_database =
         TempoWitnessDatabase::from_tempo_state_witness(witness.tempo_state_witness)?;
     let (witnessed_tempo_number, witnessed_tempo_hash) = tempo_database.checkpoint();
@@ -150,18 +153,33 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         validate_zone_block_timestamp(block, block_index, &previous_header)?;
 
         validate_system_inputs(block, block_index)?;
+        if let TempoImport::SameAnchor { opening } = &block.tempo_import {
+            if !config.chain_spec().supports_same_anchor() {
+                return Err(Error::UnsupportedSameAnchorFork);
+            }
+            validate_same_anchor_replay(
+                opening,
+                &current_tempo_header,
+                block,
+                block_index,
+                &previous_header,
+            )?;
+        }
         let is_last = block_index + 1 == witness.zone_blocks.len();
         validate_batch_block_shape(block, is_last)?;
 
         // The EVM environment uses the verifier-selected fork schedule at this
         // block's timestamp. An imported Tempo header changes the L1 reader
         // used by the subsequent system and user execution in this block.
-        let final_imported_header = block
-            .tempo_import
-            .headers_rlp()
-            .last()
-            .expect("validated nonempty Tempo headers");
-        tempo_database = tempo_database.with_imported_checkpoint(final_imported_header)?;
+        if let Some(final_imported_header) = block.tempo_import.headers_rlp().last() {
+            current_tempo_header =
+                alloy_rlp::decode_exact(final_imported_header).map_err(|_| {
+                    Error::InvalidTempoReplayHeader {
+                        block_index: Some(block_index),
+                    }
+                })?;
+            tempo_database = tempo_database.with_imported_checkpoint(final_imported_header)?;
+        }
         let executed_block = execution::evm::execute_zone_block(
             &mut zone_state,
             config.evm_config(tempo_database.clone()),
@@ -348,6 +366,30 @@ fn validate_zone_block_timestamp(
     Ok(())
 }
 
+fn validate_same_anchor_replay(
+    opening: &SameAnchorOpening,
+    anchor: &TempoHeader,
+    block: &ZoneBlock,
+    block_index: usize,
+    parent: &TempoHeader,
+) -> Result<(), Error> {
+    if opening.tempo_block_number != anchor.number()
+        || opening.tempo_block_hash != anchor.hash_slow()
+        || opening.tempo_timestamp != anchor.timestamp()
+        || u64::from(opening.tempo_timestamp_millis_part) != anchor.timestamp_millis_part
+    {
+        return Err(Error::SameAnchorBindingMismatch { block_index });
+    }
+    let parent_millis = parent
+        .timestamp()
+        .checked_mul(1_000)
+        .and_then(|value| value.checked_add(parent.timestamp_millis_part))
+        .ok_or(Error::ParentTimestampOverflow { block_index })?;
+    opening
+        .validate_block_timestamp(parent_millis, block.timestamp, block.timestamp_millis_part)
+        .map_err(|_| Error::SameAnchorTimestamp { block_index })
+}
+
 fn read_zone_storage(
     zone_state: &mut State<WitnessDatabase>,
     address: alloy_primitives::Address,
@@ -432,9 +474,11 @@ fn validate_tempo_anchor(
 fn validate_batch_block_shape(block: &ZoneBlock, is_last: bool) -> Result<(), Error> {
     let valid = match (&block.tempo_import, is_last) {
         (TempoImport::CheckpointOnly { .. }, false) => true,
+        (TempoImport::SameAnchor { .. }, false) => block.finalize_withdrawal_batch_count.is_none(),
         (TempoImport::Full { .. }, false) => block.finalize_withdrawal_batch_count.is_none(),
         (TempoImport::Full { .. }, true) => block.finalize_withdrawal_batch_count.is_some(),
         (TempoImport::CheckpointOnly { .. }, true) => false,
+        (TempoImport::SameAnchor { .. }, true) => false,
     };
     if !valid {
         return Err(Error::InvalidBatchShape);
@@ -443,7 +487,9 @@ fn validate_batch_block_shape(block: &ZoneBlock, is_last: bool) -> Result<(), Er
 }
 
 fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> {
-    if block.tempo_import.headers_rlp().is_empty() {
+    if block.tempo_import.headers_rlp().is_empty()
+        && !matches!(&block.tempo_import, TempoImport::SameAnchor { .. })
+    {
         return Err(Error::MissingTempoHeaders { block_index: index });
     }
     match &block.tempo_import {
@@ -465,6 +511,19 @@ fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> 
             {
                 return Err(Error::InvalidCheckpointOnlyBlock { block_index: index });
             }
+        }
+        TempoImport::SameAnchor { opening } => {
+            if !block.finalize_withdrawal_batch_encrypted_senders.is_empty()
+                || block.finalize_withdrawal_batch_count.is_some()
+            {
+                return Err(Error::InvalidSameAnchorBlock { block_index: index });
+            }
+            opening
+                .validate()
+                .map_err(|_| Error::UnsupportedSameAnchorFormat {
+                    block_index: index,
+                    format: opening.format,
+                })?;
         }
     }
     match block.finalize_withdrawal_batch_count {
@@ -511,6 +570,24 @@ pub enum Error {
     /// A checkpoint-only block carried operational inputs or transactions.
     #[error("checkpoint-only zone block {block_index} contains operational inputs")]
     InvalidCheckpointOnlyBlock { block_index: usize },
+    /// A same-anchor block carried import/finalization work that would mutate an L1 cursor.
+    #[error("same-anchor zone block {block_index} contains import or finalization inputs")]
+    InvalidSameAnchorBlock { block_index: usize },
+    /// A same-anchor opening uses a format this verifier cannot reconstruct exactly.
+    #[error("zone block {block_index} uses unsupported same-anchor format {format}")]
+    UnsupportedSameAnchorFormat { block_index: usize, format: u8 },
+    /// The trusted chain schedule does not contain the dependency-compatible same-anchor fork.
+    #[error("same-anchor execution is unsupported by the trusted Tempo hardfork schedule")]
+    UnsupportedSameAnchorFork,
+    /// A replay header was not canonical complete Tempo header RLP.
+    #[error("invalid Tempo replay header for zone block {block_index:?}")]
+    InvalidTempoReplayHeader { block_index: Option<usize> },
+    /// The opening transaction does not bind the exact authenticated parent checkpoint.
+    #[error("same-anchor opening in zone block {block_index} does not match its Tempo checkpoint")]
+    SameAnchorBindingMismatch { block_index: usize },
+    /// The same-anchor block timestamp is not increasing or exceeds the two-second anchor bound.
+    #[error("invalid same-anchor timestamp in zone block {block_index}")]
+    SameAnchorTimestamp { block_index: usize },
     /// A block did not import any Tempo headers.
     #[error("zone block {block_index} contains no Tempo headers")]
     MissingTempoHeaders { block_index: usize },
@@ -601,6 +678,9 @@ pub enum Error {
     /// The ZoneInbox system transaction failed while advancing Tempo.
     #[error("failed to execute advanceTempo in zone block {block_index}")]
     AdvanceTempoExecution { block_index: usize },
+    /// The deterministic same-anchor opening transaction failed.
+    #[error("failed to execute sameAnchor in zone block {block_index}")]
+    SameAnchorExecution { block_index: usize },
     /// The ZoneInbox system transaction reverted while advancing Tempo.
     #[error("advanceTempo reverted in zone block {block_index}: {reason}; data: {output}")]
     AdvanceTempoRevert {
@@ -800,6 +880,22 @@ mod tests {
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
             transactions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rejects_unknown_same_anchor_witness_format() {
+        let mut block = empty_zone_block(1, 1);
+        let mut opening = SameAnchorOpening::v1(2, B256::with_last_byte(3), 1, 0, 7);
+        opening.format = 2;
+        block.tempo_import = TempoImport::SameAnchor { opening };
+
+        assert_eq!(
+            validate_system_inputs(&block, 4),
+            Err(Error::UnsupportedSameAnchorFormat {
+                block_index: 4,
+                format: 2,
+            })
+        );
     }
 
     fn witnessed_account_state(

@@ -23,6 +23,7 @@ tempo-contracts.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-chainspec.workspace = true
 zone-evm.workspace = true
+zone-fast-transfer.workspace = true
 zone-l1.workspace = true
 zone-p2p.workspace = true
 zone-payload.workspace = true
@@ -78,6 +79,9 @@ alloy-sol-types.workspace = true
 alloy-transport.workspace = true
 
 # misc
+bincode.workspace = true
+openraft.workspace = true
+thiserror.workspace = true
 minicbor.workspace = true
 minicbor-serde.workspace = true
 clap = { workspace = true, optional = true }

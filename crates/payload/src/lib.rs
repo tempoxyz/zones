@@ -14,7 +14,8 @@ mod withdrawal_reveal;
 
 pub use attrs::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 pub use builder::{
-    DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, ZonePayloadBuilder, ZonePayloadFactory,
-    build_advance_tempo_headers_tx, build_advance_tempo_tx,
+    DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, FAST_SETTLEMENT_BATCH_MAX_BYTES,
+    FAST_SETTLEMENT_BATCH_MAX_DELAY, ZonePayloadBuilder, ZonePayloadFactory,
+    build_advance_tempo_headers_tx, build_advance_tempo_tx, should_finalize_fast_settlement_batch,
 };
 pub use withdrawal_reveal::WithdrawalRevealEncryptor;

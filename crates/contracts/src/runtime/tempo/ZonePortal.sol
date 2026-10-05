@@ -18,6 +18,7 @@ import {
     Role,
     TokenConfig,
     TokenEnablementTransition,
+    FastEpochConfig,
     Withdrawal,
     WithdrawalBounceBackDeposit,
     ZONE_FACTORY_ADDRESS,
@@ -107,6 +108,13 @@ contract ZonePortal is IZonePortal {
     bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
         "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 tokenEnablementTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
     );
+
+    /// @notice Cross-component compatibility pin for the fast protocol.
+    /// @dev Deliberately zero: the pinned factory, executor and verifier do not implement the
+    ///      matching protocol. A future coordinated fork changes this consensus constant.
+    bytes32 public constant FAST_PROTOCOL_NATIVE_PIN = bytes32(0);
+    /// @notice Ten-Zone topology requires a closure barrier from each of the other nine Zones.
+    uint16 public constant FAST_EXPECTED_PEER_BARRIERS = 9;
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -238,6 +246,18 @@ contract ZonePortal is IZonePortal {
     /// @notice Whether the T13 token cursor has been authenticated by an operational batch.
     bool public tokenEnablementCursorInitialized;
 
+    /// @notice Current fast authority epoch. Zero means no epoch has ever been configured.
+    uint64 public fastEpoch;
+    mapping(uint64 epoch => FastEpochConfig config) internal _fastEpochs;
+    mapping(uint64 epoch => address[] members) internal _fastEpochMembers;
+    mapping(uint64 epoch => mapping(address member => bool)) internal _isFastEpochMember;
+    mapping(uint64 epoch => mapping(bytes32 peerZone => bytes32 unresolvedRoot))
+        internal _fastPeerBarrierRoots;
+    mapping(uint64 epoch => mapping(bytes32 peerZone => uint64 lockLogWatermark))
+        internal _fastPeerBarrierWatermarks;
+    mapping(uint64 epoch => mapping(bytes32 peerZone => bool recorded))
+        internal _fastPeerBarrierRecorded;
+
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
@@ -349,6 +369,7 @@ contract ZonePortal is IZonePortal {
         external
         onlyAdmin
     {
+        _rejectLegacyAuthorityChangeDuringFastEpoch();
         _replaceSequencerSet(newSequencers, newThreshold, true);
     }
 
@@ -429,6 +450,7 @@ contract ZonePortal is IZonePortal {
 
     /// @inheritdoc IZonePortal
     function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencerOrAdmin {
+        _rejectLegacyAuthorityChangeDuringFastEpoch();
         if (!isSequencer(newLeader)) revert InvalidLeader();
         // Idempotent fanout: every node relays the same target, only the first call transitions.
         if (newLeader == leader) return;
@@ -444,6 +466,159 @@ contract ZonePortal is IZonePortal {
         }
 
         _setLeader(newLeader);
+    }
+
+    /// @inheritdoc IZonePortal
+    function fastEpochActive() public view returns (bool) {
+        uint64 epoch = fastEpoch;
+        return FAST_PROTOCOL_NATIVE_PIN != bytes32(0) && epoch != 0 && !_fastEpochs[epoch].closed;
+    }
+
+    /// @inheritdoc IZonePortal
+    function fastEpochConfig(uint64 epoch) external view returns (FastEpochConfig memory) {
+        return _fastEpochs[epoch];
+    }
+
+    /// @inheritdoc IZonePortal
+    function fastEpochMemberCount(uint64 epoch) external view returns (uint256) {
+        return _fastEpochMembers[epoch].length;
+    }
+
+    /// @inheritdoc IZonePortal
+    function fastEpochMemberAt(uint64 epoch, uint256 index) external view returns (address) {
+        return _fastEpochMembers[epoch][index];
+    }
+
+    /// @inheritdoc IZonePortal
+    function isFastEpochMember(uint64 epoch, address account) external view returns (bool) {
+        return _isFastEpochMember[epoch][account];
+    }
+
+    /// @inheritdoc IZonePortal
+    function fastPeerBarrier(uint64 epoch, bytes32 peerZone)
+        external
+        view
+        returns (bytes32 unresolvedRoot, uint64 lockLogWatermark)
+    {
+        return (
+            _fastPeerBarrierRoots[epoch][peerZone],
+            _fastPeerBarrierWatermarks[epoch][peerZone]
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function configureFastEpoch(
+        bytes32 nativeProtocolPin,
+        uint64 epoch,
+        uint32 protocolVersion,
+        address[] calldata members,
+        uint8 threshold,
+        uint16 expectedPeerBarriers,
+        bytes32 rosterHash
+    )
+        external
+        onlyDelegateCall
+    {
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
+        if (
+            FAST_PROTOCOL_NATIVE_PIN == bytes32(0) || nativeProtocolPin != FAST_PROTOCOL_NATIVE_PIN
+        ) revert FastProtocolUnavailable();
+        if (
+            epoch == 0 || epoch <= fastEpoch || protocolVersion == 0 || members.length != 3
+                || threshold != 2 || expectedPeerBarriers != FAST_EXPECTED_PEER_BARRIERS
+        ) revert InvalidFastEpoch();
+
+        // Canonical immutable roster commitment shared by L1, native execution and certificate
+        // verification. Solidity ABI encoding is unambiguous for this typed tuple and array.
+        bytes32 expectedRosterHash = keccak256(
+            abi.encode(
+                keccak256("TEMPO_ZONE_FAST_ROSTER_V1"),
+                zoneId,
+                address(this),
+                epoch,
+                protocolVersion,
+                threshold,
+                expectedPeerBarriers,
+                members
+            )
+        );
+        if (rosterHash != expectedRosterHash) revert InvalidFastEpoch();
+
+        uint64 previous = fastEpoch;
+        if (previous != 0) {
+            FastEpochConfig storage prior = _fastEpochs[previous];
+            if (!prior.closed) revert FastEpochActive(previous);
+            if (prior.receivedPeerBarriers != prior.expectedPeerBarriers) {
+                revert FastEpochNotDrained(
+                    previous, prior.receivedPeerBarriers, prior.expectedPeerBarriers
+                );
+            }
+        }
+
+        for (uint256 i; i < members.length; ++i) {
+            address member = members[i];
+            if (member == address(0)) revert InvalidFastEpoch();
+            for (uint256 j; j < i; ++j) {
+                if (members[j] == member) revert InvalidFastEpoch();
+            }
+            _fastEpochMembers[epoch].push(member);
+            _isFastEpochMember[epoch][member] = true;
+        }
+
+        _fastEpochs[epoch] = FastEpochConfig({
+            protocolVersion: protocolVersion,
+            threshold: threshold,
+            closed: false,
+            expectedPeerBarriers: expectedPeerBarriers,
+            receivedPeerBarriers: 0,
+            activatedAtTempoBlock: uint64(block.number),
+            rosterHash: rosterHash,
+            closureHash: bytes32(0)
+        });
+        fastEpoch = epoch;
+        emit FastEpochActivated(
+            epoch, protocolVersion, rosterHash, threshold, expectedPeerBarriers, members
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function closeFastEpoch(uint64 epoch, bytes32 closureHash) external onlyDelegateCall {
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
+        FastEpochConfig storage config = _fastEpochs[epoch];
+        if (epoch == 0 || epoch != fastEpoch || config.closed || closureHash == bytes32(0)) {
+            revert InvalidFastEpoch();
+        }
+        config.closed = true;
+        config.closureHash = closureHash;
+        emit FastEpochClosed(epoch, closureHash);
+    }
+
+    /// @inheritdoc IZonePortal
+    function recordFastPeerBarrier(
+        uint64 epoch,
+        bytes32 peerZone,
+        bytes32 unresolvedRoot,
+        uint64 lockLogWatermark
+    )
+        external
+        onlyDelegateCall
+    {
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
+        FastEpochConfig storage config = _fastEpochs[epoch];
+        if (!config.closed || peerZone == bytes32(0)) revert InvalidFastEpoch();
+        if (_fastPeerBarrierRecorded[epoch][peerZone]) {
+            revert FastPeerBarrierAlreadyRecorded(peerZone);
+        }
+        if (config.receivedPeerBarriers >= config.expectedPeerBarriers) revert InvalidFastEpoch();
+        _fastPeerBarrierRoots[epoch][peerZone] = unresolvedRoot;
+        _fastPeerBarrierWatermarks[epoch][peerZone] = lockLogWatermark;
+        _fastPeerBarrierRecorded[epoch][peerZone] = true;
+        config.receivedPeerBarriers += 1;
+        emit FastPeerBarrierRecorded(epoch, peerZone, unresolvedRoot, lockLogWatermark);
+    }
+
+    function _rejectLegacyAuthorityChangeDuringFastEpoch() private view {
+        if (fastEpochActive()) revert FastEpochActive(fastEpoch);
     }
 
     /// @dev Single write path for a leadership transition: assign, bump the fencing epoch,

@@ -92,6 +92,17 @@ crate::sol! {
             uint64 nextProcessedTokenCount;
         }
 
+        struct FastEpochConfig {
+            uint32 protocolVersion;
+            uint8 threshold;
+            bool closed;
+            uint16 expectedPeerBarriers;
+            uint16 receivedPeerBarriers;
+            uint64 activatedAtTempoBlock;
+            bytes32 rosterHash;
+            bytes32 closureHash;
+        }
+
         // -- Events --
 
         event DepositMade(
@@ -209,6 +220,21 @@ crate::sol! {
             uint64 indexed epoch,
             uint64 activationTempoBlock
         );
+        event FastEpochActivated(
+            uint64 indexed epoch,
+            uint32 indexed protocolVersion,
+            bytes32 indexed rosterHash,
+            uint8 threshold,
+            uint16 expectedPeerBarriers,
+            address[] members
+        );
+        event FastEpochClosed(uint64 indexed epoch, bytes32 indexed closureHash);
+        event FastPeerBarrierRecorded(
+            uint64 indexed epoch,
+            bytes32 indexed peerZone,
+            bytes32 unresolvedRoot,
+            uint64 lockLogWatermark
+        );
 
         // -- Errors --
 
@@ -258,6 +284,11 @@ crate::sol! {
         error ActiveLeaderRemoved();
         error LeaderAlreadyUpdatedThisBlock();
         error StaleLeadershipEpoch(uint64 expected, uint64 actual);
+        error FastProtocolUnavailable();
+        error FastEpochActive(uint64 epoch);
+        error InvalidFastEpoch();
+        error FastEpochNotDrained(uint64 epoch, uint16 received, uint16 expected);
+        error FastPeerBarrierAlreadyRecorded(bytes32 peerZone);
 
         // -- View functions --
 
@@ -284,6 +315,18 @@ crate::sol! {
         function leaderEpoch() external view returns (uint64);
         function leaderActivationTempoBlock() external view returns (uint64);
         function setLeader(address newLeader, uint64 expectedEpoch) external;
+        function FAST_PROTOCOL_NATIVE_PIN() external view returns (bytes32);
+        function FAST_EXPECTED_PEER_BARRIERS() external view returns (uint16);
+        function fastEpoch() external view returns (uint64);
+        function fastEpochActive() external view returns (bool);
+        function fastEpochConfig(uint64 epoch) external view returns (FastEpochConfig memory);
+        function fastEpochMemberCount(uint64 epoch) external view returns (uint256);
+        function fastEpochMemberAt(uint64 epoch, uint256 index) external view returns (address);
+        function isFastEpochMember(uint64 epoch, address account) external view returns (bool);
+        function fastPeerBarrier(uint64 epoch, bytes32 peerZone) external view returns (bytes32 unresolvedRoot, uint64 lockLogWatermark);
+        function configureFastEpoch(bytes32 nativeProtocolPin, uint64 epoch, uint32 protocolVersion, address[] calldata members, uint8 threshold, uint16 expectedPeerBarriers, bytes32 rosterHash) external;
+        function closeFastEpoch(uint64 epoch, bytes32 closureHash) external;
+        function recordFastPeerBarrier(uint64 epoch, bytes32 peerZone, bytes32 unresolvedRoot, uint64 lockLogWatermark) external;
         function withdrawalBatchIndex() external view returns (uint64);
         function blockHash() external view returns (bytes32);
         function currentDepositQueueHash() external view returns (bytes32);
