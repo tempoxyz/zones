@@ -13,7 +13,7 @@ pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
 /// Compile-time Keccak-256 hash of [`NITRO_VERIFIER_CONFIG_V1`].
 pub const NITRO_VERIFIER_CONFIG_V1_HASH: B256 =
     B256::new(Keccak256::new().update(NITRO_VERIFIER_CONFIG_V1).finalize());
-/// Experimental TDX profile. Not accepted by the pinned Tempo L1 verifier.
+/// Experimental TDX profile, enabled only by the development Tempo verifier policy.
 pub const TDX_VERIFIER_CONFIG_V1: &[u8] = &[3];
 /// Hash of the experimental TDX configuration.
 pub const TDX_VERIFIER_CONFIG_V1_HASH: B256 =
@@ -37,6 +37,8 @@ pub enum VerifierMode {
     /// Nitro verification using a non-empty attestation document.
     #[default]
     NitroV1,
+    /// Experimental TDX verification using a self-contained quote/collateral envelope.
+    TdxV1,
     /// Temporary fallback verification requiring an empty proof.
     NoProof,
 }
@@ -46,6 +48,7 @@ impl VerifierMode {
     pub const fn config(self) -> &'static [u8] {
         match self {
             Self::NitroV1 => NITRO_VERIFIER_CONFIG_V1,
+            Self::TdxV1 => TDX_VERIFIER_CONFIG_V1,
             Self::NoProof => NO_PROOF_FALLBACK_VERIFIER,
         }
     }
@@ -54,6 +57,7 @@ impl VerifierMode {
     pub const fn config_hash(self) -> B256 {
         match self {
             Self::NitroV1 => NITRO_VERIFIER_CONFIG_V1_HASH,
+            Self::TdxV1 => TDX_VERIFIER_CONFIG_V1_HASH,
             Self::NoProof => NO_PROOF_FALLBACK_VERIFIER_HASH,
         }
     }
@@ -62,6 +66,9 @@ impl VerifierMode {
     ///
     /// Nitro requires a non-empty proof, while [`Self::NoProof`] requires an empty proof.
     pub fn validate_proof_shape(self, proof: &[u8]) -> Result<(), VerifierModeError> {
+        if self == Self::TdxV1 && tempo_tdx_attestation::raw_quote(proof).is_err() {
+            return Err(VerifierModeError::InvalidProofShape);
+        }
         match (self, proof.is_empty()) {
             (Self::NitroV1, true) => Err(VerifierModeError::InvalidProofShape),
             (Self::NoProof, false) => Err(VerifierModeError::InvalidProofShape),
@@ -77,6 +84,7 @@ impl TryFrom<&[u8]> for VerifierMode {
     fn try_from(config: &[u8]) -> Result<Self, Self::Error> {
         match config {
             NITRO_VERIFIER_CONFIG_V1 => Ok(Self::NitroV1),
+            TDX_VERIFIER_CONFIG_V1 => Ok(Self::TdxV1),
             NO_PROOF_FALLBACK_VERIFIER => Ok(Self::NoProof),
             _ => Err(VerifierModeError::UnknownConfig),
         }
@@ -90,6 +98,7 @@ impl TryFrom<B256> for VerifierMode {
     fn try_from(hash: B256) -> Result<Self, Self::Error> {
         match hash {
             NITRO_VERIFIER_CONFIG_V1_HASH => Ok(Self::NitroV1),
+            TDX_VERIFIER_CONFIG_V1_HASH => Ok(Self::TdxV1),
             NO_PROOF_FALLBACK_VERIFIER_HASH => Ok(Self::NoProof),
             _ => Err(VerifierModeError::UnknownConfigHash),
         }
@@ -305,7 +314,12 @@ mod tests {
         assert_eq!(VerifierMode::try_from(&[2][..]), Ok(VerifierMode::NoProof));
         assert!(VerifierMode::try_from(&[][..]).is_err());
         assert!(VerifierMode::try_from(&[1, 2][..]).is_err());
-        assert!(VerifierMode::try_from(&[3][..]).is_err());
+        assert_eq!(VerifierMode::try_from(&[3][..]), Ok(VerifierMode::TdxV1));
+        assert_eq!(
+            VerifierMode::try_from(VerifierMode::TdxV1.config_hash()),
+            Ok(VerifierMode::TdxV1)
+        );
+        assert!(VerifierMode::TdxV1.validate_proof_shape(&[42]).is_err());
 
         assert!(VerifierMode::NitroV1.validate_proof_shape(&[42]).is_ok());
         assert_eq!(

@@ -36,8 +36,8 @@ use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
-    ProverConnection, ShadowProofVerifier, VerifierMode, VerifyRequest, VerifyResponse,
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProofBundle, ProverConnection,
+    ShadowProofVerifier, VerifierMode, VerifyRequest, VerifyResponse,
     attested_transport::RemoteProverConfig,
 };
 use zone_rpc::ZoneDebugApi;
@@ -97,6 +97,15 @@ pub type ShadowProverConfig = SettlementProverConfig;
 #[derive(Debug, Clone)]
 pub struct SettlementProver {
     sender: mpsc::Sender<ProverJob>,
+    routing: Option<Arc<SettlementRouting>>,
+    default_mode: VerifierMode,
+}
+
+#[derive(Debug)]
+struct SettlementRouting {
+    addresses: ProverAddresses,
+    chain_spec: Arc<ZoneChainSpec>,
+    l1_provider: DynProvider<TempoNetwork>,
 }
 
 /// Locally tracked routing policy for an attestation; not part of the proof wire format.
@@ -208,7 +217,16 @@ pub fn spawn_settlement_prover<P: ZoneSequencerProvider>(
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
 ) -> SettlementProver {
+    let routing = config.prover_addresses.clone().map(|addresses| {
+        Arc::new(SettlementRouting {
+            addresses,
+            chain_spec: config.chain_spec.clone(),
+            l1_provider: l1_provider.clone(),
+        })
+    });
     SettlementProver {
+        routing,
+        default_mode: VerifierMode::NitroV1,
         sender: spawn_prover(
             config,
             zone_provider,
@@ -350,6 +368,19 @@ fn spawn_prover<P: ZoneSequencerProvider>(
 }
 
 impl SettlementProver {
+    /// Resolve the configured backend from the live L1 fork before requesting quorum signatures.
+    pub(crate) async fn verifier_mode(&self) -> Result<VerifierMode> {
+        match &self.routing {
+            Some(route) => Ok(route
+                .addresses
+                .resolve(&route.l1_provider, route.chain_spec.as_ref())
+                .await?
+                .0
+                .verifier_mode()),
+            None => Ok(self.default_mode),
+        }
+    }
+
     /// Produce the proof required to settle one finalized batch.
     pub(crate) async fn prove(
         &self,
@@ -373,6 +404,13 @@ impl SettlementProver {
         receiver.await.map_err(|_| unavailable())?
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixed_mode(mode: VerifierMode, result: Result<SettlementProof>) -> Self {
+        let mut prover = Self::fixed(result);
+        prover.default_mode = mode;
+        prover
+    }
+
     /// Answer the first proving request with `result`.
     #[cfg(test)]
     pub(crate) fn fixed(result: Result<SettlementProof>) -> Self {
@@ -389,7 +427,11 @@ impl SettlementProver {
                 let _ = response.send(result.await);
             }
         });
-        Self { sender }
+        Self {
+            sender,
+            routing: None,
+            default_mode: VerifierMode::NitroV1,
+        }
     }
 }
 
@@ -477,7 +519,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             Ok(ProofVerification::Verified) => {
                 metrics.proof_verification_success_total.increment(1);
                 info!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
-                    local = context.config.proof_verifier.is_some(), "Nitro proof verified");
+                    local = context.config.proof_verifier.is_some(), "Attested batch proof verified");
             }
             Ok(ProofVerification::SkippedBeforeT13) => {
                 metrics.proof_verification_skipped_total.increment(1);
@@ -750,7 +792,7 @@ async fn verify_remotely(
             proof_bundle,
         } => {
             validate_response_header(version, Some(&request_id), &expected_id)?;
-            validate_proof_bundle(&proof_bundle)?;
+            validate_proof_bundle(&proof_bundle, remote.verifier_mode())?;
             Ok((*output, proof_bundle))
         }
         VerifyResponse::Error {
@@ -785,13 +827,13 @@ fn validate_response_header(
     Ok(())
 }
 
-fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
+fn validate_proof_bundle(proof_bundle: &ProofBundle, expected: VerifierMode) -> Result<()> {
     let mode = VerifierMode::try_from(proof_bundle.verifier_config.as_ref())?;
     ensure!(
-        mode == VerifierMode::NitroV1,
+        mode == expected && mode != VerifierMode::NoProof,
         "remote prover returned unsupported verifier config {}; expected {}",
         alloy_primitives::hex::encode_prefixed(&proof_bundle.verifier_config),
-        alloy_primitives::hex::encode_prefixed(NITRO_VERIFIER_CONFIG_V1),
+        alloy_primitives::hex::encode_prefixed(expected.config()),
     );
     mode.validate_proof_shape(&proof_bundle.proof)?;
     Ok(())
@@ -1471,7 +1513,7 @@ mod tests {
             proof: Bytes::from_static(&[0xaa]),
         };
 
-        let error = validate_proof_bundle(&bundle).unwrap_err();
+        let error = validate_proof_bundle(&bundle, VerifierMode::NitroV1).unwrap_err();
 
         assert!(
             error

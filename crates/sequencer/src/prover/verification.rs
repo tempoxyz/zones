@@ -4,7 +4,7 @@ use alloy_contract::CallBuilder;
 use alloy_primitives::U256;
 use alloy_provider::DynProvider;
 use alloy_sol_types::SolCall as _;
-use eyre::{Context as _, Result};
+use eyre::{Context as _, Result, ensure};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::IZoneVerifier;
 use tempo_precompiles::zone_factory::portal_address;
@@ -30,6 +30,12 @@ pub(super) async fn verify_proof(
     parent_chain_id: u64,
     call: IZoneVerifier::verifyCall,
 ) -> Result<ProofVerification> {
+    let tdx = call.verifierConfig.as_ref() == zone_prover::TDX_VERIFIER_CONFIG_V1;
+    // A Nitro observer override cannot authorize experimental TDX settlement.
+    ensure!(
+        !tdx || local.is_none(),
+        "TDX requires the deployed L1 verifier, not a Nitro PCR override"
+    );
     let accepted = if let Some(verifier) = local {
         let verifier = verifier.clone();
         tokio::task::spawn_blocking(move || verifier.verify(call, parent_chain_id))
@@ -38,6 +44,10 @@ pub(super) async fn verify_proof(
             .wrap_err("local proof verification failed")?
     } else {
         if SettlementAbi::from_l1(provider, chain_spec).await? != SettlementAbi::T13 {
+            ensure!(
+                !tdx,
+                "TDX settlement requires the native L1 verifier at T13 or later"
+            );
             return Ok(ProofVerification::SkippedBeforeT13);
         }
         let portal_address = portal_address(call.zoneId);
@@ -179,6 +189,26 @@ mod tests {
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased()
+    }
+
+    #[tokio::test]
+    async fn tdx_cannot_use_a_nitro_local_override() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let mut call = call();
+        call.verifierConfig = zone_prover::TDX_VERIFIER_CONFIG_V1.into();
+        let pcr = "11".repeat(48);
+        let local: ShadowProofVerifier = format!("{pcr},{pcr},{pcr}").parse().unwrap();
+        assert!(
+            verify_proof(&provider, &chain_spec(), Some(&local), 12345, call)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("requires the deployed L1 verifier")
+        );
+        assert!(asserter.read_q().is_empty());
     }
 
     #[tokio::test]

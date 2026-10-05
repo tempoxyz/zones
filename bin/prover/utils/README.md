@@ -116,7 +116,7 @@ responses. The saved batch proof is still verified on-chain during settlement.
 
 `prove` also accepts a `backend: "tdx"` attestation policy. See
 [the TDX guide](../../../docs/TDX.md) for its schema and guest requirements.
-The saved TDX proof is not accepted by the current L1 verifier; use the local
+L1 verification requires the paired Tempo development policy; use the local
 `tdx verify-batch --input witness.json --proof proof.json --attestation-policy policy.json`
 command while Tempo integration is pending. `tdx quote`, `tdx verify-quote`, and
 `tdx connect` support raw evidence and transport hardware smoke tests.

@@ -57,7 +57,7 @@ impl Policy {
 
     pub fn validate(&self) -> io::Result<()> {
         require(
-            !self.measurements.is_empty(),
+            !self.measurements.is_empty() && self.measurements.len() <= 32,
             "empty TDX measurement policy",
         )?;
         for m in &self.measurements {
@@ -99,11 +99,28 @@ impl Policy {
             bundle.verifier_config.as_ref() == TDX_VERIFIER_CONFIG_V1,
             "not a TDX proof",
         )?;
-        self.verify(
+        let policy = tempo_tdx_attestation::Policy {
+            measurements: self
+                .measurements
+                .iter()
+                .map(|m| tempo_tdx_attestation::Measurements {
+                    mr_td: m.mr_td.0.into(),
+                    mr_config_id: m.mr_config_id.0.into(),
+                    mr_owner: m.mr_owner.0.into(),
+                    mr_owner_config: m.mr_owner_config.0.into(),
+                    rtmrs: m.rtmrs.map(|r| r.0.into()),
+                    td_attributes: m.td_attributes,
+                    xfam: m.xfam,
+                })
+                .collect(),
+        };
+        tempo_tdx_attestation::verify(
             &bundle.proof,
             &batch_report_data(tdx_batch_attestation_hash(inputs, output)),
+            &policy,
             now,
         )
+        .map_err(io::Error::other)
     }
 }
 
@@ -112,6 +129,16 @@ pub fn batch_report_data(digest: B256) -> [u8; 64] {
     let mut data = [0; 64];
     data[..32].copy_from_slice(digest.as_slice());
     data
+}
+
+/// Generate a batch quote and collect self-contained collateral outside consensus.
+/// Called from the prover's blocking replay worker; native quote generation remains guest-only.
+pub fn batch_quote(report_data: &[u8; 64]) -> io::Result<Vec<u8>> {
+    let quote = quote(report_data)?;
+    tokio::runtime::Handle::try_current()
+        .map_err(io::Error::other)?
+        .block_on(tempo_tdx_attestation::collect(&quote))
+        .map_err(io::Error::other)
 }
 
 /// TLS report data binds the certificate digest and a fresh client challenge separately.

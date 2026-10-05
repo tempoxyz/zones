@@ -613,38 +613,50 @@ impl<P: ZoneSequencerProvider> BatchPreparer<P> {
         withdrawals: Vec<abi::Withdrawal>,
     ) -> std::result::Result<ReadyBatch, BatchSubmitError> {
         let to = prepared.batch.zone_height;
-        let nitro_attempt = async {
+        let mode = match &self.settlement_prover {
+            Some(prover) => prover.verifier_mode().await?,
+            None => VerifierMode::NitroV1,
+        };
+        let attested_attempt = async {
             let Some(prover) = &self.settlement_prover else {
                 return Ok::<_, BatchSubmitError>(ControlFlow::Break(None));
             };
             let proof = prover.prove(from, to, prepared.clone());
             tokio::pin!(proof);
 
-            let certificate = self.prepare_certificate(&prepared, VerifierMode::NitroV1);
+            let certificate = self.prepare_certificate(&prepared, mode);
             tokio::pin!(certificate);
 
             // Poll both concurrently. `NoProof` fallback decision doesn't wait for `Nitro` quorum.
             let (proof, certificate) = tokio::select! {
                 result = &mut proof => match result {
+                    Err(cause) if mode == VerifierMode::TdxV1 => return Err(BatchSubmitError::Other(cause)),
                     Err(cause) => return Ok(ControlFlow::Break(Some(cause))),
                     Ok(proof) => (proof, certificate.await?),
                 },
                 result = &mut certificate => {
                     let certificate = result?;
                     match proof.await {
+                        Err(cause) if mode == VerifierMode::TdxV1 => return Err(BatchSubmitError::Other(cause)),
                         Err(cause) => return Ok(ControlFlow::Break(Some(cause))),
                         Ok(proof) => (proof, certificate),
                     }
                 }
             };
 
+            if VerifierMode::try_from(proof.bundle.verifier_config.as_ref())
+                .map_err(eyre::Report::from)?
+                != mode
+            {
+                return Err(BatchSubmitError::Other(eyre::eyre!(
+                    "prover backend changed during certificate preparation; regenerate the batch"
+                )));
+            }
             Ok::<_, BatchSubmitError>(ControlFlow::Continue((proof, certificate)))
         };
 
-        let (verifier_mode, proof, certificate) = match nitro_attempt.await? {
-            ControlFlow::Continue((proof, certificate)) => {
-                (VerifierMode::NitroV1, Some(proof), certificate)
-            }
+        let (verifier_mode, proof, certificate) = match attested_attempt.await? {
+            ControlFlow::Continue((proof, certificate)) => (mode, Some(proof), certificate),
             ControlFlow::Break(cause) => {
                 if let Some(cause) = cause {
                     warn!(error = ?cause, "Settling batch with the `NoProof` verifier fallback");
@@ -1172,6 +1184,49 @@ mod tests {
             certificate: None,
             withdrawals: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn tdx_failure_never_falls_back_to_no_proof() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.settlement_prover = Some(SettlementProver::fixed_mode(
+            VerifierMode::TdxV1,
+            Err(eyre::eyre!("TDX collateral unavailable")),
+        ));
+        let result = monitor
+            .batch_preparer()
+            .prepare_artifacts(1, prepared(test_batch_data()), Vec::new())
+            .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("TDX collateral unavailable")
+        );
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tdx_selection_rejects_nitro_response_before_submission() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.settlement_prover = Some(SettlementProver::fixed_mode(
+            VerifierMode::TdxV1,
+            Ok(SettlementProof {
+                bundle: zone_prover::ProofBundle {
+                    verifier_config: VerifierMode::NitroV1.config().into(),
+                    proof: vec![1].into(),
+                },
+                hardfork: TempoHardfork::T13,
+            }),
+        ));
+        let result = monitor
+            .batch_preparer()
+            .prepare_artifacts(1, prepared(test_batch_data()), Vec::new())
+            .await;
+        assert!(result.unwrap_err().to_string().contains("backend changed"));
+        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
