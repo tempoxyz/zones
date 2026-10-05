@@ -9,7 +9,7 @@ use std::{
 use alloy_primitives::{Address as EthereumAddress, B256};
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{AddressableManager as _, Recipients, Sender as _, authenticated::lookup};
-use commonware_runtime::{IoBuf, Runner as _, Spawner as _};
+use commonware_runtime::{IoBuf, Runner as _, Spawner as _, Supervisor as _};
 use eyre::WrapErr as _;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,7 @@ use crate::{
     },
     capabilities::PeerCapabilities,
     identity::{Ed25519Identity, Secp256k1Identity},
+    inter_zone::{self, InterZoneNodeChannels, InterZoneRoutingConfig, InterZoneServicePorts},
     network::{
         self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_CHANNEL, MAX_MESSAGE_SIZE,
         MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL, SETTLEMENT_SIGNATURE_CHANNEL,
@@ -54,6 +55,8 @@ struct P2pSenders {
     settlement_proposals: CommonwareSender,
     settlement_signatures: CommonwareSender,
     transactions: CommonwareSender,
+    raft_requests: CommonwareSender,
+    raft_responses: CommonwareSender,
 }
 
 struct P2pReceivers<R = CommonwareReceiver> {
@@ -67,6 +70,40 @@ struct BackfillNodeChannels {
     commands: mpsc::Receiver<BackfillCommand>,
     requests: mpsc::Sender<BackfillRequest>,
     responses: mpsc::Sender<BackfillResponse>,
+}
+
+struct RaftNodeChannels {
+    requests: mpsc::Sender<RaftRequestFrame>,
+    responses: mpsc::Sender<RaftResponseFrame>,
+}
+
+struct RaftRuntimeChannels<R = CommonwareReceiver> {
+    request_receiver: R,
+    response_receiver: R,
+    requests: mpsc::Sender<RaftRequestFrame>,
+    responses: mpsc::Sender<RaftResponseFrame>,
+}
+
+/// Maximum encoded OpenRaft request or response carried by Commonware.
+pub const MAX_RAFT_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftRequestFrame {
+    pub peer: PublicKey,
+    pub request_id: u64,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftResponseFrame {
+    pub peer: PublicKey,
+    pub request_id: u64,
+    pub payload: Vec<u8>,
+}
+
+pub struct RaftPorts {
+    pub requests: mpsc::Receiver<RaftRequestFrame>,
+    pub responses: mpsc::Receiver<RaftResponseFrame>,
 }
 
 /// Fully validated configuration for one node's Zone P2P runtime.
@@ -83,6 +120,7 @@ pub struct P2pConfig {
     bypass_ip_check: bool,
     leadership: LeadershipSchedule,
     storage_directory: Option<PathBuf>,
+    inter_zone: Option<InterZoneRoutingConfig>,
 }
 
 impl P2pConfig {
@@ -124,6 +162,7 @@ impl P2pConfig {
             bypass_ip_check,
             leadership,
             storage_directory: None,
+            inter_zone: None,
         })
     }
 
@@ -188,6 +227,19 @@ impl P2pConfig {
         self.storage_directory = Some(directory);
         self
     }
+
+    /// Enables the separate ten-Zone private service carrier. Endpoints and Ed25519 identities
+    /// supplied here are routing resources only; finalized ECDSA authority is installed through
+    /// the returned [`InterZoneServicePorts`] after the imported L1 anchor is validated.
+    pub fn with_inter_zone(mut self, config: InterZoneRoutingConfig) -> eyre::Result<Self> {
+        config.validate(&self.ed25519_public_key(), self.listen)?;
+        eyre::ensure!(
+            self.secp256k1_identity.is_some(),
+            "inter-Zone service requires a local finalized ECDSA member key"
+        );
+        self.inter_zone = Some(config);
+        Ok(self)
+    }
 }
 
 impl std::fmt::Debug for P2pConfig {
@@ -231,6 +283,16 @@ pub enum P2pCommand {
     ForwardTransaction {
         transaction_hash: B256,
         transaction: Vec<u8>,
+    },
+    SendRaftRequest {
+        target: PublicKey,
+        request_id: u64,
+        payload: Vec<u8>,
+    },
+    SendRaftResponse {
+        target: PublicKey,
+        request_id: u64,
+        payload: Vec<u8>,
     },
 }
 
@@ -283,6 +345,10 @@ pub struct P2pHandleParts {
     pub events: mpsc::Receiver<P2pEvent>,
     /// Typed backfill command, request, and response channels.
     pub backfill: BackfillPorts,
+    /// Process-lifetime authenticated OpenRaft request and response streams.
+    pub raft: RaftPorts,
+    /// Dedicated encrypted inter-Zone service ports, absent when C4 routing is not configured.
+    pub inter_zone: Option<InterZoneServicePorts>,
 }
 
 impl P2pHandle {
@@ -304,6 +370,8 @@ impl P2pHandle {
             commands,
             events,
             backfill,
+            raft,
+            inter_zone,
         } = self.parts.take().expect("P2P handle already consumed");
         shutdown.cancel();
 
@@ -311,6 +379,8 @@ impl P2pHandle {
         drop(commands);
         drop(events);
         drop(backfill);
+        drop(raft);
+        drop(inter_zone);
         let stopped_result = stopped.await;
 
         join_runtime_thread(thread).await?;
@@ -350,6 +420,14 @@ pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2
     let (backfill_commands, backfill_command_rx) = mpsc::channel(COMMAND_BACKLOG);
     let (backfill_requests_tx, backfill_requests) = mpsc::channel(EVENT_BACKLOG);
     let (backfill_responses_tx, backfill_responses) = mpsc::channel(EVENT_BACKLOG);
+    let (raft_requests_tx, raft_requests) = mpsc::channel(EVENT_BACKLOG);
+    let (raft_responses_tx, raft_responses) = mpsc::channel(EVENT_BACKLOG);
+    let (inter_zone, inter_zone_channels) = if config.inter_zone.is_some() {
+        let (ports, channels) = inter_zone::channels();
+        (Some(ports), Some(channels))
+    } else {
+        (None, None)
+    };
 
     let thread = std::thread::Builder::new()
         .name("zone-p2p".to_owned())
@@ -365,6 +443,11 @@ pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2
                     requests: backfill_requests_tx,
                     responses: backfill_responses_tx,
                 },
+                RaftNodeChannels {
+                    requests: raft_requests_tx,
+                    responses: raft_responses_tx,
+                },
+                inter_zone_channels,
             )
             .map_err(|err| format!("{err:?}"));
             let _ = stopped_tx.send(result);
@@ -383,6 +466,11 @@ pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2
                 requests: backfill_requests,
                 responses: backfill_responses,
             },
+            raft: RaftPorts {
+                requests: raft_requests,
+                responses: raft_responses,
+            },
+            inter_zone,
         }),
     })
 }
@@ -394,6 +482,8 @@ fn run(
     command_rx: mpsc::Receiver<P2pCommand>,
     events: mpsc::Sender<P2pEvent>,
     backfill: BackfillNodeChannels,
+    raft: RaftNodeChannels,
+    inter_zone_channels: Option<InterZoneNodeChannels>,
 ) -> eyre::Result<()> {
     let mut runtime_config = commonware_runtime::tokio::Config::default()
         .with_tcp_nodelay(Some(true))
@@ -404,6 +494,12 @@ fn run(
     }
     commonware_runtime::tokio::Runner::new(runtime_config).start(|context| async move {
         let local_ed25519_public_key = config.ed25519_public_key();
+        let inter_zone_config = config.inter_zone.clone();
+        let inter_zone_ed25519 = config.ed25519_identity.clone().into_private_key();
+        let inter_zone_signer = config
+            .secp256k1_identity
+            .as_ref()
+            .map(Secp256k1Identity::signer);
         let leadership = config.leadership();
         let (mut commonware, mut oracle, peers) = network::instantiate(
             &context,
@@ -439,7 +535,30 @@ fn run(
             TRANSACTION_CHANNEL,
             network::transaction_quota(),
         );
+        let (raft_request_sender, raft_request_receiver) =
+            commonware.register(network::RAFT_REQUEST_CHANNEL, network::raft_quota());
+        let (raft_response_sender, raft_response_receiver) =
+            commonware.register(network::RAFT_RESPONSE_CHANNEL, network::raft_quota());
         let mut network_task = commonware.start();
+
+        let inter_zone_context = context.child("inter-zone");
+        let inter_zone_loop = async move {
+            match (inter_zone_config, inter_zone_channels, inter_zone_signer) {
+                (Some(config), Some(channels), Some(signer)) => {
+                    inter_zone::run(
+                        inter_zone_context,
+                        config,
+                        inter_zone_ed25519,
+                        signer,
+                        channels,
+                    )
+                    .await
+                }
+                (None, None, _) => std::future::pending().await,
+                _ => Err(eyre::eyre!("incomplete inter-Zone runtime resources")),
+            }
+        };
+        tokio::pin!(inter_zone_loop);
 
         if config.bypass_ip_check {
             warn!(
@@ -477,6 +596,8 @@ fn run(
                 settlement_proposals: settlement_proposal_sender,
                 settlement_signatures: settlement_signature_sender,
                 transactions: transaction_sender,
+                raft_requests: raft_request_sender,
+                raft_responses: raft_response_sender,
             },
             command_rx,
         );
@@ -496,6 +617,18 @@ fn run(
             events,
         );
         tokio::pin!(receive_loop);
+
+        let raft_loop = run_raft_receivers(
+            local_ed25519_public_key.clone(),
+            membership.clone(),
+            RaftRuntimeChannels {
+                request_receiver: raft_request_receiver,
+                response_receiver: raft_response_receiver,
+                requests: raft.requests,
+                responses: raft.responses,
+            },
+        );
+        tokio::pin!(raft_loop);
 
         let backfill_loop = BackfillCoordinator::new(
             local_ed25519_public_key,
@@ -524,7 +657,9 @@ fn run(
             },
             result = &mut command_loop => result,
             result = &mut receive_loop => result,
+            result = &mut raft_loop => result,
             result = &mut backfill_loop => result,
+            result = &mut inter_zone_loop => result,
         };
 
         context
@@ -697,10 +832,137 @@ async fn run_commands(
                     debug!(target: "zone::p2p", ?transaction_hash, admitted = admitted.len(), configured, transaction_size_bytes = transaction_size, "Submitted transaction forwarding to quorum peers");
                 }
             }
+            P2pCommand::SendRaftRequest {
+                target,
+                request_id,
+                payload,
+            } => {
+                if !membership.is_quorum_member(&local_ed25519_public_key)
+                    || !membership.is_quorum_member(&target)
+                    || target == local_ed25519_public_key
+                    || payload.len() > MAX_RAFT_MESSAGE_SIZE
+                {
+                    warn!(target: "zone::p2p", %target, request_id, "Rejecting invalid outbound Raft request");
+                    continue;
+                }
+                let Some(frame) = encode_raft_frame(request_id, payload) else {
+                    continue;
+                };
+                let _ = senders
+                    .raft_requests
+                    .send(Recipients::Some(vec![target]), frame, true);
+            }
+            P2pCommand::SendRaftResponse {
+                target,
+                request_id,
+                payload,
+            } => {
+                if !membership.is_quorum_member(&local_ed25519_public_key)
+                    || !membership.is_quorum_member(&target)
+                    || target == local_ed25519_public_key
+                    || payload.len() > MAX_RAFT_MESSAGE_SIZE
+                {
+                    warn!(target: "zone::p2p", %target, request_id, "Rejecting invalid outbound Raft response");
+                    continue;
+                }
+                let Some(frame) = encode_raft_frame(request_id, payload) else {
+                    continue;
+                };
+                let _ = senders
+                    .raft_responses
+                    .send(Recipients::Some(vec![target]), frame, true);
+            }
         }
     }
 
     Err(eyre::eyre!("P2P command channel closed unexpectedly"))
+}
+
+fn encode_raft_frame(request_id: u64, payload: Vec<u8>) -> Option<Vec<u8>> {
+    if payload.len() > MAX_RAFT_MESSAGE_SIZE {
+        return None;
+    }
+    let mut frame = Vec::with_capacity(8 + payload.len());
+    frame.extend_from_slice(&request_id.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    Some(frame)
+}
+
+fn decode_raft_frame(bytes: IoBuf) -> Result<(u64, Vec<u8>), usize> {
+    let size = bytes.len();
+    if !(8..=MAX_RAFT_MESSAGE_SIZE + 8).contains(&size) {
+        return Err(size);
+    }
+    let bytes: Vec<u8> = bytes.into();
+    let request_id = u64::from_be_bytes(bytes[..8].try_into().expect("checked frame header"));
+    Ok((request_id, bytes[8..].to_vec()))
+}
+
+async fn run_raft_receivers<R>(
+    local: PublicKey,
+    membership: RoutingMembership,
+    channels: RaftRuntimeChannels<R>,
+) -> eyre::Result<()>
+where
+    R: commonware_p2p::Receiver<PublicKey = PublicKey>,
+{
+    let RaftRuntimeChannels {
+        mut request_receiver,
+        mut response_receiver,
+        requests,
+        responses,
+    } = channels;
+    loop {
+        let (is_request, peer, bytes) = tokio::select! {
+            result = request_receiver.recv() => {
+                let (peer, bytes) = result.wrap_err("Raft request channel receive failed")?;
+                (true, peer, bytes)
+            }
+            result = response_receiver.recv() => {
+                let (peer, bytes) = result.wrap_err("Raft response channel receive failed")?;
+                (false, peer, bytes)
+            }
+        };
+        if peer == local
+            || !membership.is_quorum_member(&local)
+            || !membership.is_quorum_member(&peer)
+        {
+            metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
+            continue;
+        }
+        let (request_id, payload) = match decode_raft_frame(bytes) {
+            Ok(frame) => frame,
+            Err(size) => {
+                metrics::counter!(
+                    "zone_p2p_oversized_messages_dropped_total",
+                    "channel" => if is_request { "raft_request" } else { "raft_response" },
+                    "direction" => "inbound",
+                )
+                .increment(1);
+                warn!(target: "zone::p2p", %peer, size, "Dropping malformed or oversized Raft frame");
+                continue;
+            }
+        };
+        if is_request {
+            requests
+                .send(RaftRequestFrame {
+                    peer,
+                    request_id,
+                    payload,
+                })
+                .await
+                .map_err(|_| eyre::eyre!("node Raft request channel closed"))?;
+        } else {
+            responses
+                .send(RaftResponseFrame {
+                    peer,
+                    request_id,
+                    payload,
+                })
+                .await
+                .map_err(|_| eyre::eyre!("node Raft response channel closed"))?;
+        }
+    }
 }
 
 async fn run_receivers<R, B>(
@@ -839,8 +1101,9 @@ mod tests {
     use commonware_runtime::IoBuf;
 
     use super::{
-        P2pCommand, P2pConfig, P2pEvent, P2pReceivers, into_bounded_payload, run_receivers,
-        spawn_p2p, validate_ip_check_configuration,
+        MAX_RAFT_MESSAGE_SIZE, P2pCommand, P2pConfig, P2pEvent, P2pReceivers, decode_raft_frame,
+        encode_raft_frame, into_bounded_payload, run_receivers, spawn_p2p,
+        validate_ip_check_configuration,
     };
     use crate::{
         P2pHandle, P2pHandleParts, P2pNetworkId, ZoneManifest,
@@ -924,6 +1187,17 @@ mod tests {
         assert_eq!(oversized, 5);
     }
 
+    #[test]
+    fn raft_frames_bind_request_id_and_bound_payload() {
+        let encoded = encode_raft_frame(41, vec![1, 2, 3]).unwrap();
+        assert_eq!(
+            decode_raft_frame(IoBuf::from(encoded)).unwrap(),
+            (41, vec![1, 2, 3])
+        );
+        assert!(encode_raft_frame(1, vec![0; MAX_RAFT_MESSAGE_SIZE + 1]).is_none());
+        assert!(decode_raft_frame(IoBuf::from(vec![0; 7])).is_err());
+    }
+
     /// Resend `command` until the test drops the returned handle.
     ///
     /// Commonware drops messages for peers that have not handshaked yet, so a phase that must be
@@ -953,10 +1227,14 @@ mod tests {
             commands,
             events,
             backfill,
+            raft,
+            inter_zone,
         } = handle.into_parts();
         shutdown.cancel();
         drop(commands);
         drop(backfill);
+        drop(raft);
+        drop(inter_zone);
         let stopped_result = stopped.await;
         tokio::task::spawn_blocking(move || thread.join())
             .await
@@ -1030,6 +1308,7 @@ mod tests {
             listen: available_address(),
             bypass_ip_check: false,
             storage_directory: None,
+            inter_zone: None,
             leadership: manifest.leadership_schedule(),
         };
 
@@ -1177,6 +1456,7 @@ mod tests {
             listen: addresses[index],
             bypass_ip_check: false,
             storage_directory: None,
+            inter_zone: None,
             leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
         };
         let mut leader = spawn_p2p(config(0), network_id).unwrap();
@@ -1430,6 +1710,7 @@ mod tests {
                         listen,
                         bypass_ip_check: false,
                         storage_directory: None,
+                        inter_zone: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -1777,6 +2058,7 @@ mod tests {
                         listen,
                         bypass_ip_check: false,
                         storage_directory: None,
+                        inter_zone: None,
                         leadership,
                     },
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
@@ -1990,6 +2272,7 @@ mod tests {
                         listen,
                         bypass_ip_check: false,
                         storage_directory: None,
+                        inter_zone: None,
                         leadership,
                     },
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
@@ -2164,6 +2447,7 @@ mod tests {
                         listen: addresses[index],
                         bypass_ip_check: false,
                         storage_directory: None,
+                        inter_zone: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2264,6 +2548,7 @@ mod tests {
                         listen,
                         bypass_ip_check: false,
                         storage_directory: None,
+                        inter_zone: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2355,6 +2640,7 @@ mod tests {
                     listen: addresses[index],
                     bypass_ip_check: false,
                     storage_directory: None,
+                    inter_zone: None,
                     leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
                 },
                 network_id,
@@ -2443,6 +2729,7 @@ mod tests {
                     listen: addresses[2],
                     bypass_ip_check: false,
                     storage_directory: None,
+                    inter_zone: None,
                     leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
                 },
                 network_id,
@@ -2538,6 +2825,7 @@ mod tests {
                         listen: addresses[index],
                         bypass_ip_check: false,
                         storage_directory: None,
+                        inter_zone: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2594,6 +2882,7 @@ mod tests {
                 listen: addresses[0],
                 bypass_ip_check: false,
                 storage_directory: None,
+                inter_zone: None,
                 leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
             },
             network_id,

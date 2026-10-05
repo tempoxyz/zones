@@ -12,7 +12,10 @@ mod builder;
 mod prewarming;
 mod withdrawal_reveal;
 
-pub use attrs::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
+pub use attrs::{
+    FAST_SETTLEMENT_BOUNDARY_VERSION, FastSettlementBoundary, FastSettlementTrigger, TempoImport,
+    ZonePayloadAttributes, ZonePayloadTypes,
+};
 pub use builder::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, FAST_SETTLEMENT_BATCH_MAX_BYTES,
     FAST_SETTLEMENT_BATCH_MAX_DELAY, ZonePayloadBuilder, ZonePayloadFactory,

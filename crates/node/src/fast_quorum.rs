@@ -1,22 +1,25 @@
-//! Maintained-Raft adapter and activation fence for instant Zone execution.
+//! Maintained-Raft adapter and finalized T14 activation fence for instant Zone execution.
 //!
-//! This module deliberately contains no CLI switch. Fast execution is allowed only after a
-//! finalized L1 fast-epoch registry has been imported and the pinned Tempo/native dependency
-//! advertises the matching capability. The dependency pinned by this source revision has no such
-//! registry, so [`FastActivation::from_finalized_epoch`] fails closed.
+//! This module deliberately contains no CLI switch. Fast execution is allowed only from exact
+//! finalized Portal registry evidence carrying the T14 native compatibility pin.
 
 use std::{
     collections::BTreeSet,
     fmt,
     future::Future,
+    io::Cursor,
+    path::Path,
     pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use alloy_primitives::{Address, B256, Bytes, keccak256};
+use alloy_consensus::{BlockHeader as _, Transaction as _};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_rlp::Decodable as _;
+use alloy_sol_types::{SolCall as _, SolValue};
 use openraft::{
-    BasicNode, Raft,
+    BasicNode, Config, Raft,
     error::{InstallSnapshotError, RPCError, RaftError, Unreachable},
     network::{RPCOption, RaftNetwork, RaftNetworkFactory},
     raft::{
@@ -29,20 +32,33 @@ use zone_fast_transfer::{
     CertificateError, DurableJournal, EpochRoster, JournalError, QuorumVerifier,
     ReplicatedBlockInput as JournaledBlockInput, SigningRecord,
 };
+use zone_payload::{FastSettlementBoundary, ZonePayloadAttributes};
 use zone_primitives::fast_transfer::{
-    OutcomeCertificate, SignatureBytes, TransferIntent, ZoneDomain,
+    CertificateBody, OutcomeCertificate, SignatureBytes, TransferIntent, ZoneDomain,
 };
 
-/// Protocol version implemented by the dormant source components.
+use crate::{
+    fast_raft_state_machine::{
+        CommittedBlockRef, CommittedReadError, CommittedStateHandle, CommittedTransferRecord,
+        DurableRaftStateMachine, DurableStateMachineExecution,
+    },
+    fast_raft_store::DurableRaftLogStore,
+};
+
+/// Protocol version implemented at the selected T14 boundary.
 pub const FAST_PROTOCOL_VERSION: u32 = 1;
 pub const MAX_ANCHOR_STALENESS: Duration = Duration::from_secs(2);
 pub const MAX_LIVE_CLOCK_SKEW: Duration = Duration::from_millis(100);
+pub const MAX_RAFT_APPEND_ENTRIES: usize = 256;
+pub const MAX_RAFT_RPC_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_RAFT_SNAPSHOT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
-/// The pinned Tempo/native revision does not yet expose a finalized fast-epoch registry.
-///
-/// This constant must only become `true` in the same change that pins and validates the matching
-/// L1 factory, portal bytecode, native precompiles, proof format, and RPC clients.
-const PINNED_DEPENDENCIES_HAVE_FAST_EPOCH_REGISTRY: bool = false;
+/// Literal hashed by `ZonePortal.FAST_PROTOCOL_NATIVE_PIN()` at T14.
+pub const T14_FAST_PROTOCOL_PIN_LABEL: &[u8] = b"TEMPO_ZONE_FAST_PROTOCOL_T14_V1";
+
+pub fn t14_fast_protocol_native_pin() -> B256 {
+    keccak256(T14_FAST_PROTOCOL_PIN_LABEL)
+}
 
 /// Complete deterministic input replicated for one Zone block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +77,14 @@ pub struct ReplicatedBlockInput {
     pub replay_witness: Bytes,
 }
 
+/// Identity of the preceding canonical `BatchFinalized` boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalFastSettlementBoundary {
+    pub block_height: u64,
+    pub block_hash: B256,
+    pub timestamp_millis: u64,
+}
+
 impl ReplicatedBlockInput {
     /// Stable digest used to reject a state-machine response for different input bytes.
     pub fn digest(&self) -> B256 {
@@ -68,6 +92,121 @@ impl ReplicatedBlockInput {
             .expect("ReplicatedBlockInput contains only infallibly serializable values");
         keccak256(encoded)
     }
+
+    /// Exact encoded bytes retained for this complete replay/proof input in the OpenRaft log.
+    pub fn retained_encoded_len(&self) -> Result<u64, FastBoundaryValidationError> {
+        bincode::serialized_size(self).map_err(FastBoundaryValidationError::Attributes)
+    }
+
+    /// Decode the optional canonical boundary from the replicated payload attributes.
+    pub fn fast_settlement_boundary(
+        &self,
+    ) -> Result<Option<FastSettlementBoundary>, FastBoundaryValidationError> {
+        let attributes: ZonePayloadAttributes = bincode::deserialize(&self.l1_inputs)
+            .map_err(FastBoundaryValidationError::Attributes)?;
+        Ok(attributes.fast_settlement_boundary)
+    }
+
+    /// Validate a ready boundary against the committed predecessor and the actual finalization
+    /// transaction in this same replicated entry.
+    pub fn validate_fast_settlement_boundary(
+        &self,
+        previous: CanonicalFastSettlementBoundary,
+        expected_cumulative_retained_bytes: u64,
+    ) -> Result<FastSettlementBoundary, FastBoundaryValidationError> {
+        let boundary = self
+            .fast_settlement_boundary()?
+            .ok_or(FastBoundaryValidationError::MissingMarker)?;
+        if (
+            boundary.previous_boundary_height,
+            boundary.previous_boundary_hash,
+            boundary.previous_boundary_timestamp_millis,
+        ) != (
+            previous.block_height,
+            previous.block_hash,
+            previous.timestamp_millis,
+        ) {
+            return Err(FastBoundaryValidationError::PreviousBoundary);
+        }
+        if boundary.cumulative_retained_bytes != expected_cumulative_retained_bytes {
+            return Err(FastBoundaryValidationError::RetainedBytes {
+                expected: expected_cumulative_retained_bytes,
+                actual: boundary.cumulative_retained_bytes,
+            });
+        }
+
+        let mut encoded_block = self.block_input.as_ref();
+        let block = tempo_primitives::Block::decode(&mut encoded_block)
+            .map_err(|error| FastBoundaryValidationError::Block(error.to_string()))?;
+        if !encoded_block.is_empty() {
+            return Err(FastBoundaryValidationError::TrailingBlockBytes);
+        }
+        let timestamp_millis = alloy_consensus::BlockHeader::timestamp(&block.header)
+            .checked_mul(1_000)
+            .and_then(|value| value.checked_add(block.header.timestamp_millis_part))
+            .ok_or(FastBoundaryValidationError::TimestampOverflow)?;
+        boundary
+            .validate_payload_binding(
+                block.header.number(),
+                block.header.parent_hash(),
+                timestamp_millis,
+            )
+            .map_err(FastBoundaryValidationError::Marker)?;
+
+        let finalization_selector =
+            zone_payload::abi::IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR;
+        let mut matching = block.body.transactions.iter().filter(|transaction| {
+            transaction.to() == Some(zone_payload::abi::ZONE_OUTBOX_ADDRESS)
+                && transaction.input().starts_with(&finalization_selector)
+        });
+        let finalization = matching
+            .next()
+            .ok_or(FastBoundaryValidationError::MissingFinalization)?;
+        if matching.next().is_some()
+            || block.body.transactions.last() != Some(finalization)
+            || finalization.input().as_ref() != boundary.finalization_calldata.as_ref()
+        {
+            return Err(FastBoundaryValidationError::FinalizationMismatch);
+        }
+        let tempo_primitives::TempoTxEnvelope::Legacy(signed) = finalization else {
+            return Err(FastBoundaryValidationError::FinalizationMismatch);
+        };
+        let transaction = signed.tx();
+        if signed.signature() != &tempo_primitives::transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE
+            || transaction.chain_id.is_none()
+            || transaction.nonce != 0
+            || transaction.gas_price != 0
+            || transaction.gas_limit != 0
+            || transaction.value != U256::ZERO
+        {
+            return Err(FastBoundaryValidationError::FinalizationMismatch);
+        }
+        Ok(boundary)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FastBoundaryValidationError {
+    #[error("failed to decode fast-settlement payload attributes: {0}")]
+    Attributes(bincode::Error),
+    #[error("fast-settlement boundary marker is missing")]
+    MissingMarker,
+    #[error("fast-settlement boundary predecessor does not match the canonical prefix")]
+    PreviousBoundary,
+    #[error("fast-settlement retained byte count mismatch: expected {expected}, got {actual}")]
+    RetainedBytes { expected: u64, actual: u64 },
+    #[error("failed to decode replicated block: {0}")]
+    Block(String),
+    #[error("replicated block has trailing bytes")]
+    TrailingBlockBytes,
+    #[error("replicated block timestamp overflows milliseconds")]
+    TimestampOverflow,
+    #[error("invalid fast-settlement marker: {0}")]
+    Marker(&'static str),
+    #[error("replicated boundary has no finalizeWithdrawalBatch transaction")]
+    MissingFinalization,
+    #[error("replicated boundary finalization transaction/calldata mismatch")]
+    FinalizationMismatch,
 }
 
 impl fmt::Display for ReplicatedBlockInput {
@@ -77,7 +216,7 @@ impl fmt::Display for ReplicatedBlockInput {
 }
 
 /// State-machine response produced only after committed execution and durable replay storage.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedBlock {
     pub input_digest: B256,
     pub block_height: u64,
@@ -104,7 +243,8 @@ pub struct FastRaft {
     raft: Raft<FastRaftConfig>,
 }
 
-type TransportFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
+pub(crate) type TransportFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
 
 /// Authenticated transport used by OpenRaft. Implementations must verify that the connection's
 /// peer identity is the requested epoch member rather than trusting a reused socket address.
@@ -240,6 +380,221 @@ impl FastRaft {
     }
 }
 
+/// Assemble a real OpenRaft node after finalized activation evidence identifies the local member.
+///
+/// This opens and restores both durable stores before spawning OpenRaft. Cluster initialization
+/// and peer RPC exposure remain explicit caller operations on [`FastRaft::inner`].
+pub async fn assemble_fast_raft<T, E>(
+    activation: &FastActivation,
+    local_signer: Address,
+    config: Arc<Config>,
+    transport: Arc<T>,
+    directory: impl AsRef<Path>,
+    executor: Arc<E>,
+) -> Result<FastRaftRuntime<E>, AssembleFastRaftError>
+where
+    T: RaftTransport,
+    E: DurableStateMachineExecution,
+{
+    let member = activation
+        .epoch()
+        .members
+        .iter()
+        .position(|member| *member == local_signer)
+        .ok_or(AssembleFastRaftError::LocalSignerNotInRoster)?;
+    // Registry order is the stable Raft node-id mapping for the life of this fenced epoch.
+    let node_id = u64::try_from(member + 1).expect("three-member index fits u64");
+    let directory = directory.as_ref();
+    let log_store =
+        DurableRaftLogStore::open(directory.join("log")).map_err(AssembleFastRaftError::Storage)?;
+    let state_machine = DurableRaftStateMachine::open(directory.join("state-machine"), executor)
+        .await
+        .map_err(AssembleFastRaftError::Storage)?;
+    let committed = state_machine.committed_handle();
+    let network = FastRaftNetworkFactory::new(transport);
+    let raft = Raft::new(node_id, config, network, log_store, state_machine)
+        .await
+        .map_err(|error| AssembleFastRaftError::OpenRaft(error.to_string()))?;
+    Ok(FastRaftRuntime {
+        raft: FastRaft::new(raft),
+        committed,
+        activation: activation.clone(),
+    })
+}
+
+/// Running consensus plus the only transfer/head view suitable for authenticated RPC.
+pub struct FastRaftRuntime<E> {
+    pub raft: FastRaft,
+    committed: CommittedStateHandle<E>,
+    activation: FastActivation,
+}
+
+impl<E: DurableStateMachineExecution> FastRaftRuntime<E> {
+    pub fn committed_head(
+        &self,
+    ) -> Result<Option<CommittedBlockRef>, CommittedReadError<E::Error>> {
+        self.committed.committed_head()
+    }
+
+    pub fn committed_transfer(
+        &self,
+        transfer_id: B256,
+    ) -> Result<Option<CommittedTransferRecord>, RuntimeReadError<E::Error>> {
+        let record = self
+            .committed
+            .committed_transfer(transfer_id)
+            .map_err(RuntimeReadError::Committed)?;
+        if record
+            .as_ref()
+            .is_some_and(|record| !self.matches_activation(&record.body.zone))
+        {
+            return Err(RuntimeReadError::WrongEpoch);
+        }
+        Ok(record)
+    }
+
+    pub const fn committed_handle(&self) -> &CommittedStateHandle<E> {
+        &self.committed
+    }
+
+    /// Handle an AppendEntries request only after the transport maps its authenticated peer key
+    /// to this finalized epoch identity.
+    pub async fn handle_append_entries(
+        &self,
+        peer: AuthenticatedRaftPeer,
+        request: AppendEntriesRequest<FastRaftConfig>,
+    ) -> Result<AppendEntriesResponse<u64>, PeerRaftRpcError> {
+        self.authorize_peer(peer, request.vote.leader_id.node_id)?;
+        if request.entries.len() > MAX_RAFT_APPEND_ENTRIES
+            || append_payload_bytes(&request) > MAX_RAFT_RPC_BYTES
+        {
+            return Err(PeerRaftRpcError::Oversized);
+        }
+        self.raft
+            .inner()
+            .append_entries(request)
+            .await
+            .map_err(|error| PeerRaftRpcError::OpenRaft(error.to_string()))
+    }
+
+    pub async fn handle_vote(
+        &self,
+        peer: AuthenticatedRaftPeer,
+        request: VoteRequest<u64>,
+    ) -> Result<VoteResponse<u64>, PeerRaftRpcError> {
+        self.authorize_peer(peer, request.vote.leader_id.node_id)?;
+        self.raft
+            .inner()
+            .vote(request)
+            .await
+            .map_err(|error| PeerRaftRpcError::OpenRaft(error.to_string()))
+    }
+
+    pub async fn handle_install_snapshot(
+        &self,
+        peer: AuthenticatedRaftPeer,
+        request: InstallSnapshotRequest<FastRaftConfig>,
+    ) -> Result<InstallSnapshotResponse<u64>, PeerRaftRpcError> {
+        self.authorize_peer(peer, request.vote.leader_id.node_id)?;
+        if request.data.len() > MAX_RAFT_SNAPSHOT_CHUNK_BYTES {
+            return Err(PeerRaftRpcError::Oversized);
+        }
+        self.raft
+            .inner()
+            .install_snapshot(request)
+            .await
+            .map_err(|error| PeerRaftRpcError::OpenRaft(error.to_string()))
+    }
+
+    fn authorize_peer(
+        &self,
+        peer: AuthenticatedRaftPeer,
+        claimed_node_id: u64,
+    ) -> Result<(), PeerRaftRpcError> {
+        let epoch = self.activation.epoch();
+        let expected = usize::try_from(peer.node_id)
+            .ok()
+            .and_then(|id| id.checked_sub(1))
+            .and_then(|index| epoch.members.get(index));
+        if peer.epoch != epoch.epoch
+            || peer.node_id != claimed_node_id
+            || expected != Some(&peer.member)
+        {
+            return Err(PeerRaftRpcError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    fn matches_activation(&self, domain: &ZoneDomain) -> bool {
+        let epoch = self.activation.epoch();
+        domain.l1_chain_id == epoch.l1_chain_id
+            && domain.zone_id == epoch.zone_id
+            && domain.chain_id == epoch.zone_chain_id
+            && domain.portal == epoch.portal
+            && domain.authority_epoch == epoch.epoch
+            && domain.roster_hash == epoch.roster_hash
+            && u32::from(domain.protocol_version) == epoch.protocol_version
+    }
+}
+
+/// Identity already authenticated by the private Commonware session and manifest mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedRaftPeer {
+    pub epoch: u64,
+    pub node_id: u64,
+    pub member: Address,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PeerRaftRpcError {
+    #[error("Raft RPC peer is not the claimed member of the finalized epoch")]
+    Unauthorized,
+    #[error("Raft RPC exceeds its bounded frame or entry limit")]
+    Oversized,
+    #[error("OpenRaft rejected peer RPC: {0}")]
+    OpenRaft(String),
+}
+
+fn append_payload_bytes(request: &AppendEntriesRequest<FastRaftConfig>) -> usize {
+    request
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            openraft::EntryPayload::Normal(input) => Some(input),
+            _ => None,
+        })
+        .fold(0usize, |total, input| {
+            total
+                .saturating_add(input.block_input.len())
+                .saturating_add(input.l1_inputs.len())
+                .saturating_add(input.replay_witness.len())
+                .saturating_add(
+                    input
+                        .transactions
+                        .iter()
+                        .fold(0usize, |size, tx| size.saturating_add(tx.len())),
+                )
+        })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeReadError<E: std::error::Error + 'static> {
+    #[error(transparent)]
+    Committed(CommittedReadError<E>),
+    #[error("committed transfer belongs to a different finalized authority epoch")]
+    WrongEpoch,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AssembleFastRaftError {
+    #[error("local outcome signer is not in the finalized epoch roster")]
+    LocalSignerNotInRoster,
+    #[error("failed to open durable Raft storage: {0}")]
+    Storage(std::io::Error),
+    #[error("failed to start OpenRaft: {0}")]
+    OpenRaft(String),
+}
+
 /// Original Raft coordinates are part of every outcome certificate body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RaftCommit {
@@ -317,7 +672,11 @@ impl CommittedPrefixStore for DurableJournal {
             block_hash: committed.block_hash,
             state_root: committed.state_root,
             block_input: input.block_input.to_vec(),
-            transactions: input.transactions.iter().map(Bytes::to_vec).collect(),
+            transactions: input
+                .transactions
+                .iter()
+                .map(|value| value.to_vec())
+                .collect(),
             l1_execution_input: input.l1_inputs.to_vec(),
             witness: input.replay_witness.to_vec(),
         })?;
@@ -475,9 +834,26 @@ pub struct FinalizedFastEpoch {
     pub epoch: u64,
     pub protocol_version: u32,
     pub threshold: u8,
+    /// Immutable on-chain proof policy included in the authority commitment.
+    pub proof_mode: u8,
+    pub expected_verifier_code_hash: B256,
+    pub expected_verifier_config_hash: B256,
     pub members: [Address; 3],
+    pub peer_portals: [Address; 9],
     pub roster_hash: B256,
     pub finalized_l1_block: u64,
+}
+
+/// Exact Portal fields read from the imported finalized T14 L1 state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalizedT14Capability {
+    pub epoch: FinalizedFastEpoch,
+    pub native_pin: B256,
+    pub t14_active_at_anchor: bool,
+    pub current_epoch: u64,
+    pub activated_at_l1_block: u64,
+    pub closed: bool,
+    pub retired: bool,
 }
 
 /// Capability token. It cannot be constructed from configuration or a local manifest.
@@ -486,9 +862,34 @@ pub struct FastActivation(Arc<FinalizedFastEpoch>);
 
 impl FastActivation {
     /// Validate finalized authority evidence and dependency compatibility.
-    pub fn from_finalized_epoch(epoch: FinalizedFastEpoch) -> Result<Self, ActivationError> {
-        if !PINNED_DEPENDENCIES_HAVE_FAST_EPOCH_REGISTRY {
-            return Err(ActivationError::UnsupportedPinnedDependencies);
+    pub fn from_finalized_epoch(evidence: FinalizedT14Capability) -> Result<Self, ActivationError> {
+        let epoch = evidence.epoch;
+        if evidence.native_pin != t14_fast_protocol_native_pin() {
+            return Err(ActivationError::NativePin {
+                expected: t14_fast_protocol_native_pin(),
+                actual: evidence.native_pin,
+            });
+        }
+        if !evidence.t14_active_at_anchor {
+            return Err(ActivationError::T14Inactive);
+        }
+        if epoch.finalized_l1_block == 0
+            || evidence.activated_at_l1_block == 0
+            || evidence.activated_at_l1_block > epoch.finalized_l1_block
+        {
+            return Err(ActivationError::NotFinalized);
+        }
+        if evidence.current_epoch != epoch.epoch {
+            return Err(ActivationError::NotCurrent {
+                expected: evidence.current_epoch,
+                actual: epoch.epoch,
+            });
+        }
+        // Closure revokes only new lock/quote admission. The exact historical roster remains
+        // authoritative for delayed resolves, outcomes, dispositions, proofs and retirement until
+        // the finalized registry marks it retired, including after a process restart.
+        if evidence.retired {
+            return Err(ActivationError::Retired);
         }
         if epoch.protocol_version != FAST_PROTOCOL_VERSION {
             return Err(ActivationError::ProtocolVersion {
@@ -499,9 +900,40 @@ impl FastActivation {
         if epoch.threshold != 2 {
             return Err(ActivationError::Threshold(epoch.threshold));
         }
+        if !matches!(epoch.proof_mode, 1 | 2)
+            || epoch.expected_verifier_code_hash.is_zero()
+            || epoch.expected_verifier_config_hash.is_zero()
+        {
+            return Err(ActivationError::ProofPolicy);
+        }
         let distinct = epoch.members.into_iter().collect::<BTreeSet<_>>();
         if distinct.len() != 3 || distinct.contains(&Address::ZERO) {
             return Err(ActivationError::Roster);
+        }
+        let peer_portals = epoch.peer_portals.into_iter().collect::<BTreeSet<_>>();
+        if peer_portals.len() != 9
+            || peer_portals.contains(&Address::ZERO)
+            || peer_portals.contains(&epoch.portal)
+        {
+            return Err(ActivationError::PeerRoster);
+        }
+        let expected_roster_hash = keccak256(
+            (
+                keccak256("TEMPO_ZONE_FAST_ROSTER_T14_V1"),
+                epoch.portal,
+                epoch.epoch,
+                epoch.protocol_version,
+                U256::from(epoch.threshold),
+                U256::from(epoch.proof_mode),
+                epoch.expected_verifier_code_hash,
+                epoch.expected_verifier_config_hash,
+                epoch.members.to_vec(),
+                epoch.peer_portals.to_vec(),
+            )
+                .abi_encode(),
+        );
+        if epoch.roster_hash != expected_roster_hash {
+            return Err(ActivationError::RosterHash);
         }
         let protocol_version = u16::try_from(epoch.protocol_version).map_err(|_| {
             ActivationError::ProtocolVersion {
@@ -509,7 +941,7 @@ impl FastActivation {
                 actual: epoch.protocol_version,
             }
         })?;
-        EpochRoster::new(
+        EpochRoster::from_finalized_registry(
             ZoneDomain {
                 l1_chain_id: epoch.l1_chain_id,
                 zone_id: epoch.zone_id,
@@ -532,14 +964,28 @@ impl FastActivation {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ActivationError {
-    #[error("pinned Tempo/native dependencies do not provide the finalized fast-epoch registry")]
-    UnsupportedPinnedDependencies,
+    #[error("T14 fast native compatibility pin mismatch: expected {expected}, got {actual}")]
+    NativePin { expected: B256, actual: B256 },
+    #[error("T14 is not active at the finalized L1 anchor")]
+    T14Inactive,
+    #[error("fast epoch activation is not included in finalized L1 state")]
+    NotFinalized,
+    #[error(
+        "fast epoch is not current: finalized current epoch {expected}, evidence epoch {actual}"
+    )]
+    NotCurrent { expected: u64, actual: u64 },
+    #[error("fast epoch is retired and has no remaining ordering authority")]
+    Retired,
     #[error("fast protocol version mismatch: expected {expected}, got {actual}")]
     ProtocolVersion { expected: u32, actual: u32 },
     #[error("fast epoch threshold must be two, got {0}")]
     Threshold(u8),
+    #[error("fast epoch proof mode and immutable verifier hashes must be enrolled")]
+    ProofPolicy,
     #[error("fast epoch must contain exactly three distinct nonzero members")]
     Roster,
+    #[error("fast epoch must contain exactly nine distinct nonzero peer Portals")]
+    PeerRoster,
     #[error("fast epoch roster hash does not match its members")]
     RosterHash,
 }
@@ -646,7 +1092,7 @@ impl SigningJournal for DurableJournal {
         signer: Address,
         signature: SignatureBytes,
     ) -> Result<(), Self::Error> {
-        DurableJournal::persist_signing_record(
+        Self::persist_signing_record(
             self,
             SigningRecord {
                 digest: body_digest,
@@ -660,20 +1106,54 @@ impl SigningJournal for DurableJournal {
     }
 }
 
-/// Fence a local signing function behind a durable committed-log record.
-pub fn sign_committed_outcome<J, F>(
+/// Reconstruct and sign an outcome locally behind roster, epoch, commit, and durability fences.
+pub fn sign_committed_outcome<J, R, F>(
     journal: &J,
     activation: &FastActivation,
     commit: &RaftCommit,
-    body_digest: B256,
     signer: Address,
+    reconstruct: R,
     sign: F,
 ) -> Result<SignatureBytes, SigningError<J::Error>>
 where
     J: SigningJournal,
+    R: FnOnce(&RaftCommit) -> CertificateBody,
     F: FnOnce(B256) -> SignatureBytes,
 {
-    // Construct locally, then persist the exact bytes before allowing them to escape this call.
+    let epoch = activation.epoch();
+    if !epoch.members.contains(&signer) {
+        return Err(SigningError::SignerNotInRoster(signer));
+    }
+    let body = reconstruct(commit);
+    let protocol_version =
+        u16::try_from(epoch.protocol_version).map_err(|_| SigningError::InvalidActivation)?;
+    let domain = ZoneDomain {
+        l1_chain_id: epoch.l1_chain_id,
+        zone_id: epoch.zone_id,
+        chain_id: epoch.zone_chain_id,
+        portal: epoch.portal,
+        authority_epoch: epoch.epoch,
+        roster_hash: epoch.roster_hash,
+        protocol_version,
+    };
+    if body.zone != domain
+        || body.log_term != commit.term
+        || body.log_index != commit.index
+        || body.block_height != commit.block.block_height
+        || body.block_hash != commit.block.block_hash
+        || body.state_root != commit.block.state_root
+    {
+        return Err(SigningError::OutcomeDoesNotMatchCommit);
+    }
+    let roster = EpochRoster::from_finalized_registry(domain, epoch.members)
+        .map_err(|_| SigningError::InvalidActivation)?;
+    let verifier = QuorumVerifier::new(roster);
+    let unsigned = OutcomeCertificate {
+        body,
+        signatures: [SignatureBytes([0; 65]); 2],
+    };
+    let body_digest = verifier.outcome_digest(&unsigned);
+    // Persist the exact locally derived signature before allowing it to escape this call.
     let signature = sign(body_digest);
     journal
         .persist_signing_record(
@@ -690,6 +1170,12 @@ where
 
 #[derive(Debug, thiserror::Error)]
 pub enum SigningError<E: std::error::Error + 'static> {
+    #[error("local signer {0} is not in the finalized epoch roster")]
+    SignerNotInRoster(Address),
+    #[error("finalized activation evidence is internally inconsistent")]
+    InvalidActivation,
+    #[error("locally reconstructed outcome does not match the committed term/index/result")]
+    OutcomeDoesNotMatchCommit,
     #[error("failed to durably record outcome signature: {0}")]
     Persistence(E),
 }
@@ -700,8 +1186,58 @@ mod tests {
 
     use super::*;
 
+    fn valid_activation_evidence(closed: bool, retired: bool) -> FinalizedT14Capability {
+        let members = [
+            Address::repeat_byte(1),
+            Address::repeat_byte(2),
+            Address::repeat_byte(3),
+        ];
+        let peer_portals = std::array::from_fn(|index| Address::with_last_byte(4 + index as u8));
+        let portal = Address::repeat_byte(20);
+        let epoch_number = 7;
+        let roster_hash = keccak256(
+            (
+                keccak256("TEMPO_ZONE_FAST_ROSTER_T14_V1"),
+                portal,
+                epoch_number,
+                FAST_PROTOCOL_VERSION,
+                U256::from(2),
+                U256::from(1),
+                B256::repeat_byte(21),
+                B256::repeat_byte(22),
+                members.to_vec(),
+                peer_portals.to_vec(),
+            )
+                .abi_encode(),
+        );
+        FinalizedT14Capability {
+            epoch: FinalizedFastEpoch {
+                l1_chain_id: 1,
+                portal,
+                zone_id: 1,
+                zone_chain_id: 101,
+                epoch: epoch_number,
+                protocol_version: FAST_PROTOCOL_VERSION,
+                threshold: 2,
+                proof_mode: 1,
+                expected_verifier_code_hash: B256::repeat_byte(21),
+                expected_verifier_config_hash: B256::repeat_byte(22),
+                members,
+                peer_portals,
+                roster_hash,
+                finalized_l1_block: 10,
+            },
+            native_pin: t14_fast_protocol_native_pin(),
+            t14_active_at_anchor: true,
+            current_epoch: epoch_number,
+            activated_at_l1_block: 9,
+            closed,
+            retired,
+        }
+    }
+
     #[test]
-    fn activation_is_fenced_until_dependencies_are_pinned() {
+    fn activation_rejects_wrong_t14_native_pin() {
         let epoch = FinalizedFastEpoch {
             l1_chain_id: 1,
             portal: Address::repeat_byte(1),
@@ -710,17 +1246,74 @@ mod tests {
             epoch: 1,
             protocol_version: FAST_PROTOCOL_VERSION,
             threshold: 2,
+            proof_mode: 1,
+            expected_verifier_code_hash: B256::repeat_byte(21),
+            expected_verifier_config_hash: B256::repeat_byte(22),
             members: [
                 Address::repeat_byte(1),
                 Address::repeat_byte(2),
                 Address::repeat_byte(3),
             ],
+            peer_portals: [
+                Address::repeat_byte(4),
+                Address::repeat_byte(5),
+                Address::repeat_byte(6),
+                Address::repeat_byte(7),
+                Address::repeat_byte(8),
+                Address::repeat_byte(9),
+                Address::repeat_byte(10),
+                Address::repeat_byte(11),
+                Address::repeat_byte(12),
+            ],
             roster_hash: B256::ZERO,
             finalized_l1_block: 1,
         };
+        let evidence = FinalizedT14Capability {
+            current_epoch: epoch.epoch,
+            activated_at_l1_block: epoch.finalized_l1_block,
+            epoch,
+            native_pin: B256::ZERO,
+            t14_active_at_anchor: true,
+            closed: false,
+            retired: false,
+        };
+        assert!(matches!(
+            FastActivation::from_finalized_epoch(evidence),
+            Err(ActivationError::NativePin { .. })
+        ));
+    }
+
+    #[test]
+    fn closed_unretired_epoch_retains_drain_authority_but_retired_epoch_does_not() {
+        assert!(
+            FastActivation::from_finalized_epoch(valid_activation_evidence(true, false)).is_ok()
+        );
         assert_eq!(
-            FastActivation::from_finalized_epoch(epoch).unwrap_err(),
-            ActivationError::UnsupportedPinnedDependencies
+            FastActivation::from_finalized_epoch(valid_activation_evidence(true, true))
+                .unwrap_err(),
+            ActivationError::Retired
+        );
+    }
+
+    #[test]
+    fn activation_binds_proof_mode_and_both_verifier_hashes() {
+        for field in 0..3 {
+            let mut evidence = valid_activation_evidence(false, false);
+            match field {
+                0 => evidence.epoch.proof_mode = 2,
+                1 => evidence.epoch.expected_verifier_code_hash = B256::repeat_byte(23),
+                _ => evidence.epoch.expected_verifier_config_hash = B256::repeat_byte(24),
+            }
+            assert_eq!(
+                FastActivation::from_finalized_epoch(evidence).unwrap_err(),
+                ActivationError::RosterHash
+            );
+        }
+        let mut evidence = valid_activation_evidence(false, false);
+        evidence.epoch.proof_mode = 0;
+        assert_eq!(
+            FastActivation::from_finalized_epoch(evidence).unwrap_err(),
+            ActivationError::ProofPolicy
         );
     }
 

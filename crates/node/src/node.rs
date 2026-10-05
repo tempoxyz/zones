@@ -5,6 +5,20 @@
 
 use crate::{
     ZoneEngine,
+    fast_batch::FastBatchScheduler,
+    fast_execution::CanonicalFastExecution,
+    fast_network::serve_fast_raft,
+    fast_quorum::CanonicalFastSettlementBoundary,
+    fast_runtime::{
+        ExactAnchorActivationRefresh, FastRuntimeConfig, ProductionCommittedTransferSource,
+        ProductionOutcomeCertification, ProductionPeerHandler, assemble_production_fast_runtime,
+        initialize_production_fast_runtime, load_fast_activation, load_fast_service_config,
+        run_replenishment_route,
+    },
+    fast_service_adapters::{
+        FastServiceCommonwarePort, FastServiceHandle, ZoneNativeTransactionConfig,
+        assemble_fast_service,
+    },
     follower::PeerTipRegistry,
     replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
@@ -13,12 +27,13 @@ use crate::{
         route_events_to_generations, run_role_controller,
     },
     rpc::{
-        NodeZoneDebugApi, OperatorWeb3Api, OperatorZoneApi, SequencerRpcContext,
-        ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
-        start_redacted_rpc,
+        FastTransferRpcReader, NodeZoneDebugApi, OperatorWeb3Api, OperatorZoneApi,
+        SequencerRpcContext, ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module,
+        rpc_connection_config, start_redacted_rpc,
     },
-    settlement_attestation::AttestationContext,
+    settlement_attestation::{AttestationContext, sign_fast_settlement_proposal},
     shadow_prover::RpcFollowerShadowProver,
+    tx_forwarding::{forward_new_transactions, insert_forwarded_transactions},
 };
 use alloy_chains::Chain;
 use alloy_consensus::{BlockHeader as _, TxReceipt as _};
@@ -56,13 +71,16 @@ use reth_storage_api::{
 };
 use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
-    Pool, PoolTransaction, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
-    error::InvalidPoolTransactionError,
+    Pool, PoolTransaction, TransactionPool as _, TransactionValidationTaskExecutor,
+    blobstore::InMemoryBlobStore, error::InvalidPoolTransactionError,
 };
 use std::{
     num::NonZeroU32,
-    sync::{Arc, OnceLock},
-    time::Duration,
+    sync::{
+        Arc, OnceLock, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempo_alloy::TempoNetwork;
 use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
@@ -87,7 +105,7 @@ use tempo_zone_contracts::{
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
-use zone_evm::ZoneEvmConfig;
+use zone_evm::{ZoneEvmConfig, same_anchor::SameAnchorOpening};
 use zone_l1::{
     DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
     L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt, encryption_key_address,
@@ -97,7 +115,7 @@ use zone_l1::{
 };
 use zone_p2p::{
     BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pCommand, P2pConfig,
-    P2pNetworkId, P2pPeerId, ZoneManifest, spawn_p2p,
+    P2pEvent, P2pNetworkId, P2pPeerId, ZoneManifest, spawn_p2p,
 };
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
@@ -107,9 +125,9 @@ use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle, ProverAddresses,
-    SettlementManager, SettlementProver, SettlementProverConfig, WithdrawalBatchLimits,
-    ZoneSequencerConfig, attestation::AttestationDomain, create_proof_collector,
-    spawn_settlement_prover, spawn_shadow_prover, spawn_zone_sequencer,
+    SettlementManager, SettlementProofMode, SettlementProver, SettlementProverConfig,
+    WithdrawalBatchLimits, ZoneSequencerConfig, attestation::AttestationDomain,
+    create_proof_collector, spawn_settlement_prover, spawn_shadow_prover, spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -131,6 +149,63 @@ fn validate_configured_zone_id(
         "zone ID mismatch: {source} has {configured_zone_id}, but portal has {portal_zone_id}"
     );
     Ok(())
+}
+
+fn latest_canonical_fast_boundary<P>(
+    provider: &P,
+    through: u64,
+    expected_through_hash: Option<alloy_primitives::B256>,
+) -> eyre::Result<CanonicalFastSettlementBoundary>
+where
+    P: BlockNumReader
+        + HeaderProvider<Header = TempoHeader>
+        + ReceiptProvider<Receipt = primitives::TempoReceipt>,
+{
+    if let Some(expected) = expected_through_hash {
+        let actual = provider
+            .sealed_header(through)?
+            .ok_or_else(|| eyre::eyre!("missing canonical predecessor header {through}"))?
+            .hash();
+        eyre::ensure!(
+            actual == expected,
+            "durable fast prefix parent {expected} is not canonical at height {through} ({actual})"
+        );
+    }
+    for number in (0..=through).rev() {
+        let Some(receipts) = provider.receipts_by_block(BlockHashOrNumber::Number(number))? else {
+            continue;
+        };
+        let mut boundary_count = 0usize;
+        for log in receipts.iter().flat_map(|receipt| receipt.logs()) {
+            if log.address == ZONE_OUTBOX_ADDRESS
+                && log.topics().first()
+                    == Some(&zone_payload::abi::IZoneOutbox::BatchFinalized::SIGNATURE_HASH)
+            {
+                zone_payload::abi::IZoneOutbox::BatchFinalized::decode_log(log)
+                    .map_err(|error| eyre::eyre!("invalid BatchFinalized log: {error}"))?;
+                boundary_count += 1;
+            }
+        }
+        eyre::ensure!(
+            boundary_count <= 1,
+            "canonical block {number} contains multiple BatchFinalized events"
+        );
+        if boundary_count == 0 {
+            continue;
+        }
+        let header = provider
+            .sealed_header(number)?
+            .ok_or_else(|| eyre::eyre!("missing canonical fast boundary header {number}"))?;
+        let boundary = CanonicalFastSettlementBoundary {
+            block_height: number,
+            block_hash: header.hash(),
+            timestamp_millis: header.timestamp_millis(),
+        };
+        return Ok(boundary);
+    }
+    Err(eyre::eyre!(
+        "T14 activation has no canonical BatchFinalized boundary"
+    ))
 }
 
 /// Network primitives for Zone Nodes
@@ -202,6 +277,10 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
+    /// Explicit settlement security mode, independently checked against finalized enrollment.
+    pub settlement_proof_mode: SettlementProofMode,
+    /// Fsync-backed settlement preparation/evidence directory.
+    pub settlement_store_path: PathBuf,
 }
 
 /// How this node validates Zone batches with the SPF.
@@ -285,6 +364,8 @@ pub struct ZoneNode {
     prover_config: Option<ZoneProverConfig>,
     /// Optional static Zone P2P networking config.
     p2p_config: Option<P2pConfig>,
+    /// Optional local resources for a finalized-enrolled T14 runtime.
+    fast_runtime_config: Option<FastRuntimeConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
 }
@@ -333,6 +414,7 @@ impl ZoneNode {
             sequencer_config: None,
             prover_config: None,
             p2p_config: None,
+            fast_runtime_config: None,
             external_deposit_consumer: false,
         }
     }
@@ -394,6 +476,12 @@ impl ZoneNode {
     /// Enable static Zone P2P networking for this node.
     pub fn with_p2p(mut self, config: P2pConfig) -> Self {
         self.p2p_config = Some(config);
+        self
+    }
+
+    /// Configure local resources that may be used only after finalized T14 enrollment validates.
+    pub fn with_fast_runtime(mut self, config: FastRuntimeConfig) -> Self {
+        self.fast_runtime_config = Some(config);
         self
     }
 
@@ -500,6 +588,8 @@ where
     prover_config: Option<ZoneProverConfig>,
     /// Static Zone P2P networking configuration.
     p2p_config: Option<P2pConfig>,
+    /// Local resources for finalized T14 enrollment.
+    fast_runtime_config: Option<FastRuntimeConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
 }
@@ -532,6 +622,7 @@ where
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         prover_config: Option<ZoneProverConfig>,
         p2p_config: Option<P2pConfig>,
+        fast_runtime_config: Option<FastRuntimeConfig>,
         external_deposit_consumer: bool,
     ) -> Self {
         Self {
@@ -554,6 +645,7 @@ where
             sequencer_config,
             prover_config,
             p2p_config,
+            fast_runtime_config,
             external_deposit_consumer,
         }
     }
@@ -571,6 +663,8 @@ struct P2PRuntime {
     role_status: SharedRoleStatus,
     peer_tips: PeerTipRegistry,
     backfill_requests_rx: Receiver<BackfillRequest>,
+    raft: Option<zone_p2p::RaftPorts>,
+    inter_zone: Option<zone_p2p::InterZoneServicePorts>,
 }
 
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
@@ -606,7 +700,8 @@ where
             "no Zone chain advancement mechanism configured: enable a sequencer, configure P2P, or register an external deposit consumer"
         );
 
-        let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
+        let imported_tempo_anchor = ctx.node.provider().latest()?.tempo_num_hash()?;
+        let tempo_block_number = imported_tempo_anchor.number;
         let last_operational_tempo_block = latest_operational_tempo_block(ctx.node.provider())?;
         if last_operational_tempo_block < tempo_block_number {
             self.l1_config.deferred_work_start =
@@ -623,6 +718,27 @@ where
         let chain_spec = ctx.node.provider().chain_spec();
         let chain_id = chain_spec.genesis().config.chain_id;
         let genesis_zone_id = chain_spec.zone_id();
+        let fast_activation = if self.portal_address.is_zero() {
+            None
+        } else {
+            load_fast_activation(
+                &l1_provider,
+                self.portal_address,
+                &chain_spec,
+                imported_tempo_anchor,
+                genesis_zone_id,
+                chain_id,
+            )
+            .await?
+        };
+        if fast_activation.is_some() && self.fast_runtime_config.is_none() {
+            return Err(eyre::eyre!(
+                "Zone is enrolled in a finalized T14 fast epoch but local member endpoints, key, and durable storage are not configured"
+            ));
+        }
+        if fast_activation.is_none() && self.fast_runtime_config.is_some() {
+            warn!(target: "reth::cli", "Fast runtime resources are configured, but this Zone is not finalized-enrolled; preserving legacy authority");
+        }
         // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
         // explicit sentinel because they have no on-chain portal to bind against.
         if self.portal_address.is_zero() {
@@ -765,7 +881,7 @@ where
 
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
-        let p2p_runtime = if let Some(config) = self.p2p_config.take() {
+        let mut p2p_runtime = if let Some(config) = self.p2p_config.take() {
             Some(
                 Self::start_p2p(
                     config.with_storage_directory(ctx.config.datadir().data_dir().join("p2p")),
@@ -909,6 +1025,336 @@ where
             proof_collector = Some(collector);
         }
 
+        let mut fast_production = None;
+        let mut fast_service = None;
+        eyre::ensure!(
+            fast_activation.is_some() == self.fast_runtime_config.is_some(),
+            "finalized T14 activation and explicit fast runtime resources must both be present"
+        );
+        let fast_runtime = if let (Some(loaded_activation), Some(mut config)) =
+            (fast_activation, self.fast_runtime_config.take())
+        {
+            config.validate()?;
+            let replenishment_routes = std::mem::take(&mut config.replenishment_routes);
+            let service_resources = config.service.clone();
+            let allow_initialize = loaded_activation.allow_initialize;
+            let admission_open = loaded_activation.admission_open;
+            let proof_policy = loaded_activation.proof_policy;
+            let enrolled_proof_mode = match proof_policy.mode {
+                1 => SettlementProofMode::OperatorAttested,
+                2 => SettlementProofMode::ProofRequired,
+                mode => return Err(eyre::eyre!("invalid finalized proof mode {mode}")),
+            };
+            let sequencer_proof_mode = self
+                .sequencer_config
+                .as_ref()
+                .ok_or_else(|| {
+                    eyre::eyre!("finalized T14 enrollment requires sequencer settlement resources")
+                })?
+                .settlement_proof_mode;
+            eyre::ensure!(
+                sequencer_proof_mode == enrolled_proof_mode,
+                "configured settlement proof mode does not match finalized fast enrollment"
+            );
+            eyre::ensure!(
+                enrolled_proof_mode.verifier_mode().config_hash()
+                    == proof_policy.expected_verifier_config_hash,
+                "configured verifier mode hash does not match finalized fast enrollment"
+            );
+            eyre::ensure!(
+                enrolled_proof_mode != SettlementProofMode::ProofRequired
+                    || settlement_prover.is_some(),
+                "proof-required fast enrollment requires an active settlement prover"
+            );
+            let anchor_timestamp = loaded_activation.anchor_timestamp;
+            let anchor_timestamp_millis_part = loaded_activation.anchor_timestamp_millis_part;
+            let activation = loaded_activation.activation;
+            eyre::ensure!(
+                proof_collector.is_some(),
+                "finalized T14 enrollment requires durable witness/prover configuration"
+            );
+            let p2p = p2p_runtime.as_mut().ok_or_else(|| {
+                eyre::eyre!("finalized T14 enrollment requires authenticated P2P runtime")
+            })?;
+            let raft_ports = p2p
+                .raft
+                .take()
+                .ok_or_else(|| eyre::eyre!("authenticated Raft ports already consumed"))?;
+            let inter_zone_ports = match &service_resources {
+                Some(_) => Some(p2p.inter_zone.take().ok_or_else(|| {
+                    eyre::eyre!("C4 service requires dedicated inter-Zone Commonware ports")
+                })?),
+                None => {
+                    eyre::ensure!(
+                        p2p.inter_zone.is_none(),
+                        "inter-Zone Commonware was configured without C4 service resources"
+                    );
+                    None
+                }
+            };
+            let commands = p2p.commands.clone();
+            // Bind production to the same locally imported TempoState used to validate the
+            // finalized registry capability above. A later local head must not splice evidence.
+            let anchor = imported_tempo_anchor;
+            let expected_epoch = activation.epoch().epoch;
+            let authority_anchor = Arc::new(RwLock::new(SameAnchorOpening::v1(
+                anchor.number,
+                anchor.hash,
+                anchor_timestamp,
+                anchor_timestamp_millis_part,
+                expected_epoch,
+            )));
+            let authority_admission = crate::fast_quorum::FastAdmissionClock::default();
+            authority_admission.observe_finalized(anchor.number, anchor.hash)?;
+            let authority_active = Arc::new(AtomicBool::new(true));
+            let authority_admission_open = Arc::new(AtomicBool::new(admission_open));
+            let activation_refresh = Arc::new(ExactAnchorActivationRefresh::new(
+                l1_provider.clone(),
+                self.portal_address,
+                chain_spec.clone(),
+                genesis_zone_id,
+                chain_id,
+                activation.clone(),
+                proof_policy,
+            ));
+            let execution = Arc::new(CanonicalFastExecution::open(
+                tokio::runtime::Handle::current(),
+                engine_handle.clone(),
+                provider.clone(),
+                proof_collector.clone(),
+                self.deposit_queue.clone(),
+                self.l1_block_tracker.clone(),
+                expected_epoch,
+                authority_anchor.clone(),
+                authority_admission.clone(),
+                authority_active.clone(),
+                authority_admission_open.clone(),
+                activation_refresh,
+                config.storage.join("execution"),
+            )?);
+            let outcome_activation = activation.clone();
+            let outcome_signer = config.signer.clone();
+            let resolved_service = match service_resources.as_ref() {
+                Some(service) => Some(
+                    load_fast_service_config(
+                        &l1_provider,
+                        imported_tempo_anchor,
+                        &activation,
+                        outcome_signer.address(),
+                        service,
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
+            let assembled = assemble_production_fast_runtime(
+                activation,
+                proof_policy,
+                allow_initialize,
+                config,
+                &provider,
+                execution.clone(),
+                commands.clone(),
+                raft_ports,
+            )
+            .await?;
+            let certification = Arc::new(ProductionOutcomeCertification::new(
+                execution.clone(),
+                outcome_activation,
+                outcome_signer,
+                assembled.transport.clone(),
+                assembled.local_node_id,
+            ));
+            let pending_service = match (resolved_service, service_resources, inter_zone_ports) {
+                (Some(config), Some(resources), Some(ports)) => Some((config, resources, ports)),
+                (None, None, None) => None,
+                _ => return Err(eyre::eyre!("incomplete C4 runtime resources")),
+            };
+            let batch_committed = assembled.runtime.committed_handle().clone();
+            let applied_prefix = batch_committed
+                .applied_blocks()
+                .map_err(|error| eyre::eyre!(error.to_string()))?;
+            let (boundary_search_height, boundary_parent_hash) = applied_prefix
+                .first()
+                .map(|applied| {
+                    (
+                        applied.output.block_height.saturating_sub(1),
+                        Some(applied.input.parent_hash),
+                    )
+                })
+                .unwrap_or((provider.best_block_number()?, None));
+            let initial_batch_boundary = latest_canonical_fast_boundary(
+                &provider,
+                boundary_search_height,
+                boundary_parent_hash,
+            )?;
+            let batch = FastBatchScheduler::new(
+                initial_batch_boundary,
+                Arc::new(move || {
+                    batch_committed
+                        .applied_blocks()
+                        .map_err(|error| error.to_string())
+                }),
+            );
+            execution.install_fast_batch_scheduler(batch.clone())?;
+            // Validate the entire recovered fsynced prefix before serving peer requests.
+            batch.status(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?,
+            )?;
+            let certificate_recovery = certification.clone();
+            task_executor.spawn_critical_task("fast-certificate-recovery", async move {
+                loop {
+                    if let Err(error) = certificate_recovery.certify_pending().await {
+                        warn!(target: "zone::fast", %error, "retrying committed outcome certificate recovery");
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+            let production = crate::engine::FastProduction {
+                raft: assembled.runtime.raft.clone(),
+                local_node_id: assembled.local_node_id,
+                epoch: assembled.epoch,
+                anchor: authority_anchor,
+                admission: authority_admission,
+                pending: Arc::new(AtomicBool::new(false)),
+                notified: Arc::new(tokio::sync::Notify::new()),
+                authority_active,
+                admission_open: authority_admission_open,
+                batch,
+                certification: certification.clone(),
+            };
+            let mut transactions = pool.new_transactions_listener();
+            let notifier = production.clone();
+            task_executor.spawn_critical_task("fast-transaction-scheduler", async move {
+                while transactions.recv().await.is_some() {
+                    notifier.notify_transaction();
+                }
+                panic!("transaction pool listener closed")
+            });
+            let boundary_notifier = production.clone();
+            task_executor.spawn_critical_task("fast-boundary-scheduler", async move {
+                loop {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system time precedes Unix epoch")
+                        .as_millis()
+                        .try_into()
+                        .expect("Unix milliseconds fit u64");
+                    let status = boundary_notifier
+                        .batch
+                        .status(now)
+                        .expect("failed to reconstruct canonical fast batch prefix");
+                    if status.pending_retained_bytes > 0 && status.due.is_some() {
+                        boundary_notifier.notify_transaction();
+                    }
+                    let delay = if status.pending_retained_bytes == 0 {
+                        500
+                    } else if status.due.is_some() {
+                        1
+                    } else {
+                        status.next_deadline_unix_millis.saturating_sub(now).max(1)
+                    };
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+            });
+            let leadership_notifier = production.clone();
+            task_executor.spawn_critical_task("fast-leadership-scheduler", async move {
+                let mut metrics = leadership_notifier.raft.inner().metrics();
+                while metrics.changed().await.is_ok() {
+                    if metrics.borrow().current_leader == Some(leadership_notifier.local_node_id)
+                        && leadership_notifier.pending.load(Ordering::Acquire)
+                    {
+                        leadership_notifier.notified.notify_one();
+                    }
+                }
+                panic!("fast Raft metrics stream closed")
+            });
+            fast_production = Some(production);
+            let runtime = assembled.runtime.clone();
+            let initial_membership = assembled.initial_membership;
+            let needs_initialize = assembled.needs_initialize;
+            let local_node_id = assembled.local_node_id;
+            let peer_handler = Arc::new(ProductionPeerHandler::new(
+                runtime.clone(),
+                certification.clone(),
+            ));
+            task_executor.spawn_critical_task("fast-raft-network", async move {
+                if let Err(error) = serve_fast_raft(
+                    assembled.transport.config().clone(),
+                    assembled.commands,
+                    assembled.requests,
+                    peer_handler,
+                )
+                .await
+                {
+                    panic!("authenticated fast Raft network stopped: {error}");
+                }
+            });
+            initialize_production_fast_runtime(
+                runtime.as_ref(),
+                local_node_id,
+                needs_initialize,
+                initial_membership,
+            )
+            .await?;
+            if let Some((service_config, service_resources, inter_zone_ports)) = pending_service {
+                let committed = Arc::new(ProductionCommittedTransferSource::new(
+                    runtime.committed_handle().clone(),
+                    certification.clone(),
+                ));
+                let native = ZoneNativeTransactionConfig::connect(
+                    &service_resources.native_rpc_endpoint,
+                    service_resources.operator_signer,
+                    service_resources.native_chain_id,
+                    service_resources.fee_token,
+                    service_resources.commit_timeout,
+                )
+                .await?;
+                let commonware = FastServiceCommonwarePort::new(
+                    inter_zone_ports,
+                    service_resources.response_timeout,
+                )?;
+                fast_service = Some(Arc::new(
+                    assemble_fast_service(
+                        service_config,
+                        execution.protocol_journal(),
+                        commonware,
+                        committed,
+                        native,
+                        pool.clone(),
+                    )
+                    .await?,
+                ));
+            }
+            let replenishment_journal = execution.protocol_journal();
+            let replenishment_committed = runtime.committed_handle().clone();
+            for route in replenishment_routes {
+                let route_committed = replenishment_committed.clone();
+                let route_journal = replenishment_journal.clone();
+                task_executor.spawn_critical_task("fast-replenishment", async move {
+                    if let Err(error) = run_replenishment_route(
+                        route,
+                        route_committed,
+                        route_journal,
+                        tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+                    {
+                        panic!("provider-backed replenishment worker stopped: {error}");
+                    }
+                });
+            }
+            Some(runtime)
+        } else {
+            None
+        };
+        let fast_reader: Option<Arc<dyn FastTransferRpcReader>> = fast_runtime
+            .as_ref()
+            .map(|runtime| Arc::new(runtime.committed_handle().clone()) as Arc<_>);
+
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,
             &handle,
@@ -918,10 +1364,134 @@ where
             self.enabled_tokens.clone(),
             chain_id,
             max_response_size,
+            fast_reader,
+            fast_service,
         )
         .await?;
 
-        if let Some(P2PRuntime {
+        if let Some(production) = fast_production {
+            let p2p = p2p_runtime.take().ok_or_else(|| {
+                eyre::eyre!("finalized T14 member lost its authenticated P2P runtime")
+            })?;
+            let (mut settlement_events, transaction_events) = p2p.sinks.install_fast_events();
+            task_executor.spawn_critical_task(
+                "fast-transaction-forwarding",
+                forward_new_transactions(
+                    pool.clone(),
+                    pool.new_transactions_listener(),
+                    p2p.commands.clone(),
+                ),
+            );
+            task_executor.spawn_critical_task(
+                "fast-transaction-import",
+                insert_forwarded_transactions(pool.clone(), transaction_events),
+            );
+            let config = self.sequencer_config.take().ok_or_else(|| {
+                eyre::eyre!("finalized T14 member must be configured to build and settle blocks")
+            })?;
+            let committed = fast_runtime
+                .as_ref()
+                .expect("fast production has a maintained Raft runtime")
+                .committed_handle()
+                .clone();
+            let settlement_committed = committed.clone();
+            let settlements = p2p
+                .settlements
+                .ok_or_else(|| eyre::eyre!("fast member has no settlement manager"))?
+                .with_committed_guard(Arc::new(move |height, hash| {
+                    let head = settlement_committed
+                        .committed_head()
+                        .map_err(|error| eyre::eyre!(error))?
+                        .ok_or_else(|| eyre::eyre!("fast Raft has no durable committed head"))?;
+                    eyre::ensure!(
+                        head.block.block_height == height && head.block.block_hash == hash,
+                        "settlement endpoint ({height}, {hash}) is not the durable Raft committed head ({}, {})",
+                        head.block.block_height,
+                        head.block.block_hash,
+                    );
+                    Ok(())
+                }));
+            let signing_committed = committed.clone();
+            let attestation = p2p.attestation.with_committed_guard(Arc::new(
+                move |height, hash| {
+                    let head = signing_committed
+                        .committed_head()
+                        .map_err(|error| eyre::eyre!(error))?
+                        .ok_or_else(|| eyre::eyre!("fast Raft has no durable committed head"))?;
+                    eyre::ensure!(
+                        head.block.block_height == height && head.block.block_hash == hash,
+                        "settlement endpoint ({height}, {hash}) is not the durable Raft committed head ({}, {})",
+                        head.block.block_height,
+                        head.block.block_hash,
+                    );
+                    Ok(())
+                },
+            ));
+            let settlement_provider = provider.clone();
+            let settlement_commands = p2p.commands.clone();
+            let signature_collector = settlements.clone();
+            task_executor.spawn_critical_task("fast-settlement-peer", async move {
+                while let Some(event) = settlement_events.recv().await {
+                    match event {
+                        P2pEvent::SettlementSignatureReceived { follower, signature } => {
+                            if let Err(error) = signature_collector.add_signature(follower, &signature) {
+                                warn!(target: "zone::fast", %error, "rejected fast settlement signature");
+                            }
+                        }
+                        P2pEvent::SettlementProposalReceived { leader, proposal } => {
+                            if let Err(error) = sign_fast_settlement_proposal(
+                                &settlement_provider,
+                                &attestation,
+                                leader,
+                                proposal,
+                                &settlement_commands,
+                            )
+                            .await
+                            {
+                                warn!(target: "zone::fast", %error, "rejected fast settlement proposal");
+                            }
+                        }
+                        P2pEvent::Started { .. }
+                        | P2pEvent::BlockReceived { .. }
+                        | P2pEvent::TransactionReceived { .. } => {}
+                    }
+                }
+                panic!("fast settlement event stream closed")
+            });
+            let sequencer_addr = config.sequencer_signer.address();
+            let last_header = provider
+                .sealed_header(provider.best_block_number()?)?
+                .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+            let engine = ZoneEngine::new(
+                provider.chain_spec(),
+                engine_handle,
+                payload_builder,
+                self.deposit_queue.clone(),
+                self.l1_block_tracker.clone(),
+                last_header,
+                sequencer_addr,
+                self.encryption_keys
+                    .clone()
+                    .expect("fast member configures deposit decryption keys"),
+                self.portal_address,
+                proof_collector.clone(),
+            )
+            .with_fast_production(production);
+            task_executor.spawn_critical_task("fast-zone-engine", engine.run());
+            Self::launch_sequencer_tasks(
+                config,
+                &handle,
+                zone_provider,
+                &task_executor,
+                self.l1_config.l1_rpc_url,
+                self.l1_config.portal_address,
+                self.l1_config.retry_connection_interval,
+                sequencer_addr,
+                settlement_prover,
+                Some(settlements),
+            )
+            .await?;
+        } else if let Some(P2PRuntime {
             sinks,
             commands,
             backfill_commands,
@@ -932,6 +1502,8 @@ where
             role_status,
             peer_tips,
             backfill_requests_rx,
+            raft: _raft,
+            inter_zone: _inter_zone,
         }) = p2p_runtime
         {
             // Backfill serving is role-neutral: every role serves the same canonical
@@ -1025,6 +1597,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 settlement_prover,
+                None,
             )
             .await?;
         }
@@ -1303,7 +1876,7 @@ where
         let individual_signer = config.block_attestation_signer();
         let (backfill_requests_tx, backfill_requests_rx) =
             tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
-        let (sinks, commands, backfill_commands) =
+        let (sinks, commands, backfill_commands, raft, inter_zone) =
             Self::launch_p2p_network(config, network_id, task_executor, backfill_requests_tx)?;
 
         let settlements = attestation.signer.clone().map(|signer| {
@@ -1370,6 +1943,8 @@ where
             role_status,
             peer_tips,
             backfill_requests_rx,
+            raft: Some(raft),
+            inter_zone,
         })
     }
 
@@ -1386,6 +1961,8 @@ where
         EventSinks,
         tokio::sync::mpsc::Sender<zone_p2p::P2pCommand>,
         tokio::sync::mpsc::Sender<BackfillCommand>,
+        zone_p2p::RaftPorts,
+        Option<zone_p2p::InterZoneServicePorts>,
     )> {
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
@@ -1395,6 +1972,8 @@ where
             commands,
             events,
             backfill,
+            raft,
+            inter_zone,
         } = handle.into_parts();
 
         let sinks = EventSinks::default();
@@ -1445,7 +2024,7 @@ where
                 }
             },
         );
-        Ok((sinks, commands, backfill.commands))
+        Ok((sinks, commands, backfill.commands, raft, inter_zone))
     }
 
     /// Build the leader-generation sequencer dependencies (activated only while leader).
@@ -1469,6 +2048,8 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
+            settlement_proof_mode: config.settlement_proof_mode,
+            settlement_store_path: config.settlement_store_path.clone(),
         };
         Ok(LeaderSequencerDeps {
             config,
@@ -1607,6 +2188,8 @@ where
         enabled_tokens: EnabledTokenRegistry,
         chain_id: u64,
         max_response_size: usize,
+        fast_transfers: Option<Arc<dyn FastTransferRpcReader>>,
+        fast_service: Option<Arc<FastServiceHandle>>,
     ) -> eyre::Result<()> {
         let eth_handlers = handle.eth_handlers().clone();
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -1629,6 +2212,8 @@ where
             redacted_rpc_config.clone(),
             enabled_tokens,
             l1_provider,
+            fast_transfers,
+            fast_service,
         ));
         let local_addr = start_redacted_rpc(redacted_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Redacted zone RPC server started");
@@ -1648,6 +2233,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         settlement_prover: Option<SettlementProver>,
+        settlements: Option<SettlementManager>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
@@ -1661,6 +2247,8 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
+            settlement_proof_mode: config.settlement_proof_mode,
+            settlement_store_path: config.settlement_store_path.clone(),
         };
         let l1_transaction_signer = config
             .l1_transaction_signer
@@ -1671,7 +2259,7 @@ where
             l1_transaction_signer,
             zone_provider,
             settlement_prover,
-            None,
+            settlements,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
@@ -1793,6 +2381,7 @@ where
             self.sequencer_config.clone(),
             self.prover_config.clone(),
             self.p2p_config.clone(),
+            self.fast_runtime_config.clone(),
             self.external_deposit_consumer,
         )
     }

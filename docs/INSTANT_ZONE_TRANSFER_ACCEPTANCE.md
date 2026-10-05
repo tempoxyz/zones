@@ -1,44 +1,57 @@
 # Instant Zone transfer acceptance status
 
-This draft is not the completed instant-transfer protocol. Fast execution stays disabled and no
-ten-Zone payment, replenishment, chaos, or throughput result is claimed. The source specification
+## Current request scope
+
+The requester selected the existing T14 boundary and waived the ten-Zone E2E suite in the
+[follow-up request](https://tempoxyz.enterprise.slack.com/archives/C0A87C21805/p1791165862088099).
+All other protocol implementation and tests remain in scope. The sections below record the
+previous draft's validation boundary; they are not current-turn implementation acceptance.
+The T14 implementation and fresh independent tests are in progress.
+
+This worktree is not yet the completed instant-transfer protocol. Concrete OpenRaft execution,
+Commonware transport, private RPC, native escrow, real replenishment providers and T14 batch
+boundaries are implemented in source; the integrated build, native drain and checkpoint handoff
+are still being corrected and validated. No runtime replenishment, chaos, or throughput result is claimed. The source specification
 is attached to the [implementation request](https://tempoxyz.enterprise.slack.com/archives/C0A87C21805/p1791158720260559).
 Its latency figures are measurement objectives, not hard acceptance cutoffs for this request.
 
-## Required protocol decision
+## T14 protocol decision
 
-The specification requires a coordinated opt-in protocol upgrade but does not assign a Tempo
-hardfork/TIP or pin a functioning proof-required verifier configuration. Reusing T13 changes
-historical consensus; adding the behavior to the existing T14 upgrade also requires an explicit
-protocol-owner decision. Neither has been inferred here.
+The requester selected T14 as the coordinated opt-in boundary. Same-anchor opening validation,
+ordinary TIP-20 transfers, native fast-transfer registration, and the exact nonzero protocol pin
+therefore activate at T14 while pre-T14 behavior remains unchanged. Proof-required settlement is
+an explicit fail-closed configuration. Operator-attested settlement is a separately enrolled mode,
+never an implicit fallback for missing or invalid proof-required evidence.
 
-The pinned Tempo revision has no finalized fast-epoch factory dispatch, matching Portal runtime,
-same-anchor capability, or new proof format. The native factory installs ERC-1167 Portal proxies;
-Portal calls execute the shared Solidity runtime, not a native Portal precompile. Runtime bytes,
-native factory storage initialization, genesis installation, hardfork replacement, and Rust ABI
-bindings must change together in the matching Tempo prerequisite.
+All direct Tempo dependencies are pinned to
+[`19082cd8a0b7d3f5b3acf84683f3306710180f3b`](https://github.com/tempoxyz/tempo/commit/19082cd8a0b7d3f5b3acf84683f3306710180f3b),
+published in [Tempo #8118](https://github.com/tempoxyz/tempo/pull/8118). This includes typed finalized
+epoch storage, native factory dispatch and the matching T14 Portal runtime. The embedded runtime
+was byte-for-byte compared with the compiled Solidity source: 37,856 bytes with hash
+`0xc25a2bb761ce6eb1338b45a53de4a22ab13b9d88d3a8d83a523bcc1ac69fa5d7`.
+This is source/build verification, not a production deployment or activation.
 
 ## Implementation boundaries
 
 | Requirement | Draft work | Remaining acceptance prerequisite |
 | --- | --- | --- |
-| C1: fork and same-anchor execution | Encoded opening, payload/executor/SPF representation and fail-closed gates | Selected fork, anchored epoch import, hardfork-policy validation, transaction-arrival scheduler and live clock admission |
-| C2: durable quorum commitment | Maintained OpenRaft adapter and committed-outcome/replay/signing interfaces | Persistent Raft storage, authenticated replica network, node assembly, recovery, canonical-head promotion and fault tests |
-| C3: native escrow and pools | Dormant ABI/state transitions and existing-token accounting | Unified EVM/transport identity and encoding, finalized registry/asset/quote verification, atomic token/policy acceptance and real execution tests |
-| C4: direct operator protocol | Canonical peer messages and fsynced service journal | Mutually authenticated streams, replica endpoint reconnection, committed-state worker reconstruction and private RPC/subscriptions |
-| C5: recovery and admission | Count/value/byte budgets, replay markers and monotonic states | Actual committed recovery, reserved terminal throughput, policy-blocked liabilities and all nine authenticated peer barriers |
-| C6: replenishment | Permanent job identities, amount/nonce reconciliation records and stage transitions | Actual source allocation/withdrawal, treasury reconciliation, encrypted deposit, canonical bounce/refund evidence and fee accounting |
-| C7: ten-Zone proof of behavior | Explicit failing real-factory infrastructure gate | Ten distinct Zones with three durable replicas each, real funding, A→B→C/local spend, accepted-proof settlement and full fault/load suite |
+| C1: fork and same-anchor execution | T14 payload/executor/SPF, TIP-20 forwarding, durable 500 ms / 1 MiB boundary scheduler and actual finalization transaction | Integrated boundary/import/policy/replay tests |
+| C2: durable quorum commitment | OpenRaft, fsynced log/state/snapshot, canonical execution, authenticated replica network and durable witness signing | Execute the independently authored three-replica fault tests and remaining recovery coverage |
+| C3: native escrow and pools | Shared identity, typed anchored epoch and asset checks, certificate and accepted-ancestry retirement | Correct and rerun closed-epoch lock inclusion and current native acceptance fixtures |
+| C4: direct operator protocol | Dedicated encrypted Commonware network, signed request/channel/stream binding, durable ingestion and private RPC assembly | Integrated build, reconnect/queue recovery and live authority refresh |
+| C5: recovery and admission | Bounded inventories, signed nine-peer retirement ABI, persistent drain/provider adapters | Finish canonical source-history projection, independently checked peer signatures, inbound chunking and exact checkpoint installation/runtime wiring |
+| C6: replenishment | Real Alloy source withdrawal, L1 treasury and encrypted deposit providers; durable nonce/action/replacement/fee/net-credit reconciliation | Execute real two-leg recovery, fee, bounce/refund and unchanged-recipient tests |
+| C7: ten-Zone proof of behavior | Removed from this request by explicit user direction | Not an acceptance requirement for this implementation turn |
 
-The preliminary Portal registry ABI is dormant. Before activation it must bind the exact enrolled
+The Portal registry ABI now binds the exact enrolled
 peer identities, use explicit duplicate markers, authenticate all lock-watermark/unresolved roots,
 prove resolution and final settlement, and require installation of the next roster's checkpoint.
 It must retain historical keys and prevent all legacy authority paths from replacing the committed
 prefix. A count of arbitrary peer barriers cannot prove retirement is safe.
 
-The transport and native ABI currently remain separate representations. Transport-only encoding
-vectors are not cross-language EVM conformance evidence; activation must wait for one shared
-transfer-ID/intent/certificate contract and literal vectors tested against both representations.
+The transport and native ABI now decode the same bounded `zone-primitives` canonical intent and
+certificate bytes and derive transfer identity only through those shared pure types. Literal
+cross-language and actual precompile-dispatch vectors remain required acceptance coverage.
 
 ## Independent acceptance tests
 
@@ -83,17 +96,18 @@ Every real failure run must retain the topology, seed, minimized message/electio
 transaction hashes, certificate bytes, block hashes, pinned binaries, fsync configuration and
 resource/timing observations. Recovery timing starts only after the specified prerequisites heal.
 
-## Validation evidence
+## Historical validation evidence (before the current T14 integration)
 
 The initial bare-metal snapshot passed all 28 `zone-fast-transfer` tests: 12 source-local units,
 2 independent model tests, 5 certificate tests, 7 protocol boundary tests and 2 journal acceptance
 tests. Strict nightly Clippy then found an oversized journal enum variant; boxing that variant
 preserves its on-disk encoding. A separate fresh validation agent reruns after corrections.
 
-The fresh independent reviewer subsequently reran all 30 current fast-transfer tests successfully
+The fresh independent reviewer subsequently reran the then-current 30 fast-transfer tests successfully
 (14 source-local and 16 acceptance tests) and passed the workspace formatting check. It rejected
-full E2E acceptance, confirming dormant execution, divergent native/transport bindings, absent
-replica/worker assembly and missing actual spend/replenishment/chaos coverage. Strict Clippy found
+full E2E acceptance, confirming the earlier dormant execution and divergent bindings plus absent
+replica/worker assembly and missing actual spend/replenishment/chaos coverage. The first two gaps
+have since been implemented in source; the latter integration gaps remain. Strict Clippy found
 redundant test clones, which were removed without changing any assertions.
 
 A second fresh runner then passed all 30 package tests, strict nightly package Clippy with warnings
@@ -108,5 +122,6 @@ remaining broad dependency builds were stopped at the protocol-owner decision bo
 not a successful node/prover/E2E result. Source work is preserved in the draft, and the idle
 bare-metal build box was destroyed after its package-test evidence was collected.
 
-There is no accepted ten-Zone E2E result. Do not enable the compatibility pin or remove the
-activation gates based on these unit, model, journal or Solidity results.
+There is no accepted ten-Zone E2E result, and it is not required by the revised scope. Do not claim
+complete protocol readiness from unit, model, journal, source compilation, or Solidity results;
+the remaining node and bridge integration blockers above are material.

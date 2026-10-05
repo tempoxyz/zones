@@ -68,6 +68,7 @@ struct ActiveSubscription {
 struct PendingSubscription {
     id: FilterId,
     stream: WsSubscriptionStream,
+    notification_method: &'static str,
 }
 
 struct WsSession {
@@ -163,10 +164,14 @@ struct SubscriptionNotificationParams<'a> {
     result: &'a RawValue,
 }
 
-fn subscription_notification_raw(subscription_id: &FilterId, result: &RawValue) -> String {
+fn subscription_notification_with_method(
+    method: &'static str,
+    subscription_id: &FilterId,
+    result: &RawValue,
+) -> String {
     serde_json::to_string(&SubscriptionNotification {
         jsonrpc: "2.0",
-        method: "eth_subscription",
+        method,
         params: SubscriptionNotificationParams {
             subscription: subscription_id,
             result,
@@ -179,6 +184,7 @@ fn subscription_notification_raw(subscription_id: &FilterId, result: &RawValue) 
 fn spawn_subscription(
     subscription_id: FilterId,
     mut subscription: WsSubscriptionStream,
+    notification_method: &'static str,
     notifications: NotificationTx,
     close_session: CloseSessionTx,
 ) -> JoinHandle<()> {
@@ -200,7 +206,11 @@ fn spawn_subscription(
             if !try_queue_notification(
                 &notifications,
                 &close_session,
-                subscription_notification_raw(&subscription_id, result.as_ref()),
+                subscription_notification_with_method(
+                    notification_method,
+                    &subscription_id,
+                    result.as_ref(),
+                ),
             ) {
                 return;
             }
@@ -335,6 +345,52 @@ async fn handle_subscribe(
         pending_subscriptions: vec![PendingSubscription {
             id: subscription_id,
             stream: subscription,
+            notification_method: "eth_subscription",
+        }],
+    }
+}
+
+async fn handle_fast_transfer_subscribe(
+    req: &JsonRpcRequest,
+    auth: &AuthContext,
+    state: &Arc<RpcState>,
+    session: &mut WsSession,
+) -> WsDispatchResult {
+    let raw = req
+        .params
+        .as_deref()
+        .map(|params| params.get())
+        .unwrap_or("[]");
+    if !matches!(serde_json::from_str::<Vec<Value>>(raw), Ok(params) if params.is_empty()) {
+        return WsDispatchResult::response_only(JsonRpcResponse::error(
+            req.id.clone(),
+            JsonRpcError::invalid_params(
+                "zone_subscribeFastTransferReceipts does not accept params",
+            ),
+        ));
+    }
+    let subscription = match state
+        .api
+        .ws_subscribe_fast_transfer_receipts(auth.clone())
+        .await
+    {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            return WsDispatchResult::response_only(JsonRpcResponse::error(req.id.clone(), error));
+        }
+    };
+    let subscription_id = match session.reserve_subscription_id() {
+        Ok(subscription_id) => subscription_id,
+        Err(error) => {
+            return WsDispatchResult::response_only(JsonRpcResponse::error(req.id.clone(), error));
+        }
+    };
+    WsDispatchResult {
+        response: success_response(req.id.clone(), &subscription_id),
+        pending_subscriptions: vec![PendingSubscription {
+            id: subscription_id,
+            stream: subscription,
+            notification_method: "zone_subscription",
         }],
     }
 }
@@ -362,7 +418,10 @@ async fn dispatch_ws_request(
 ) -> WsDispatchResult {
     match req.method.as_str() {
         "eth_subscribe" => handle_subscribe(req, auth, state, session).await,
-        "eth_unsubscribe" => {
+        "zone_subscribeFastTransferReceipts" => {
+            handle_fast_transfer_subscribe(req, auth, state, session).await
+        }
+        "eth_unsubscribe" | "zone_unsubscribeFastTransferReceipts" => {
             WsDispatchResult::response_only(handle_unsubscribe(req, session).await)
         }
         _ => WsDispatchResult::response_only(dispatch_request(req, auth, state.api.as_ref()).await),
@@ -461,6 +520,7 @@ fn activate_pending_subscriptions(
         let task = spawn_subscription(
             pending.id.clone(),
             pending.stream,
+            pending.notification_method,
             notifications.clone(),
             close_session.clone(),
         );

@@ -1,7 +1,8 @@
-//! ABI for the dormant Zone-native `FastTransfer` precompile.
+//! ABI for the Zone-native `FastTransfer` precompile.
 //!
-//! The ABI is intentionally fixed-width except for certificate and ancestry proof bytes. Native
-//! execution applies strict bounds to those byte strings before verification.
+//! Consensus-relevant intents and certificates are passed as the canonical bounded byte encoding
+//! from `zone-primitives`.  The ABI deliberately does not mirror those structs: maintaining a
+//! second Solidity tuple was the source of a different transfer identity at the EVM boundary.
 
 use alloy_primitives::{Address, address};
 
@@ -95,6 +96,17 @@ crate::sol! {
             uint128 minimumReserve;
         }
 
+        struct InventoryJob {
+            bytes32 intentHash;
+            address operator;
+            address token;
+            address treasury;
+            uint128 amount;
+            uint64 fallbackNonce;
+            uint64 withdrawalIndex;
+            bool restored;
+        }
+
         event Locked(bytes32 indexed transferId, bytes32 indexed intentHash, address indexed sender, address token, uint128 total);
         event Paid(bytes32 indexed transferId, bytes32 indexed intentHash, address indexed recipient, address token, uint128 principal);
         event Rejected(bytes32 indexed transferId, bytes32 indexed intentHash, uint8 reason);
@@ -103,6 +115,10 @@ crate::sol! {
         event PoolFunded(address indexed token, address indexed operator, uint128 amount);
         event PoolWithdrawn(address indexed token, address indexed operator, address indexed recipient, uint128 amount);
         event ExposureRetired(bytes32 indexed transferId, bytes32 indexed sourceZone, address indexed token, uint128 principal);
+        event ReplenishmentRouteConfigured(address indexed token, address indexed treasury, address indexed operator, bool enabled);
+        event InventoryAllocated(bytes32 indexed jobId, bytes32 indexed intentHash, address indexed operator, address token, address treasury, uint128 amount, uint64 fallbackNonce, uint64 withdrawalIndex);
+        event InventoryRestored(bytes32 indexed jobId, uint128 amount);
+        event ReplenishmentCredited(bytes32 indexed jobId, address indexed token, address indexed operator, uint128 amount);
 
         error FastTransferNotActive();
         error StaticCallNotAllowed();
@@ -120,18 +136,31 @@ crate::sol! {
         error InsufficientPoolLiquidity();
         error ExposureLimitExceeded();
         error ArithmeticOverflow();
+        error InvalidInventoryJob();
+        error InventoryJobConflict();
+        error DuplicateInventoryContribution();
+        error InventoryNotReleased(bytes32 transferId);
+        error InventoryContributionMismatch(bytes32 transferId);
+        error InventoryAlreadyAllocated(bytes32 transferId);
+        error InventoryRestorationMismatch();
 
-        function lock(Intent calldata intent, bytes32 intentHash) external returns (uint8 state);
-        function resolve(Intent calldata intent, bytes32 intentHash, Certificate calldata lockCertificate, bool cancel, uint8 rejectionReason) external returns (uint8 state);
-        function recordOutcome(Intent calldata intent, bytes32 intentHash, Certificate calldata outcomeCertificate) external returns (uint8 state);
+        function lock(bytes calldata canonicalIntent, bytes calldata quoteCertificate) external returns (uint8 state);
+        function resolve(bytes calldata canonicalIntent, bytes calldata lockCertificate, bytes calldata cancellation, bytes calldata barrierProof) external returns (uint8 state);
+        function recordOutcome(bytes calldata canonicalIntent, bytes calldata outcomeCertificate) external returns (uint8 state);
         function disposeEscrow(bytes32 transferId) external returns (uint8 state);
         function fundPool(address token, uint128 amount, uint128 minimumReserve) external;
         function withdrawPool(address token, address recipient, uint128 amount) external;
         function setExposureLimit(address token, bytes32 sourceZone, uint128 limit) external;
-        function retireExposure(RetirementEvidence calldata evidence) external;
+        function recordAncestryCheckpoint(address sourcePortal, bytes calldata headerChain) external;
+        function retireExposure(bytes calldata canonicalEvidence) external;
+        function configureReplenishmentRoute(address token, address treasury, bool enabled) external;
+        function allocateInventoryAndWithdraw(bytes32 jobId, bytes32[] calldata transferIds, address token, address treasury) external returns (uint128 amount, uint64 fallbackNonce, uint64 withdrawalIndex);
         function status(bytes32 transferId) external view returns (FastTransferStatus memory);
         function poolState(address token) external view returns (PoolState memory);
         function exposure(address token, bytes32 sourceZone) external view returns (uint128 unsettled, uint128 limit);
+        function inventoryJob(bytes32 jobId) external view returns (InventoryJob memory job);
+        function replenishmentRoute(address token, address treasury) external view returns (address poolOperator);
+        function replenishmentCredit(bytes32 jobId) external view returns (uint128 amount);
         function MAX_CERTIFICATE_BYTES() external pure returns (uint256);
         function MAX_RETIREMENT_PROOF_BYTES() external pure returns (uint256);
     }

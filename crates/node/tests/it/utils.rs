@@ -1501,6 +1501,8 @@ impl ZoneTestNode {
                     config,
                     enabled_tokens,
                     l1_provider,
+                    None,
+                    None,
                 )) as Arc<dyn zone_node::rpc::ZoneRpcApi>)
             })
                 as Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>>>>>

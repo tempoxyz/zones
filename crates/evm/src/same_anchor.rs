@@ -10,8 +10,36 @@ use tempo_primitives::{
 
 pub const SAME_ANCHOR_FORMAT_V1: u8 = 1;
 pub const SAME_ANCHOR_MAX_AGE_MILLIS: u64 = 2_000;
+pub const T14_FAST_PROTOCOL_NATIVE_PIN: B256 =
+    alloy_primitives::b256!("8e57521218d8ec9db175a95bca2c3a2061d54f8b60cd443c2c34735741534f8f");
 const SAME_ANCHOR_SIGNATURE: &[u8] = b"sameAnchor(uint8,uint64,bytes32,uint64,uint64,uint16)";
 const SAME_ANCHOR_CALLDATA_LEN: usize = 4 + 32 * 6;
+
+/// Capability reconstructed from typed Portal storage at the exact finalized anchor.
+///
+/// This is deliberately not encoded in [`SameAnchorOpening`]: block input cannot authenticate its
+/// own authority. A payload validator or prover may construct this value only from its anchored L1
+/// storage/witness implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchoredProtocolEpoch {
+    pub tempo_block_number: u64,
+    pub current_epoch: u64,
+    pub activated_at_tempo_block: u64,
+    pub closed: bool,
+    pub retired: bool,
+    pub proof_mode: u8,
+    pub expected_verifier_code_hash: B256,
+    pub expected_verifier_config_hash: B256,
+    pub native_pin: B256,
+    pub registry_schema_valid: bool,
+    pub t14_capability_compatible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SameAnchorMode {
+    Open,
+    ClosedDrain,
+}
 
 /// Values committed by a same-anchor block's first system transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +86,41 @@ impl SameAnchorOpening {
         }
         self.anchor_timestamp_millis()?;
         Ok(())
+    }
+
+    /// Bind the opening epoch to the current unretired T14 capability at this exact anchor.
+    ///
+    /// `None` is not equivalent to epoch zero: it means the caller cannot authenticate the Portal
+    /// read and must reject the block.
+    pub fn validate_protocol_epoch(
+        &self,
+        capability: Option<&AnchoredProtocolEpoch>,
+    ) -> Result<SameAnchorMode, SameAnchorError> {
+        self.validate()?;
+        let capability = capability.ok_or(SameAnchorError::ProtocolEpochUnproven)?;
+        if self.protocol_epoch == 0
+            || capability.tempo_block_number != self.tempo_block_number
+            || capability.current_epoch != self.protocol_epoch
+            || capability.activated_at_tempo_block == 0
+            || capability.activated_at_tempo_block > self.tempo_block_number
+            || capability.retired
+            || !matches!(capability.proof_mode, 1 | 2)
+            || capability.expected_verifier_code_hash.is_zero()
+            || capability.expected_verifier_config_hash.is_zero()
+            || capability.native_pin != T14_FAST_PROTOCOL_NATIVE_PIN
+            || !capability.registry_schema_valid
+            || !capability.t14_capability_compatible
+        {
+            return Err(SameAnchorError::ProtocolEpochMismatch {
+                opening: self.protocol_epoch,
+                anchored: capability.current_epoch,
+            });
+        }
+        Ok(if capability.closed {
+            SameAnchorMode::ClosedDrain
+        } else {
+            SameAnchorMode::Open
+        })
     }
 
     /// Enforce strictly increasing millisecond time and the two-second anchor bound.
@@ -136,8 +199,8 @@ impl SameAnchorOpening {
             nonce: 0,
             gas_price: 0,
             gas_limit: 0,
-            // The pinned Tempo dependency has no native same-anchor entrypoint. This is a
-            // state-neutral commitment destination; chain-spec activation remains fail-closed.
+            // Same-anchor is a state-neutral T14 system commitment; validation binds these bytes
+            // to the already imported finalized Tempo anchor before ordinary calls execute.
             to: TEMPO_SYSTEM_TX_SENDER.into(),
             value: U256::ZERO,
             input: self.encode_calldata()?,
@@ -195,6 +258,10 @@ pub enum SameAnchorError {
     TimestampNotIncreasing { parent: u64, actual: u64 },
     #[error("same-anchor timestamp exceeds anchor bound {maximum}: got {actual}")]
     AnchorExpired { maximum: u64, actual: u64 },
+    #[error("same-anchor protocol epoch is not proven by authenticated anchor storage")]
+    ProtocolEpochUnproven,
+    #[error("same-anchor protocol epoch mismatch: opening {opening}, anchored {anchored}")]
+    ProtocolEpochMismatch { opening: u64, anchored: u64 },
 }
 
 #[cfg(test)]
@@ -234,5 +301,78 @@ mod tests {
                 actual: 12_251,
             })
         );
+    }
+
+    #[test]
+    fn protocol_epoch_requires_exact_unretired_anchored_capability() {
+        let opening = opening();
+        let valid = AnchoredProtocolEpoch {
+            tempo_block_number: 7,
+            current_epoch: 3,
+            activated_at_tempo_block: 7,
+            closed: false,
+            retired: false,
+            proof_mode: 1,
+            expected_verifier_code_hash: B256::repeat_byte(1),
+            expected_verifier_config_hash: B256::repeat_byte(2),
+            native_pin: T14_FAST_PROTOCOL_NATIVE_PIN,
+            registry_schema_valid: true,
+            t14_capability_compatible: true,
+        };
+        assert_eq!(
+            opening.validate_protocol_epoch(None),
+            Err(SameAnchorError::ProtocolEpochUnproven)
+        );
+        assert_eq!(
+            opening.validate_protocol_epoch(Some(&valid)),
+            Ok(SameAnchorMode::Open)
+        );
+        assert_eq!(
+            opening.validate_protocol_epoch(Some(&AnchoredProtocolEpoch {
+                closed: true,
+                ..valid
+            })),
+            Ok(SameAnchorMode::ClosedDrain)
+        );
+
+        for invalid in [
+            AnchoredProtocolEpoch {
+                current_epoch: 4,
+                ..valid
+            },
+            AnchoredProtocolEpoch {
+                tempo_block_number: 8,
+                ..valid
+            },
+            AnchoredProtocolEpoch {
+                activated_at_tempo_block: 8,
+                ..valid
+            },
+            AnchoredProtocolEpoch {
+                retired: true,
+                ..valid
+            },
+            AnchoredProtocolEpoch {
+                proof_mode: 0,
+                ..valid
+            },
+            AnchoredProtocolEpoch {
+                native_pin: B256::ZERO,
+                ..valid
+            },
+            AnchoredProtocolEpoch {
+                registry_schema_valid: false,
+                ..valid
+            },
+            AnchoredProtocolEpoch {
+                t14_capability_compatible: false,
+                ..valid
+            },
+        ] {
+            assert!(matches!(
+                opening.validate_protocol_epoch(Some(&invalid)),
+                Err(SameAnchorError::ProtocolEpochMismatch { .. })
+            ));
+        }
     }
 }

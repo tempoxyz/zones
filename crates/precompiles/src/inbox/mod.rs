@@ -30,9 +30,9 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
-    DecryptionData, Deposit, DepositType, EnabledToken, IZoneInbox, IZoneOutbox,
-    LegacyTempoAdvanced, QueuedDeposit, TempoAdvanced, WithdrawalBounceBackDeposit, ZoneInboxError,
-    ZoneInboxEvent,
+    DecryptionData, Deposit, DepositType, EnabledToken, FAST_TRANSFER_ADDRESS, IZoneInbox,
+    IZoneOutbox, LegacyTempoAdvanced, QueuedDeposit, TempoAdvanced, WithdrawalBounceBackDeposit,
+    ZoneInboxError, ZoneInboxEvent,
 };
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -40,6 +40,7 @@ use crate::{
     ZonePrecompileError, ZoneResult, aes_gcm, chaum_pedersen,
     ecies::{ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, hkdf_info, hkdf_sha256},
     execution::NoCallRules,
+    fast_transfer::FastTransfer,
     outbox::ZoneOutbox,
     storage::{L1State, L1StorageReader},
     tempo_state::TempoState,
@@ -288,7 +289,26 @@ impl ZoneInbox {
             return self.fail_deposit(outbox, current_hash, deposit);
         };
 
+        if to == FAST_TRANSFER_ADDRESS
+            && !FastTransfer::new().can_credit_replenishment(
+                memo,
+                deposit.tempoRefundRecipient,
+                deposit.token,
+                deposit.amount,
+            )?
+        {
+            return self.fail_deposit(outbox, current_hash, deposit);
+        }
+
         if self.try_mint(deposit.token, to, deposit.amount)? {
+            if to == FAST_TRANSFER_ADDRESS {
+                FastTransfer::new().credit_replenishment(
+                    memo,
+                    deposit.tempoRefundRecipient,
+                    deposit.token,
+                    deposit.amount,
+                )?;
+            }
             self.emit_event(deposit.processed_event(current_hash, to, memo))?;
         } else {
             self.fail_deposit(outbox, current_hash, deposit)?;
@@ -326,6 +346,12 @@ impl ZoneInbox {
         );
         let recipient = outbox.consume_fallback_recipient(ZONE_INBOX_ADDRESS, fallback_nonce)?;
         if self.try_mint(deposit.token, recipient, deposit.amount)? {
+            FastTransfer::new().restore_allocated_inventory(
+                fallback_nonce,
+                deposit.token,
+                recipient,
+                deposit.amount,
+            )?;
             self.emit_event(deposit.withdrawal_bounce_back_processed_event(recipient))?;
         } else {
             let slot = self.withdrawal_bounce_backs[deposit.token][recipient].slot();

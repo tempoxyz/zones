@@ -4,6 +4,7 @@
 mod backfill;
 mod capabilities;
 mod identity;
+mod inter_zone;
 mod manifest;
 mod network;
 mod protocol;
@@ -11,6 +12,11 @@ mod routing;
 mod runtime;
 
 pub use backfill::{BackfillCommand, BackfillPorts, BackfillRequest, BackfillResponse};
+pub use inter_zone::{
+    AuthenticatedInterZoneRequest, InterZoneAcknowledgment, InterZoneAuthoritySet,
+    InterZonePeerAuthority, InterZoneRoutingConfig, InterZoneRoutingPeer, InterZoneServicePorts,
+    InterZoneServiceRequest, MAX_INTER_ZONE_MESSAGE_SIZE,
+};
 pub use manifest::{
     ForcedRecoveryConfig, ForcedRecoveryState, LeadershipSchedule, LeadershipState,
     ManifestAddress, ManifestError, ManifestNode, Role, ZoneManifest,
@@ -18,4 +24,7 @@ pub use manifest::{
 pub use network::{MAX_TRANSACTION_MESSAGE_SIZE, P2pNetworkId};
 pub use protocol::{EncodedBlock, PeerTip};
 pub use routing::P2pPeerId;
-pub use runtime::{P2pCommand, P2pConfig, P2pEvent, P2pHandle, P2pHandleParts, spawn_p2p};
+pub use runtime::{
+    MAX_RAFT_MESSAGE_SIZE, P2pCommand, P2pConfig, P2pEvent, P2pHandle, P2pHandleParts, RaftPorts,
+    RaftRequestFrame, RaftResponseFrame, spawn_p2p,
+};

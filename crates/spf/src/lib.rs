@@ -154,7 +154,10 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
 
         validate_system_inputs(block, block_index)?;
         if let TempoImport::SameAnchor { opening } = &block.tempo_import {
-            if !config.chain_spec().supports_same_anchor() {
+            if !config
+                .chain_spec()
+                .supports_same_anchor_at(opening.tempo_timestamp)
+            {
                 return Err(Error::UnsupportedSameAnchorFork);
             }
             validate_same_anchor_replay(

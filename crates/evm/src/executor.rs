@@ -21,13 +21,16 @@ use tempo_primitives::{
     TempoReceipt, TempoTxEnvelope, TempoTxType, transaction::envelope::TEMPO_SYSTEM_TX_SENDER,
 };
 use tempo_revm::evm::TempoContext;
-use tempo_zone_contracts::{IZoneOutbox, TempoAdvanced};
+use tempo_zone_contracts::{FAST_TRANSFER_ADDRESS, IFastTransfer, IZoneOutbox, TempoAdvanced};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, L1StorageReader};
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
-use crate::{L1OverlayDB, ZoneEvm, same_anchor::is_same_anchor_opening};
+use crate::{
+    L1OverlayDB, ZoneEvm,
+    same_anchor::{AnchoredProtocolEpoch, SameAnchorMode, is_same_anchor_opening},
+};
 
 /// The current transaction-ordering phase of a zone block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,6 +39,8 @@ enum ZoneBlockPhase {
     AwaitingAdvanceTempo,
     /// The block has committed `advanceTempo` and may execute ordinary transactions.
     Executing,
+    /// A closed, unretired fast epoch may execute only authenticated drain/recovery operations.
+    ExecutingDrain,
     /// The block authenticated Tempo headers and must contain no further transactions.
     CheckpointOnly,
     /// The block has finalized withdrawals and cannot accept any more transactions.
@@ -75,6 +80,7 @@ impl ZoneBlockPhase {
             )
             .into()),
             (Self::Executing, ZoneTransactionKind::Regular) => Ok(Self::Executing),
+            (Self::Executing, ZoneTransactionKind::DrainRecovery) => Ok(Self::Executing),
             (Self::Executing, ZoneTransactionKind::FinalizeWithdrawalBatch) => {
                 Ok(Self::WithdrawalsFinalized)
             }
@@ -85,6 +91,14 @@ impl ZoneBlockPhase {
                 )
                 .into())
             }
+            (Self::ExecutingDrain, ZoneTransactionKind::DrainRecovery) => Ok(Self::ExecutingDrain),
+            (Self::ExecutingDrain, ZoneTransactionKind::FinalizeWithdrawalBatch) => {
+                Ok(Self::WithdrawalsFinalized)
+            }
+            (Self::ExecutingDrain, _) => Err(BlockValidationError::msg(
+                "closed fast epoch blocks admit only native drain/recovery and settlement",
+            )
+            .into()),
             (Self::WithdrawalsFinalized, _) => Err(BlockValidationError::msg(
                 "finalizeWithdrawalBatch must be the last transaction in a zone block",
             )
@@ -108,6 +122,7 @@ enum ZoneTransactionKind {
     AdvanceTempoHeaders,
     SameAnchor,
     Regular,
+    DrainRecovery,
     FinalizeWithdrawalBatch,
     UnexpectedSystem,
 }
@@ -115,6 +130,14 @@ enum ZoneTransactionKind {
 impl ZoneTransactionKind {
     fn classify(tx: &TempoTxEnvelope) -> Self {
         if !tx.is_system_tx() {
+            let mut calls = tx.calls().peekable();
+            if calls.peek().is_some()
+                && calls.all(|(kind, input)| {
+                    kind.to() == Some(&FAST_TRANSFER_ADDRESS) && is_drain_recovery_selector(input)
+                })
+            {
+                return Self::DrainRecovery;
+            }
             return Self::Regular;
         }
 
@@ -146,6 +169,20 @@ impl ZoneTransactionKind {
 
         Self::UnexpectedSystem
     }
+}
+
+fn is_drain_recovery_selector(input: &[u8]) -> bool {
+    [
+        IFastTransfer::resolveCall::SELECTOR,
+        IFastTransfer::recordOutcomeCall::SELECTOR,
+        IFastTransfer::disposeEscrowCall::SELECTOR,
+        IFastTransfer::fundPoolCall::SELECTOR,
+        IFastTransfer::recordAncestryCheckpointCall::SELECTOR,
+        IFastTransfer::retireExposureCall::SELECTOR,
+        IFastTransfer::allocateInventoryAndWithdrawCall::SELECTOR,
+    ]
+    .iter()
+    .any(|selector| input.starts_with(selector))
 }
 
 /// Zone transaction result with the block phase to apply if the result is committed.
@@ -180,7 +217,7 @@ where
 pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
     phase: ZoneBlockPhase,
-    same_anchor_enabled: bool,
+    chain_spec: &'a ZoneChainSpec,
 }
 
 impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
@@ -203,7 +240,7 @@ where
                 TempoReceiptBuilder::default(),
             ),
             phase: ZoneBlockPhase::AwaitingAdvanceTempo,
-            same_anchor_enabled: chain_spec.supports_same_anchor(),
+            chain_spec,
         }
     }
 }
@@ -242,17 +279,67 @@ where
         if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
             tempo_tx_env.expiring_nonce_idx = None;
         }
+        let mut next_phase = self.phase.validate_transaction(recovered.tx())?;
 
-        if ZoneTransactionKind::classify(recovered.tx()) == ZoneTransactionKind::SameAnchor
-            && !self.same_anchor_enabled
-        {
-            return Err(BlockValidationError::msg(
-                "same-anchor execution is unsupported by the active Tempo hardfork",
+        if ZoneTransactionKind::classify(recovered.tx()) == ZoneTransactionKind::SameAnchor {
+            let opening = recovered
+                .tx()
+                .calls()
+                .find_map(|(kind, input)| {
+                    (kind.to() == Some(&TEMPO_SYSTEM_TX_SENDER))
+                        .then(|| crate::same_anchor::SameAnchorOpening::decode_calldata(input))
+                })
+                .transpose()
+                .map_err(|_| BlockValidationError::msg("invalid same-anchor opening"))?
+                .ok_or_else(|| BlockValidationError::msg("missing same-anchor opening"))?;
+            if !self
+                .chain_spec
+                .supports_same_anchor_at(opening.tempo_timestamp)
+            {
+                return Err(BlockValidationError::msg(
+                    "same-anchor execution requires T14 at the finalized Tempo anchor",
+                )
+                .into());
+            }
+            let epoch = zone_precompiles::fast_transfer::same_anchor_protocol_epoch(
+                self.evm_mut().ctx().journaled_state.database.l1_state(),
+                opening.tempo_block_number,
+                opening.protocol_epoch,
             )
-            .into());
+            .map_err(|err| {
+                BlockValidationError::msg(format!(
+                    "same-anchor protocol epoch storage validation failed: {err}"
+                ))
+            })?;
+            let Some(epoch) = epoch else {
+                return Err(BlockValidationError::msg(
+                    "same-anchor protocol epoch is not the current unretired finalized T14 authority",
+                )
+                .into());
+            };
+            let mode = opening
+                .validate_protocol_epoch(Some(&AnchoredProtocolEpoch {
+                    tempo_block_number: epoch.tempo_block_number,
+                    current_epoch: epoch.current_epoch,
+                    activated_at_tempo_block: epoch.activated_at_tempo_block,
+                    closed: epoch.closed,
+                    retired: epoch.retired,
+                    proof_mode: epoch.proof_mode,
+                    expected_verifier_code_hash: epoch.expected_verifier_code_hash,
+                    expected_verifier_config_hash: epoch.expected_verifier_config_hash,
+                    native_pin: epoch.native_pin,
+                    registry_schema_valid: true,
+                    t14_capability_compatible: true,
+                }))
+                .map_err(|error| {
+                    BlockValidationError::msg(format!(
+                        "same-anchor protocol capability validation failed: {error}"
+                    ))
+                })?;
+            if mode == SameAnchorMode::ClosedDrain {
+                next_phase = ZoneBlockPhase::ExecutingDrain;
+            }
         }
-        let next_phase = self.phase.validate_transaction(recovered.tx())?;
-
         let result = self
             .inner
             .execute_transaction_without_commit((tx_env, recovered));

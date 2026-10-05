@@ -15,7 +15,7 @@ use tempo_zone_contracts::{
 };
 use tokio::sync::mpsc::Receiver;
 use tracing::{error, info, warn};
-use zone_l1::FinalizedBatchSubmission;
+use zone_l1::{FinalizedBatchSubmission, TempoStateExt as _};
 use zone_sequencer::{BatchData, ShadowProofAnchor, ShadowProver, ZoneSequencerProvider};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -222,6 +222,24 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
         );
         let to =
             u64::try_from(call.nextZoneHeight).wrap_err("submitted Zone height overflows u64")?;
+        // The imported hash is an execution commitment, not whichever hash an L1 endpoint
+        // currently returns for the submitted number. Wait for the accepted local boundary.
+        while self.zone_provider.last_block_number()? < to {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        ensure!(
+            self.zone_provider.block_hash(to)? == Some(call.blockTransition.nextBlockHash),
+            "accepted Zone boundary {to} does not match local canonical execution"
+        );
+        let imported = self
+            .zone_provider
+            .state_by_block_hash(call.blockTransition.nextBlockHash)?
+            .tempo_num_hash()
+            .map_err(|error| eyre::eyre!(error))?;
+        ensure!(
+            imported.number == call.tempoBlockNumber,
+            "accepted settlement Tempo number differs from the local imported anchor"
+        );
         let anchor_number =
             submitted_anchor_number(call.tempoBlockNumber, call.recentTempoBlockNumber)?;
         ensure!(
@@ -242,6 +260,7 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
             BatchData {
                 zone_height: to,
                 tempo_block_number: call.tempoBlockNumber,
+                tempo_block_hash: imported.hash,
                 prev_block_hash: call.blockTransition.prevBlockHash,
                 next_block_hash: call.blockTransition.nextBlockHash,
                 prev_processed_deposit_hash: call.depositQueueTransition.prevProcessedHash,

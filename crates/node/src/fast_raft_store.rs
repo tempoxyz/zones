@@ -6,6 +6,8 @@
 //! amplification. Snapshot/state-machine persistence is supplied separately by the execution
 //! adapter because it must atomically include the Reth replay material.
 
+#![allow(clippy::result_large_err)] // OpenRaft's required StorageError is intentionally rich.
+
 use std::{
     collections::BTreeMap,
     fmt::Debug,
@@ -16,10 +18,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use alloy_primitives::keccak256;
 use openraft::{
-    Entry, LogId, LogState, RaftLogReader, StorageError, Vote,
+    Entry, ErrorSubject, ErrorVerb, LogId, LogState, RaftLogReader, StorageError, Vote,
     storage::{LogFlushed, RaftLogStorage},
-    storage_error::{ErrorSubject, ErrorVerb},
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +29,10 @@ use crate::fast_quorum::FastRaftConfig;
 
 const STORE_FILE: &str = "raft-log.bin";
 const STORE_TEMP: &str = "raft-log.tmp";
+const STORE_MAGIC: &[u8; 8] = b"ZFRAFT01";
+const STORE_VERSION: u32 = 1;
+const HEADER_BYTES: usize = 8 + 4 + 8 + 32;
+const MAX_STORE_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct DiskState {
@@ -54,7 +60,7 @@ impl DurableRaftLogStore {
         let path = directory.join(STORE_FILE);
         let state = if path.exists() {
             let bytes = fs::read(&path)?;
-            bincode::deserialize(&bytes).map_err(invalid_data)?
+            decode_image(&bytes)?
         } else {
             let state = DiskState::default();
             persist(&directory, &state)?;
@@ -224,7 +230,19 @@ fn validate(state: &DiskState) -> io::Result<()> {
 }
 
 fn persist(directory: &Path, state: &DiskState) -> io::Result<()> {
-    let bytes = bincode::serialize(state).map_err(invalid_data)?;
+    let payload = bincode::serialize(state).map_err(invalid_data)?;
+    if payload.len() > MAX_STORE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Raft log image exceeds configured maximum",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(HEADER_BYTES + payload.len());
+    bytes.extend_from_slice(STORE_MAGIC);
+    bytes.extend_from_slice(&STORE_VERSION.to_be_bytes());
+    bytes.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(keccak256(&payload).as_slice());
+    bytes.extend_from_slice(&payload);
     let temporary = directory.join(STORE_TEMP);
     let published = directory.join(STORE_FILE);
     {
@@ -239,6 +257,29 @@ fn persist(directory: &Path, state: &DiskState) -> io::Result<()> {
     }
     fs::rename(&temporary, &published)?;
     sync_directory(directory)
+}
+
+fn decode_image(bytes: &[u8]) -> io::Result<DiskState> {
+    if bytes.len() < HEADER_BYTES || &bytes[..8] != STORE_MAGIC {
+        return Err(invalid_data("invalid Raft log image magic"));
+    }
+    let version = u32::from_be_bytes(bytes[8..12].try_into().expect("fixed header"));
+    if version != STORE_VERSION {
+        return Err(invalid_data(format!(
+            "unsupported Raft log image version {version}"
+        )));
+    }
+    let length = u64::from_be_bytes(bytes[12..20].try_into().expect("fixed header"));
+    let length = usize::try_from(length).map_err(invalid_data)?;
+    if length > MAX_STORE_BYTES || bytes.len() != HEADER_BYTES + length {
+        return Err(invalid_data("invalid Raft log image length"));
+    }
+    let expected = &bytes[20..52];
+    let payload = &bytes[HEADER_BYTES..];
+    if keccak256(payload).as_slice() != expected {
+        return Err(invalid_data("Raft log image checksum mismatch"));
+    }
+    bincode::deserialize(payload).map_err(invalid_data)
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -277,6 +318,22 @@ mod tests {
         assert_eq!(
             futures::executor::block_on(reopened.read_vote()).unwrap(),
             Some(vote)
+        );
+    }
+
+    #[test]
+    fn corrupt_image_fails_closed() {
+        let directory = tempdir().unwrap();
+        DurableRaftLogStore::open(directory.path()).unwrap();
+        let path = directory.path().join(STORE_FILE);
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(path, bytes).unwrap();
+        assert_eq!(
+            DurableRaftLogStore::open(directory.path())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
         );
     }
 }

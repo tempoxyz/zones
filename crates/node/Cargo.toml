@@ -63,6 +63,7 @@ reth-transaction-pool.workspace = true
 reth-trie-common.workspace = true
 
 # alloy
+alloy-contract.workspace = true
 alloy-chains.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
@@ -74,6 +75,7 @@ alloy-rlp.workspace = true
 alloy-rpc-client.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
+alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
@@ -91,6 +93,7 @@ futures.workspace = true
 jsonrpsee.workspace = true
 k256.workspace = true
 metrics.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -103,6 +106,7 @@ vergen.workspace = true
 vergen-git2.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 zone-chainspec = { workspace = true, features = ["test-utils"] }
 zone-node = { path = ".", features = ["test-utils"] }
 
@@ -117,7 +121,6 @@ alloy = { workspace = true, features = [
 ] }
 alloy-contract.workspace = true
 alloy-evm.workspace = true
-alloy-signer.workspace = true
 base64.workspace = true
 const-hex.workspace = true
 commonware-codec.workspace = true

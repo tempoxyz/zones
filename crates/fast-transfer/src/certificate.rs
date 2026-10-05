@@ -5,8 +5,9 @@ use std::collections::HashSet;
 use alloy_consensus::crypto::secp256k1::recover_signer;
 use alloy_primitives::{Address, B256, Signature, U256, keccak256};
 use zone_primitives::fast_transfer::{
-    OutcomeCertificate, QuoteCertificate, SettlementStatement, SignatureBytes, TransferIntent,
-    TransferOutcome, ZoneDomain,
+    FAST_EMPTY_UNRESOLVED_ROOT, FastBarrierResolution, FastBarrierStatement,
+    FastCheckpointStatement, OutcomeCertificate, QuoteCertificate, SettlementStatement,
+    SignatureBytes, TransferIntent, TransferOutcome, TransportSessionProof, ZoneDomain,
 };
 
 const EIP712_DOMAIN_TYPE: &[u8] =
@@ -52,18 +53,32 @@ pub struct EpochRoster {
 impl EpochRoster {
     /// Construct and validate an exact pinned roster.
     pub fn new(domain: ZoneDomain, members: [Address; 3]) -> Result<Self, CertificateError> {
-        if members.iter().any(|member| member.is_zero()) {
-            return Err(CertificateError::InvalidRoster("zero signer"));
-        }
-        if members[0] == members[1] || members[0] == members[2] || members[1] == members[2] {
-            return Err(CertificateError::InvalidRoster("duplicate signer"));
-        }
+        let roster = Self::from_finalized_registry(domain, members)?;
         let actual = Self::calculate_hash(domain, members);
         if domain.roster_hash != actual {
             return Err(CertificateError::RosterHash {
                 expected: domain.roster_hash,
                 actual,
             });
+        }
+        Ok(roster)
+    }
+
+    /// Construct from a finalized registry record whose roster commitment may additionally bind
+    /// peer transport endpoints. The caller must authenticate `domain.roster_hash` and `members`
+    /// from the same finalized Portal state.
+    pub fn from_finalized_registry(
+        domain: ZoneDomain,
+        members: [Address; 3],
+    ) -> Result<Self, CertificateError> {
+        if members.iter().any(|member| member.is_zero()) {
+            return Err(CertificateError::InvalidRoster("zero signer"));
+        }
+        if members[0] == members[1] || members[0] == members[2] || members[1] == members[2] {
+            return Err(CertificateError::InvalidRoster("duplicate signer"));
+        }
+        if domain.roster_hash.is_zero() {
+            return Err(CertificateError::InvalidRoster("zero roster commitment"));
         }
         Ok(Self { domain, members })
     }
@@ -119,6 +134,9 @@ pub enum CertificateError {
     /// Arithmetic overflow while checking escrow amount.
     #[error("principal plus fee overflows")]
     AmountOverflow,
+    /// Transport proof role/domain/member did not bind this roster.
+    #[error("transport session proof does not bind the pinned roster")]
+    TransportIdentityMismatch,
 }
 
 /// Verifies two-member certificates against one pinned epoch.
@@ -215,6 +233,104 @@ impl QuorumVerifier {
             return Err(CertificateError::WrongEpoch);
         }
         self.verify_signatures(self.settlement_digest(statement), signatures)
+    }
+
+    /// Verify a source barrier under the exact Tempo factory purpose and historical source roster.
+    pub fn verify_source_barrier(
+        &self,
+        statement: &FastBarrierStatement,
+        signatures: &[SignatureBytes; 2],
+    ) -> Result<[Address; 2], CertificateError> {
+        if statement.source_portal != self.roster.domain.portal
+            || statement.source_epoch != self.roster.domain.authority_epoch
+            || statement.destination_portal == statement.source_portal
+            || statement.destination_epoch == 0
+            || statement.closure_hash.is_zero()
+        {
+            return Err(CertificateError::WrongEpoch);
+        }
+        self.verify_signatures(
+            statement.registry_digest(self.roster.domain.l1_chain_id),
+            signatures,
+        )
+    }
+
+    /// Verify the terminal/disposition roots for one exact authenticated source barrier.
+    pub fn verify_barrier_resolution(
+        &self,
+        barrier: &FastBarrierStatement,
+        resolution: &FastBarrierResolution,
+        signatures: &[SignatureBytes; 2],
+    ) -> Result<[Address; 2], CertificateError> {
+        let barrier_hash = barrier.registry_digest(self.roster.domain.l1_chain_id);
+        if barrier.source_portal != self.roster.domain.portal
+            || barrier.source_epoch != self.roster.domain.authority_epoch
+            || resolution.barrier_hash != barrier_hash
+            || resolution.terminal_root.is_zero()
+            || resolution.disposition_root.is_zero()
+            || resolution.resolved_count != barrier.unresolved_count
+            || resolution.remaining_unresolved_root != FAST_EMPTY_UNRESOLVED_ROOT
+            || resolution.remaining_unresolved_count != 0
+        {
+            return Err(CertificateError::OutcomeMismatch);
+        }
+        self.verify_signatures(
+            resolution.registry_digest(
+                self.roster.domain.l1_chain_id,
+                barrier.destination_portal,
+                barrier.destination_epoch,
+                barrier.source_portal,
+            ),
+            signatures,
+        )
+    }
+
+    /// Verify the exact old accepted prefix/checkpoint acknowledgment by two distinct members of
+    /// the proposed next roster. No current-roster signature can substitute for this handoff.
+    pub fn verify_next_roster_checkpoint(
+        l1_chain_id: u64,
+        statement: &FastCheckpointStatement,
+        next_members: [Address; 3],
+        signatures: &[SignatureBytes; 2],
+    ) -> Result<[Address; 2], CertificateError> {
+        let roster = EpochRoster::from_finalized_registry(
+            ZoneDomain {
+                l1_chain_id,
+                zone_id: 0,
+                chain_id: 0,
+                portal: statement.portal,
+                authority_epoch: statement.next_epoch,
+                roster_hash: statement.next_roster_hash,
+                protocol_version: 0,
+            },
+            next_members,
+        )?;
+        Self::new(roster).verify_signatures(statement.registry_digest(l1_chain_id), signatures)
+    }
+
+    /// Verify one side of a replay-resistant transport handshake with the same member identity
+    /// authorized to certify outcomes. Transport transcript hashes remain distinct from EIP-712
+    /// outcome and settlement digests.
+    pub fn verify_transport_session(
+        &self,
+        proof: &TransportSessionProof,
+    ) -> Result<Address, CertificateError> {
+        let (domain, claimed) = if proof.responder_role {
+            (proof.responder, proof.responder_member)
+        } else {
+            (proof.initiator, proof.initiator_member)
+        };
+        if domain != self.roster.domain || !self.roster.contains(claimed) {
+            return Err(CertificateError::TransportIdentityMismatch);
+        }
+        let signature = Signature::try_from(proof.signature.0.as_slice())
+            .map_err(|_| CertificateError::InvalidSignature)?;
+        let recovered = recover_signer(&signature, proof.session_hash())
+            .map_err(|_| CertificateError::InvalidSignature)?;
+        if recovered != claimed {
+            return Err(CertificateError::TransportIdentityMismatch);
+        }
+        Ok(recovered)
     }
 
     fn verify_signatures(

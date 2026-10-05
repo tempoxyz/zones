@@ -8,10 +8,10 @@
 //!
 //! # POC limitations
 //!
-//! Proof validation is **skipped** by the pre-T13 stub verifier. When a settlement prover is
-//! configured, submissions normally carry its Nitro NSM attestation, but may use `NoProof` when
-//! proving fails, the verifier rejects a proof, or its simulation fails. Without a prover,
-//! submissions use `NoProof` with an empty proof.
+//! Proof validation is **skipped** by the pre-T13 stub verifier. When proof-required settlement is
+//! configured, every submission carries a validated Nitro NSM attestation and proving failure
+//! blocks settlement. Legacy operation without a prover explicitly uses `NoProof` with an empty
+//! proof.
 //!
 //! # Anchor modes
 //!
@@ -39,31 +39,33 @@ use crate::{
         ZonePortal,
     },
     attestation::{
-        AttestationDomain, SettlementAttestation, SettlementCertificate,
-        SignedSettlementAttestation,
+        AttestationDomain, FastSettlementProofPolicy, SettlementAttestation, SettlementCertificate,
+        SignedSettlementAttestation, read_historical_fast_epoch_config,
     },
     prover::SettlementProof,
     prover_config::active_l1_hardfork,
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
-use alloy_eips::{BlockHashOrNumber, eip2935::HISTORY_SERVE_WINDOW};
+use alloy_eips::{BlockHashOrNumber, BlockNumberOrTag, eip2935::HISTORY_SERVE_WINDOW};
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, Sealable as _, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
-use alloy_rpc_types_eth::Filter;
+use alloy_rpc_types_eth::{BlockId, Filter};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use eyre::{OptionExt as _, Result, WrapErr as _};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
-use reth_storage_api::BlockNumReader;
+use reth_storage_api::{BlockNumReader, StateProvider as _};
 use schnellru::{ByLength, LruMap};
+use serde::{Deserialize, Serialize};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 use zone_chainspec::ZoneChainSpec;
+use zone_l1::TempoStateExt as _;
 use zone_prover::{ProofBundle, VerifierMode};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
@@ -83,6 +85,12 @@ pub enum BatchSubmitError {
 impl From<eyre::Report> for BatchSubmitError {
     fn from(error: eyre::Report) -> Self {
         Self::Other(error)
+    }
+}
+
+impl From<alloy_contract::Error> for BatchSubmitError {
+    fn from(error: alloy_contract::Error) -> Self {
+        Self::Other(error.into())
     }
 }
 
@@ -361,7 +369,9 @@ impl BatchSubmitter {
 
     /// Resolve the single immutable anchor shared by proving, quorum, and submission.
     pub async fn prepare_batch(&self, batch: BatchData) -> Result<PreparedBatch> {
-        let anchor = self.resolve_batch_anchor(batch.tempo_block_number).await?;
+        let anchor = self
+            .resolve_batch_anchor(batch.tempo_block_number, batch.tempo_block_hash)
+            .await?;
         Ok(PreparedBatch { batch, anchor })
     }
 
@@ -426,9 +436,12 @@ impl BatchSubmitter {
 
         let signer = self.signer.as_ref();
         let metadata = self
-            .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
+            .read_submission_metadata(
+                prepared,
+                signer.map_or(Address::ZERO, PrivateKeySigner::address),
+            )
             .await?;
-        self.validate_submission_metadata(batch, metadata, certificate.is_some())?;
+        self.validate_submission_metadata(batch, metadata, certificate.is_some(), verifier_mode)?;
         if let Some(certificate) = certificate {
             self.validate_certificate(
                 prepared,
@@ -595,6 +608,11 @@ impl BatchSubmitter {
         let message = SettlementAttestation {
             zoneId: metadata.stable.zone_id,
             sequencerSetVersion: metadata.sequencer_set_version,
+            fastEpoch: 0,
+            rosterHash: B256::ZERO,
+            previousZoneHeight: U256::ZERO,
+            previousBlockHash: B256::ZERO,
+            previousWithdrawalBatchIndex: 0,
             zoneHeight: U256::from(batch.zone_height),
             withdrawalBatchIndex: U256::from(batch.withdrawal_batch_index),
             verifier: metadata.verifier,
@@ -613,74 +631,145 @@ impl BatchSubmitter {
         Ok(SignedSettlementAttestation::sign(message, domain, signer)?.signature)
     }
 
-    /// Read all mutable portal state needed for one submission at a single L1 block.
+    /// Read immutable authority at the imported hash and the accepted prefix at one hash-canonical
+    /// live L1 snapshot.
     ///
     /// The portal and chain identifiers are immutable, so the first call includes and caches them.
     /// Sequencer membership and verifier configuration are deliberately refreshed on every submission.
-    async fn read_submission_metadata(&self, signer: Address) -> Result<PortalSubmissionMetadata> {
-        if let Some(stable) = self.stable_portal_metadata.get().copied() {
-            let (
-                withdrawal_batch_index,
-                sequencer_set_version,
-                sequencer_threshold,
-                signer_is_sequencer,
-                verifier,
-            ) = self
-                .l1_provider
-                .multicall()
-                .add(self.portal.withdrawalBatchIndex())
-                .add(self.portal.sequencerSetVersion())
-                .add(self.portal.sequencerThreshold())
-                .add(self.portal.isSequencer(signer))
-                .add(self.portal.verifier())
-                .aggregate()
-                .await?;
-            return Ok(Self::build_submission_metadata(
-                RawPortalSubmissionMetadata {
-                    withdrawal_batch_index,
-                    sequencer_set_version,
-                    sequencer_threshold,
-                    signer_is_sequencer,
-                    verifier,
-                },
-                stable,
-            ));
-        }
-
-        let (
-            withdrawal_batch_index,
-            sequencer_set_version,
-            sequencer_threshold,
-            signer_is_sequencer,
-            verifier,
-            zone_id,
-            chain_id,
-        ) = self
+    async fn read_submission_metadata(
+        &self,
+        prepared: &PreparedBatch,
+        signer: Address,
+    ) -> Result<PortalSubmissionMetadata> {
+        let header = self
             .l1_provider
-            .multicall()
-            .add(self.portal.withdrawalBatchIndex())
-            .add(self.portal.sequencerSetVersion())
-            .add(self.portal.sequencerThreshold())
-            .add(self.portal.isSequencer(signer))
-            .add(self.portal.verifier())
-            .add(self.portal.zoneId())
-            .get_chain_id()
-            .aggregate()
-            .await?;
-        let stable = StablePortalMetadata {
-            zone_id,
-            chain_id: chain_id
-                .try_into()
-                .map_err(|_| eyre::eyre!("Tempo L1 chain ID overflow"))?,
+            .get_header_by_number(prepared.batch.tempo_block_number.into())
+            .await?
+            .ok_or_eyre("imported Tempo L1 header is unavailable")?;
+        eyre::ensure!(
+            header.hash_slow() == prepared.batch.tempo_block_hash,
+            "canonical L1 header at imported height changed from the Zone-stored hash"
+        );
+        let block = BlockId::hash_canonical(prepared.batch.tempo_block_hash);
+        let live_header = self
+            .l1_provider
+            .get_header_by_number(BlockNumberOrTag::Latest)
+            .await?
+            .ok_or_eyre("latest L1 header is unavailable")?;
+        let live_block = BlockId::hash_canonical(live_header.hash_slow());
+        let stable = if let Some(stable) = self.stable_portal_metadata.get().copied() {
+            stable
+        } else {
+            StablePortalMetadata {
+                zone_id: self.portal.zoneId().block(block).call().await?,
+                chain_id: self.l1_provider.get_chain_id().await?,
+            }
         };
         let _ = self.stable_portal_metadata.set(stable);
+        let fast_epoch = self.portal.fastEpoch().block(block).call().await?;
+        let fast_active = self.portal.fastEpochActive().block(block).call().await?;
+        let live_fast_epoch = self.portal.fastEpoch().block(live_block).call().await?;
+        let live_fast_active = self
+            .portal
+            .fastEpochActive()
+            .block(live_block)
+            .call()
+            .await?;
+        eyre::ensure!(
+            live_fast_epoch == fast_epoch && live_fast_active == fast_active,
+            "live fast authority does not match the batch's imported Tempo configuration"
+        );
+        let verifier = self.portal.verifier().block(block).call().await?;
+        eyre::ensure!(
+            self.portal.verifier().block(live_block).call().await? == verifier,
+            "live verifier changed from the batch's imported Tempo configuration"
+        );
+        let (
+            fast_roster_hash,
+            fast_final_settlement_hash,
+            signer_is_fast_member,
+            fast_proof_policy,
+        ) = if fast_epoch == 0 {
+            (B256::ZERO, B256::ZERO, false, None)
+        } else {
+            let config = read_historical_fast_epoch_config(
+                &self.l1_provider,
+                self.portal_address,
+                fast_epoch,
+                block,
+            )
+            .await?;
+            let live_config = read_historical_fast_epoch_config(
+                &self.l1_provider,
+                self.portal_address,
+                fast_epoch,
+                live_block,
+            )
+            .await?;
+            let proof_policy = FastSettlementProofPolicy::from_config(&config)?;
+            (
+                config.rosterHash,
+                live_config.finalSettlementHash,
+                self.portal
+                    .isFastEpochMember(fast_epoch, signer)
+                    .block(block)
+                    .call()
+                    .await?,
+                Some(proof_policy),
+            )
+        };
+        if let Some(policy) = fast_proof_policy {
+            let code = self
+                .l1_provider
+                .get_code_at(verifier)
+                .block_id(block)
+                .await?;
+            let live_code = self
+                .l1_provider
+                .get_code_at(verifier)
+                .block_id(live_block)
+                .await?;
+            eyre::ensure!(
+                keccak256(&code) == policy.expected_verifier_code_hash
+                    && keccak256(&live_code) == policy.expected_verifier_code_hash,
+                "historical or live verifier code hash does not match fast enrollment"
+            );
+        }
         Ok(Self::build_submission_metadata(
             RawPortalSubmissionMetadata {
-                withdrawal_batch_index,
-                sequencer_set_version,
-                sequencer_threshold,
-                signer_is_sequencer,
+                withdrawal_batch_index: self
+                    .portal
+                    .withdrawalBatchIndex()
+                    .block(live_block)
+                    .call()
+                    .await?,
+                sequencer_set_version: self
+                    .portal
+                    .sequencerSetVersion()
+                    .block(live_block)
+                    .call()
+                    .await?,
+                sequencer_threshold: self
+                    .portal
+                    .sequencerThreshold()
+                    .block(live_block)
+                    .call()
+                    .await?,
+                signer_is_sequencer: self
+                    .portal
+                    .isSequencer(signer)
+                    .block(live_block)
+                    .call()
+                    .await?,
                 verifier,
+                fast_active,
+                fast_epoch,
+                fast_roster_hash,
+                fast_final_settlement_hash,
+                signer_is_fast_member,
+                fast_proof_policy,
+                zone_height: self.portal.zoneHeight().block(live_block).call().await?,
+                block_hash: self.portal.blockHash().block(live_block).call().await?,
             },
             stable,
         ))
@@ -697,6 +786,14 @@ impl BatchSubmitter {
             sequencer_threshold: raw.sequencer_threshold,
             signer_is_sequencer: raw.signer_is_sequencer,
             verifier: raw.verifier,
+            fast_active: raw.fast_active,
+            fast_epoch: raw.fast_epoch,
+            fast_roster_hash: raw.fast_roster_hash,
+            fast_final_settlement_hash: raw.fast_final_settlement_hash,
+            signer_is_fast_member: raw.signer_is_fast_member,
+            fast_proof_policy: raw.fast_proof_policy,
+            zone_height: raw.zone_height,
+            block_hash: raw.block_hash,
         }
     }
 
@@ -705,6 +802,7 @@ impl BatchSubmitter {
         batch: &BatchData,
         metadata: PortalSubmissionMetadata,
         has_certificate: bool,
+        verifier_mode: VerifierMode,
     ) -> Result<()> {
         let expected_l2_index = metadata
             .withdrawal_batch_index
@@ -716,10 +814,33 @@ impl BatchSubmitter {
             batch.zone_height,
             batch.withdrawal_batch_index,
         );
-        eyre::ensure!(
-            metadata.sequencer_threshold > 0,
-            "portal sequencer threshold is zero"
-        );
+        if metadata.fast_active {
+            eyre::ensure!(
+                has_certificate,
+                "T14 fast settlement requires a quorum certificate"
+            );
+            eyre::ensure!(
+                metadata.fast_epoch != 0,
+                "active fast authority has epoch zero"
+            );
+            eyre::ensure!(
+                metadata.signer_is_fast_member,
+                "batch submitter is not a member of the active fast epoch"
+            );
+            eyre::ensure!(
+                metadata.fast_final_settlement_hash.is_zero(),
+                "fast epoch final settlement already recorded"
+            );
+            metadata
+                .fast_proof_policy
+                .ok_or_eyre("active fast epoch is missing proof policy")?
+                .validate_mode(verifier_mode)?;
+        } else {
+            eyre::ensure!(
+                metadata.sequencer_threshold > 0,
+                "portal sequencer threshold is zero"
+            );
+        }
         if !has_certificate {
             eyre::ensure!(
                 metadata.sequencer_threshold == 1,
@@ -784,10 +905,39 @@ impl BatchSubmitter {
             attestation.zoneId == metadata.stable.zone_id,
             "certificate zone ID changed"
         );
-        eyre::ensure!(
-            attestation.sequencerSetVersion == metadata.sequencer_set_version,
-            "certificate signer-set version changed"
-        );
+        if metadata.fast_active {
+            eyre::ensure!(
+                attestation.is_fast(),
+                "legacy certificate cannot authorize fast settlement"
+            );
+            eyre::ensure!(
+                certificate.signatures.len() == 2,
+                "fast settlement requires exactly two signatures"
+            );
+            eyre::ensure!(
+                attestation.fastEpoch == metadata.fast_epoch,
+                "certificate fast epoch changed"
+            );
+            eyre::ensure!(
+                attestation.rosterHash == metadata.fast_roster_hash,
+                "certificate fast roster changed"
+            );
+            eyre::ensure!(
+                attestation.previousZoneHeight == metadata.zone_height
+                    && attestation.previousBlockHash == metadata.block_hash
+                    && attestation.previousWithdrawalBatchIndex == metadata.withdrawal_batch_index,
+                "certificate previous prefix no longer matches ZonePortal"
+            );
+        } else {
+            eyre::ensure!(
+                !attestation.is_fast(),
+                "fast certificate cannot authorize legacy settlement"
+            );
+            eyre::ensure!(
+                attestation.sequencerSetVersion == metadata.sequencer_set_version,
+                "certificate signer-set version changed"
+            );
+        }
         eyre::ensure!(
             attestation.zoneHeight == U256::from(zone_height),
             "certificate zone height changed"
@@ -821,7 +971,7 @@ impl BatchSubmitter {
             "certificate withdrawal queue hash changed"
         );
         eyre::ensure!(
-            VerifierMode::try_from(attestation.verifierConfigHash)? == verifier_mode,
+            attestation.verifierConfigHash == verifier_mode.config_hash(),
             "certificate verifier config changed"
         );
         eyre::ensure!(
@@ -831,6 +981,15 @@ impl BatchSubmitter {
         eyre::ensure!(
             attestation.anchorBlockHash == prepared.anchor.block_hash(),
             "certificate anchor hash changed"
+        );
+        let domain = AttestationDomain {
+            l1_chain_id: metadata.stable.chain_id,
+            portal_address: self.portal_address,
+            zone_id: metadata.stable.zone_id,
+        };
+        eyre::ensure!(
+            certificate.digest == domain.settlement_digest(attestation),
+            "certificate digest does not match its settlement attestation"
         );
 
         Ok(())
@@ -843,7 +1002,11 @@ impl BatchSubmitter {
     /// - **Ancestry** (gap ≥ configured effective window): a recent L1 block
     ///   behind the configured safety margin is used as anchor. Ancestry headers
     ///   are collected and validated for future prover integration.
-    async fn resolve_batch_anchor(&self, tempo_block_number: u64) -> Result<BatchAnchor> {
+    async fn resolve_batch_anchor(
+        &self,
+        tempo_block_number: u64,
+        imported_tempo_block_hash: B256,
+    ) -> Result<BatchAnchor> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
         if tempo_block_number > current_l1_block {
@@ -870,12 +1033,16 @@ impl BatchSubmitter {
                 .ok_or_eyre(format!("L1 anchor block {tempo_block_number} not found"))?
                 .inner
                 .hash;
+            eyre::ensure!(
+                block_hash == imported_tempo_block_hash,
+                "canonical L1 hash for imported Tempo block {tempo_block_number} is {block_hash}, but the canonical Zone batch imported {imported_tempo_block_hash}"
+            );
             return Ok(BatchAnchor::Direct { block_hash });
         }
 
         let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
         let ancestry_headers = self
-            .fetch_ancestry_headers(tempo_block_number, anchor_block)
+            .fetch_ancestry_headers(tempo_block_number, imported_tempo_block_hash, anchor_block)
             .await?;
 
         warn!(
@@ -932,6 +1099,23 @@ impl BatchSubmitter {
             )));
         }
 
+        let imported = self
+            .l1_provider
+            .get_header_by_number(prepared.batch.tempo_block_number.into())
+            .await
+            .map_err(|error| BatchSubmitError::Other(error.into()))?
+            .ok_or_else(|| {
+                BatchSubmitError::PreparedAnchorInvalid(eyre::eyre!(
+                    "imported L1 block {} is unavailable",
+                    prepared.batch.tempo_block_number
+                ))
+            })?;
+        if imported.hash_slow() != prepared.batch.tempo_block_hash {
+            return Err(BatchSubmitError::PreparedAnchorInvalid(eyre::eyre!(
+                "imported L1 block hash no longer matches the canonical Zone batch anchor"
+            )));
+        }
+
         let canonical = self
             .l1_provider
             .get_header_by_number(anchor_block_number.into())
@@ -957,12 +1141,27 @@ impl BatchSubmitter {
     /// Returns headers in ascending block-number order. The first header's
     /// `parent_hash` is validated against the hash of block `from`, ensuring the
     /// chain is rooted at the expected block.
-    async fn fetch_ancestry_headers(&self, from: u64, to: u64) -> Result<Vec<Bytes>> {
+    async fn fetch_ancestry_headers(
+        &self,
+        from: u64,
+        imported_hash: B256,
+        to: u64,
+    ) -> Result<Vec<Bytes>> {
         use futures::stream;
 
         if to <= from {
             return Ok(Vec::new());
         }
+        let canonical_root = self
+            .l1_provider
+            .get_header_by_number(from.into())
+            .await?
+            .ok_or_eyre(format!("imported L1 header {from} not found"))?;
+        eyre::ensure!(
+            canonical_root.hash_slow() == imported_hash,
+            "canonical L1 hash for imported block {from} is {}, but the canonical Zone batch imported {imported_hash}",
+            canonical_root.hash_slow()
+        );
 
         // Snapshot the cache without changing its LRU order. Network requests
         // and validation happen after the read lock is released.
@@ -1283,7 +1482,7 @@ impl SettlementAbi {
         ))
     }
 
-    fn from_hardfork(hardfork: TempoHardfork) -> Self {
+    pub fn from_hardfork(hardfork: TempoHardfork) -> Self {
         if hardfork >= TempoHardfork::T13 {
             Self::T13
         } else {
@@ -1303,12 +1502,15 @@ impl SettlementAbi {
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
 /// Produced by the zone monitor and combined with one [`BatchAnchor`] in [`PreparedBatch`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchData {
     /// Zone L2 height committed by this batch.
     pub zone_height: u64,
     /// Tempo L1 block number for EIP-2935 verification.
     pub tempo_block_number: u64,
+    /// Hash stored beside `tempo_block_number` in `TempoState` at the exact canonical Zone batch
+    /// block. Remote L1 lookups may confirm this value but never supply settlement authority.
+    pub tempo_block_hash: B256,
     /// Previous zone block hash (must match portal's current `blockHash`).
     pub prev_block_hash: B256,
     /// New zone block hash after this batch.
@@ -1332,7 +1534,7 @@ pub struct BatchData {
 }
 
 /// Immutable Tempo anchor selected for one settlement attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchAnchor {
     /// The batch's Tempo block remains directly available through EIP-2935.
     Direct {
@@ -1393,7 +1595,7 @@ impl BatchAnchor {
 }
 
 /// Batch commitments and their single authoritative Tempo anchor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedBatch {
     pub batch: BatchData,
     pub anchor: BatchAnchor,
@@ -1431,6 +1633,8 @@ pub(crate) struct FinalizedBatchLog {
 pub(crate) struct ZoneBlockSnapshot {
     /// Latest Tempo L1 block number as seen by the zone.
     pub tempo_block_number: u64,
+    /// Imported Tempo hash read from `TempoState` at this exact canonical Zone block.
+    pub tempo_block_hash: B256,
     /// Cumulative hash of all deposits processed by the zone up to this block.
     pub processed_deposit_hash: B256,
     /// Total number of deposits processed by the zone up to this block.
@@ -1457,6 +1661,10 @@ fn settlement_proof(
 ) -> Result<(Bytes, Bytes)> {
     let config = Bytes::from_static(verifier_mode.config());
     let Some(bundle) = proof_bundle else {
+        eyre::ensure!(
+            verifier_mode == VerifierMode::NoProof,
+            "{verifier_mode:?} settlement requires a proof bundle"
+        );
         return Ok((config, Bytes::new()));
     };
     eyre::ensure!(
@@ -1467,7 +1675,7 @@ fn settlement_proof(
     Ok((config, bundle.proof.clone()))
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StablePortalMetadata {
     zone_id: u32,
     chain_id: u64,
@@ -1479,6 +1687,14 @@ struct RawPortalSubmissionMetadata {
     sequencer_threshold: u8,
     signer_is_sequencer: bool,
     verifier: Address,
+    fast_active: bool,
+    fast_epoch: u64,
+    fast_roster_hash: B256,
+    fast_final_settlement_hash: B256,
+    signer_is_fast_member: bool,
+    fast_proof_policy: Option<FastSettlementProofPolicy>,
+    zone_height: U256,
+    block_hash: B256,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1489,6 +1705,14 @@ struct PortalSubmissionMetadata {
     sequencer_threshold: u8,
     signer_is_sequencer: bool,
     verifier: Address,
+    fast_active: bool,
+    fast_epoch: u64,
+    fast_roster_hash: B256,
+    fast_final_settlement_hash: B256,
+    signer_is_fast_member: bool,
+    fast_proof_policy: Option<FastSettlementProofPolicy>,
+    zone_height: U256,
+    block_hash: B256,
 }
 /// One validated L1 header retained for ancestry proof construction.
 #[derive(Debug, Clone)]
@@ -1688,11 +1912,40 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     inbox_address: Address,
     number: u64,
 ) -> Result<ZoneBlockSnapshot> {
-    let (_, receipts) = block_with_receipts(provider, number)?;
-    let block_hash = provider
+    let (block, receipts) = block_with_receipts(provider, number)?;
+    let block_hash = block.header.hash_slow();
+    let canonical_hash = provider
         .block_hash(number)?
         .ok_or_else(|| eyre::eyre!("canonical zone block {number} is missing its hash"))?;
+    eyre::ensure!(
+        canonical_hash == block_hash,
+        "canonical zone block {number} changed while reading its settlement boundary"
+    );
+    let state = provider.state_by_block_hash(block_hash)?;
+    let imported_tempo = state.tempo_num_hash().map_err(|error| eyre::eyre!(error))?;
+    let state_processed_deposit_hash = state
+        .storage(
+            inbox_address,
+            zone_precompiles::inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH.into(),
+        )?
+        .map(B256::from)
+        .unwrap_or_default();
+    let state_processed_deposit_number = state
+        .storage(
+            inbox_address,
+            zone_precompiles::inbox::slots::PROCESSED_DEPOSIT_NUMBER.into(),
+        )?
+        .unwrap_or_default()
+        .to::<u64>();
+    let state_processed_token_count = state
+        .storage(
+            inbox_address,
+            zone_precompiles::inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT.into(),
+        )?
+        .unwrap_or_default()
+        .to::<u64>();
     let mut tempo_block_number = None;
+    let mut tempo_block_hash = None;
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
     let mut processed_token_count = None;
@@ -1705,13 +1958,15 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
             let Some(topic) = log.topics().first() else {
                 continue;
             };
-            let (block_number, deposit_hash, deposit_number, token_count) = match *topic {
+            let (block_number, block_hash, deposit_hash, deposit_number, token_count) = match *topic
+            {
                 TempoAdvanced::SIGNATURE_HASH => {
                     let event = TempoAdvanced::decode_log(log).map_err(|err| {
                         eyre::eyre!("invalid post-T13 TempoAdvanced log in block {number}: {err}")
                     })?;
                     (
                         event.tempoBlockNumber,
+                        event.tempoBlockHash,
                         event.newProcessedDepositQueueHash,
                         event.lastProcessedDepositNumber,
                         event.lastProcessedEnabledTokenCount,
@@ -1723,6 +1978,7 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
                     })?;
                     (
                         event.tempoBlockNumber,
+                        event.tempoBlockHash,
                         event.newProcessedDepositQueueHash,
                         event.lastProcessedDepositNumber,
                         0,
@@ -1737,21 +1993,38 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
                     "zone block {number} contains more than one TempoAdvanced event"
                 ));
             }
+            tempo_block_hash = Some(block_hash);
             processed_deposit_hash = Some(deposit_hash);
             processed_deposit_number = Some(deposit_number);
             processed_token_count = Some(token_count);
         }
     }
 
+    if let Some(event_number) = tempo_block_number {
+        eyre::ensure!(
+            event_number == imported_tempo.number && tempo_block_hash == Some(imported_tempo.hash),
+            "TempoAdvanced NumHash ({event_number}, {}) does not match TempoState NumHash ({}, {}) at canonical Zone block {number}",
+            tempo_block_hash.unwrap_or_default(),
+            imported_tempo.number,
+            imported_tempo.hash,
+        );
+        eyre::ensure!(
+            processed_deposit_hash == Some(state_processed_deposit_hash)
+                && processed_deposit_number == Some(state_processed_deposit_number)
+                && processed_token_count == Some(state_processed_token_count),
+            "TempoAdvanced commitments do not match canonical Zone state at block {number}"
+        );
+    }
+    eyre::ensure!(
+        provider.block_hash(number)? == Some(block_hash),
+        "canonical zone block {number} changed while pinning settlement state"
+    );
     Ok(ZoneBlockSnapshot {
-        tempo_block_number: tempo_block_number
-            .ok_or_else(|| eyre::eyre!("zone block {number} is missing TempoAdvanced"))?,
-        processed_deposit_hash: processed_deposit_hash
-            .ok_or_else(|| eyre::eyre!("zone block {number} is missing its deposit commitment"))?,
-        processed_deposit_number: processed_deposit_number
-            .ok_or_else(|| eyre::eyre!("zone block {number} is missing its deposit number"))?,
-        processed_token_count: processed_token_count
-            .ok_or_else(|| eyre::eyre!("zone block {number} is missing its token cursor"))?,
+        tempo_block_number: imported_tempo.number,
+        tempo_block_hash: imported_tempo.hash,
+        processed_deposit_hash: state_processed_deposit_hash,
+        processed_deposit_number: state_processed_deposit_number,
+        processed_token_count: state_processed_token_count,
         block_hash,
     })
 }
@@ -1943,7 +2216,7 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
-    use alloy_consensus::{Header as ConsensusHeader, Sealable as _};
+    use alloy_consensus::Header as ConsensusHeader;
     use alloy_primitives::{B256, address};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
@@ -2080,6 +2353,7 @@ mod tests {
             batch: BatchData {
                 zone_height,
                 tempo_block_number,
+                tempo_block_hash: B256::repeat_byte(0x26),
                 prev_block_hash: B256::repeat_byte(0x24),
                 next_block_hash: B256::repeat_byte(0x25),
                 prev_processed_deposit_hash: B256::ZERO,
@@ -2474,10 +2748,14 @@ mod tests {
         }
 
         // The initial range fetches its base plus all ancestry headers.
+        asserter.push_success(&headers[0]);
         for header in &headers[..5] {
             asserter.push_success(header);
         }
-        let first = submitter.fetch_ancestry_headers(10, 14).await.unwrap();
+        let first = submitter
+            .fetch_ancestry_headers(10, headers[0].hash_slow(), 14)
+            .await
+            .unwrap();
         let expected_first = headers[1..5]
             .iter()
             .map(|header| Bytes::from(alloy_rlp::encode(&header.inner.inner)))
@@ -2488,8 +2766,12 @@ mod tests {
         // The overlapping range reuses blocks 11..=14 and fetches only block 15.
         // If the implementation repeats any cached RPC call, the mock has no
         // additional response queued and the test fails.
+        asserter.push_success(&headers[1]);
         asserter.push_success(&headers[5]);
-        let second = submitter.fetch_ancestry_headers(11, 15).await.unwrap();
+        let second = submitter
+            .fetch_ancestry_headers(11, headers[1].hash_slow(), 15)
+            .await
+            .unwrap();
         let expected_second = headers[2..6]
             .iter()
             .map(|header| Bytes::from(alloy_rlp::encode(&header.inner.inner)))
@@ -2513,13 +2795,21 @@ mod tests {
         *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
 
         let mut parent_hash = B256::ZERO;
+        let mut headers = Vec::new();
         for number in 10..=13 {
             let (header, hash) = mock_l1_header(number, parent_hash);
-            asserter.push_success(&header);
+            headers.push(header);
             parent_hash = hash;
         }
 
-        submitter.fetch_ancestry_headers(10, 13).await.unwrap();
+        asserter.push_success(&headers[0]);
+        for header in &headers {
+            asserter.push_success(header);
+        }
+        submitter
+            .fetch_ancestry_headers(10, headers[0].hash_slow(), 13)
+            .await
+            .unwrap();
         assert_eq!(
             submitter
                 .ancestry_header_cache
@@ -2530,7 +2820,11 @@ mod tests {
         );
 
         // Resolving a fully cached range must not promote or replace every hit.
-        submitter.fetch_ancestry_headers(10, 12).await.unwrap();
+        asserter.push_success(&headers[0]);
+        submitter
+            .fetch_ancestry_headers(10, headers[0].hash_slow(), 12)
+            .await
+            .unwrap();
         assert_eq!(
             submitter
                 .ancestry_header_cache
@@ -2553,7 +2847,7 @@ mod tests {
         let (header, hash) = mock_l1_header(100, B256::ZERO);
         asserter.push_success(&100_u64);
         asserter.push_success(&header);
-        let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
+        let anchor = submitter.resolve_batch_anchor(100, hash).await.unwrap();
 
         assert_eq!(anchor.block_number(100), 100);
         assert_eq!(anchor.block_hash(), hash);
@@ -2570,7 +2864,10 @@ mod tests {
         let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
 
         asserter.push_success(&100_u64);
-        let err = match submitter.resolve_batch_anchor(101).await {
+        let err = match submitter
+            .resolve_batch_anchor(101, B256::repeat_byte(0x55))
+            .await
+        {
             Ok(_) => panic!("future L1 anchor was accepted"),
             Err(err) => err,
         };
@@ -2587,7 +2884,9 @@ mod tests {
         let provider = mock_l1(asserter.clone());
         let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
         let (header, hash) = mock_l1_header(162_196, B256::ZERO);
+        let (imported, imported_hash) = mock_l1_header(160_000, B256::repeat_byte(0x15));
         let mut prepared = test_prepared_batch(120, 160_000);
+        prepared.batch.tempo_block_hash = imported_hash;
         prepared.anchor = BatchAnchor::Ancestry {
             block_number: 162_196,
             block_hash: hash,
@@ -2595,6 +2894,7 @@ mod tests {
         };
 
         asserter.push_success(&162_208_u64);
+        asserter.push_success(&imported);
         asserter.push_success(&header);
         let observed_head = submitter.validate_prepared_anchor(&prepared).await.unwrap();
 
@@ -2651,10 +2951,23 @@ mod tests {
             sequencer_threshold: 1,
             signer_is_sequencer: true,
             verifier: Address::repeat_byte(2),
+            fast_active: false,
+            fast_epoch: 0,
+            fast_roster_hash: B256::ZERO,
+            fast_final_settlement_hash: B256::ZERO,
+            signer_is_fast_member: false,
+            fast_proof_policy: None,
+            zone_height: U256::ZERO,
+            block_hash: B256::ZERO,
         };
         let attestation = SettlementAttestation {
             zoneId: 7,
             sequencerSetVersion: 3,
+            fastEpoch: 0,
+            rosterHash: B256::ZERO,
+            previousZoneHeight: U256::ZERO,
+            previousBlockHash: B256::ZERO,
+            previousWithdrawalBatchIndex: 0,
             zoneHeight: U256::from(batch.zone_height),
             withdrawalBatchIndex: U256::from(batch.withdrawal_batch_index),
             verifier: metadata.verifier,
@@ -2706,6 +3019,7 @@ mod tests {
         let (verifier_config, proof) = settlement_proof(VerifierMode::NoProof, None).unwrap();
         assert_eq!(verifier_config.as_ref(), &[2]);
         assert!(proof.is_empty());
+        assert!(settlement_proof(VerifierMode::NitroV1, None).is_err());
 
         let empty_nitro = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
@@ -2738,50 +3052,68 @@ mod tests {
         assert_eq!(proof.as_ref(), [0xaa, 0xbb]);
     }
 
-    #[tokio::test]
-    async fn submission_metadata_multicalls_mutable_values_and_caches_stable_values() {
-        let asserter = Asserter::new();
-        let portal_address = Address::repeat_byte(0x22);
-        let signer = Address::repeat_byte(0x33);
+    #[test]
+    fn submission_metadata_preserves_historical_fast_authority() {
         let verifier = Address::repeat_byte(0x44);
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let submitter = BatchSubmitter::new(portal_address, provider, test_chain_spec());
+        let policy = FastSettlementProofPolicy {
+            mode: crate::attestation::SettlementProofMode::ProofRequired,
+            expected_verifier_code_hash: B256::repeat_byte(0x45),
+            expected_verifier_config_hash: VerifierMode::NitroV1.config_hash(),
+        };
+        let metadata = BatchSubmitter::build_submission_metadata(
+            RawPortalSubmissionMetadata {
+                withdrawal_batch_index: 7,
+                sequencer_set_version: 11,
+                sequencer_threshold: 2,
+                signer_is_sequencer: false,
+                verifier,
+                fast_active: true,
+                fast_epoch: 9,
+                fast_roster_hash: B256::repeat_byte(0x46),
+                fast_final_settlement_hash: B256::ZERO,
+                signer_is_fast_member: true,
+                fast_proof_policy: Some(policy),
+                zone_height: U256::from(91),
+                block_hash: B256::repeat_byte(0x47),
+            },
+            StablePortalMetadata {
+                zone_id: 42,
+                chain_id: 42431,
+            },
+        );
+        assert_eq!(metadata.withdrawal_batch_index, 7);
+        assert_eq!(metadata.sequencer_set_version, 11);
+        assert_eq!(metadata.fast_epoch, 9);
+        assert_eq!(metadata.fast_roster_hash, B256::repeat_byte(0x46));
+        assert_eq!(metadata.fast_proof_policy, Some(policy));
+        assert!(metadata.signer_is_fast_member);
+        assert_eq!(metadata.verifier, verifier);
+        assert_eq!(metadata.stable.zone_id, 42);
+        assert_eq!(metadata.stable.chain_id, 42431);
+    }
 
-        asserter.push_success(&abi_encode_multicall(vec![
-            abi_word(7_u64),
-            abi_word(11_u64),
-            abi_word(U256::from(1)),
-            abi_word(true),
-            abi_word(verifier),
-            abi_word(42_u32),
-            abi_word(U256::from(42431)),
-        ]));
-        let first = submitter.read_submission_metadata(signer).await.unwrap();
-        assert_eq!(first.withdrawal_batch_index, 7);
-        assert_eq!(first.sequencer_set_version, 11);
-        assert!(first.signer_is_sequencer);
-        assert_eq!(first.verifier, verifier);
-        assert_eq!(first.stable.zone_id, 42);
-        assert_eq!(first.stable.chain_id, 42431);
-
-        let next_verifier = Address::repeat_byte(0x55);
-        asserter.push_success(&abi_encode_multicall(vec![
-            abi_word(8_u64),
-            abi_word(12_u64),
-            abi_word(U256::from(1)),
-            abi_word(false),
-            abi_word(next_verifier),
-        ]));
-        let second = submitter.read_submission_metadata(signer).await.unwrap();
-        assert_eq!(second.withdrawal_batch_index, 8);
-        assert_eq!(second.sequencer_set_version, 12);
-        assert!(!second.signer_is_sequencer);
-        assert_eq!(second.verifier, next_verifier);
-        assert_eq!(second.stable.zone_id, 42);
-        assert_eq!(second.stable.chain_id, 42431);
-        assert!(asserter.read_q().is_empty());
+    #[test]
+    fn stable_portal_metadata_cache_keeps_the_first_identity() {
+        let submitter = BatchSubmitter::new(
+            Address::repeat_byte(0x22),
+            mock_l1(Asserter::new()),
+            test_chain_spec(),
+        );
+        let first = StablePortalMetadata {
+            zone_id: 42,
+            chain_id: 42431,
+        };
+        assert!(submitter.stable_portal_metadata.set(first).is_ok());
+        assert!(
+            submitter
+                .stable_portal_metadata
+                .set(StablePortalMetadata {
+                    zone_id: 43,
+                    chain_id: 1,
+                })
+                .is_err()
+        );
+        assert_eq!(submitter.stable_portal_metadata.get(), Some(&first));
     }
 
     #[test]
@@ -2793,6 +3125,7 @@ mod tests {
         let batch = BatchData {
             zone_height: 1,
             tempo_block_number: 1,
+            tempo_block_hash: B256::ZERO,
             prev_block_hash: B256::ZERO,
             next_block_hash: B256::repeat_byte(0x11),
             prev_processed_deposit_hash: B256::ZERO,
@@ -2814,10 +3147,18 @@ mod tests {
             sequencer_threshold: 2,
             signer_is_sequencer: true,
             verifier: Address::ZERO,
+            fast_active: false,
+            fast_epoch: 0,
+            fast_roster_hash: B256::ZERO,
+            fast_final_settlement_hash: B256::ZERO,
+            signer_is_fast_member: false,
+            fast_proof_policy: None,
+            zone_height: U256::ZERO,
+            block_hash: B256::ZERO,
         };
 
         let err = submitter
-            .validate_submission_metadata(&batch, metadata, false)
+            .validate_submission_metadata(&batch, metadata, false, VerifierMode::NoProof)
             .unwrap_err();
         assert!(
             err.to_string()
@@ -2825,7 +3166,7 @@ mod tests {
         );
 
         submitter
-            .validate_submission_metadata(&batch, metadata, true)
+            .validate_submission_metadata(&batch, metadata, true, VerifierMode::NoProof)
             .unwrap();
     }
 
@@ -2852,7 +3193,7 @@ mod tests {
         let (header, hash) = mock_l1_header(99, B256::ZERO);
         asserter.push_success(&100_u64);
         asserter.push_success(&header);
-        let anchor = submitter.resolve_batch_anchor(99).await.unwrap();
+        let anchor = submitter.resolve_batch_anchor(99, hash).await.unwrap();
 
         assert_eq!(anchor.block_hash(), hash);
         assert!(submitter.ancestry_header_cache.read().is_empty());

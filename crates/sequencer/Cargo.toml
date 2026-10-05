@@ -19,8 +19,10 @@ tempo-precompiles.workspace = true
 tempo-primitives.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-chainspec.workspace = true
+zone-fast-transfer.workspace = true
 zone-l1.workspace = true
 zone-p2p.workspace = true
+zone-precompiles.workspace = true
 zone-primitives.workspace = true
 zone-prover.workspace = true
 zone-rpc.workspace = true
@@ -57,6 +59,7 @@ serde.workspace = true
 serde_json.workspace = true
 schnellru.workspace = true
 tempfile.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true

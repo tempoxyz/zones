@@ -39,6 +39,7 @@
 //! to the same block.
 
 use alloy_consensus::BlockHeader as _;
+use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes as EthPayloadAttributes};
 use eyre::{OptionExt, WrapErr as _};
@@ -48,19 +49,109 @@ use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{BuiltPayload, PayloadKind};
 use reth_primitives_traits::SealedHeader;
 use std::{
-    sync::Arc,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempo_chainspec::spec::TempoHardforks as _;
 use tempo_primitives::TempoHeader;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use zone_chainspec::ZoneChainSpec;
+use zone_evm::same_anchor::SameAnchorOpening;
 use zone_l1::{DepositQueue, EncryptionKeyRing, FinalizedTarget, L1BlockDeposits, L1BlockTracker};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 use zone_sequencer::ProofCollectorHandle;
+
+use crate::{
+    fast_batch::{FastBatchAdmission, FastBatchScheduler},
+    fast_quorum::{FastAdmissionClock, FastRaft, ReplicatedBlockInput},
+    fast_runtime::FastOutcomeCertification,
+};
+
+pub type FastActivationRefreshFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<FastAuthorityRefresh, String>> + Send + 'a>>;
+
+/// Authority retained after importing an exact finalized epoch update. Closure stops admission,
+/// but the same roster must continue ordering terminal decisions and dispositions until retirement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FastAuthorityRefresh {
+    Open(SameAnchorOpening),
+    Drain(SameAnchorOpening),
+}
+
+impl FastAuthorityRefresh {
+    pub const fn opening(self) -> SameAnchorOpening {
+        match self {
+            Self::Open(opening) | Self::Drain(opening) => opening,
+        }
+    }
+
+    pub const fn admission_open(self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+}
+
+/// Revalidate production authority at the exact newly imported finalized Tempo anchor.
+pub trait FastActivationRefresh: Send + Sync + 'static {
+    fn refresh(&self, anchor: NumHash) -> FastActivationRefreshFuture<'_>;
+}
+
+/// Finalized-enrolled production authority. OpenRaft leadership, not a CLI role or the legacy
+/// anchor schedule, decides whether this process may propose the next block.
+#[derive(Clone)]
+pub struct FastProduction {
+    pub raft: FastRaft,
+    pub local_node_id: u64,
+    pub epoch: u64,
+    pub anchor: Arc<RwLock<SameAnchorOpening>>,
+    pub admission: FastAdmissionClock,
+    pub pending: Arc<AtomicBool>,
+    pub notified: Arc<tokio::sync::Notify>,
+    pub authority_active: Arc<AtomicBool>,
+    pub admission_open: Arc<AtomicBool>,
+    pub batch: FastBatchScheduler,
+    pub certification: Arc<dyn FastOutcomeCertification>,
+}
+
+impl fmt::Debug for FastProduction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FastProduction")
+            .field("local_node_id", &self.local_node_id)
+            .field("epoch", &self.epoch)
+            .field("pending", &self.pending.load(Ordering::Relaxed))
+            .field(
+                "authority_active",
+                &self.authority_active.load(Ordering::Relaxed),
+            )
+            .field(
+                "admission_open",
+                &self.admission_open.load(Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl FastProduction {
+    fn is_leader(&self) -> bool {
+        self.authority_active.load(Ordering::Acquire)
+            && self.raft.inner().metrics().borrow().current_leader == Some(self.local_node_id)
+    }
+
+    /// Notify the leader that a transaction is ready. The bit remains set across failed attempts.
+    pub fn notify_transaction(&self) {
+        self.pending.store(true, Ordering::Release);
+        self.notified.notify_one();
+    }
+}
 
 /// Local block production permit backed by the effective leadership schedule.
 ///
@@ -209,6 +300,8 @@ pub struct ZoneEngine {
     production_permit: Option<ProductionPermit>,
     /// Proof WAL writer invoked after execution and before canonicalization.
     proof_collector: Option<ProofCollectorHandle>,
+    /// Present only for a finalized-enrolled T14 epoch.
+    fast_production: Option<FastProduction>,
 }
 
 impl ZoneEngine {
@@ -236,12 +329,20 @@ impl ZoneEngine {
             portal_address,
             production_permit: None,
             proof_collector,
+            fast_production: None,
         }
     }
 
     /// Enforce the per-anchor leadership permit before every advance.
     pub fn with_production_permit(mut self, permit: ProductionPermit) -> Self {
         self.production_permit = Some(permit);
+        self
+    }
+
+    /// Replace legacy local production authority with finalized OpenRaft authority.
+    pub fn with_fast_production(mut self, production: FastProduction) -> Self {
+        self.production_permit = None;
+        self.fast_production = Some(production);
         self
     }
 
@@ -261,6 +362,11 @@ impl ZoneEngine {
         }
 
         loop {
+            let fast_notified = self
+                .fast_production
+                .as_ref()
+                .map(|fast| fast.notified.clone())
+                .unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
             tokio::select! {
                 biased;
                 () = stop.cancelled() => {
@@ -271,6 +377,17 @@ impl ZoneEngine {
                 _ = self.deposit_queue.notified() => {
                     if let Some(exit) = self.advance_all_available(&stop).await {
                         return exit;
+                    }
+                }
+                _ = fast_notified.notified(), if self.fast_production.is_some() => {
+                    // Allow up to five milliseconds for a ready-route transaction batch, while a
+                    // newly arrived L1 import remains ordered first by `advance_all_available`.
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    if let Some(exit) = self.advance_all_available(&stop).await {
+                        return exit;
+                    }
+                    if let Err(error) = self.advance_same_anchor(&stop).await {
+                        error!(target: "zone::engine", %error, "Fast same-anchor proposal failed");
                     }
                 }
                 // Periodic FCU heartbeat — also drains any blocks we missed
@@ -352,7 +469,10 @@ impl ZoneEngine {
             wall_clock_timestamp_millis,
         } = available;
         let checkpoint_only = !checkpoint_headers.is_empty();
-        let final_header = checkpoint_headers.last().unwrap_or(&l1_block.header);
+        let final_header = checkpoint_headers
+            .last()
+            .unwrap_or(&l1_block.header)
+            .clone();
         let l1_num_hash = final_header.num_hash();
 
         let timestamp_millis = zone_timestamp_millis(
@@ -397,11 +517,13 @@ impl ZoneEngine {
             },
             timestamp_millis_part,
             tempo_import,
+            fast_settlement_boundary: None,
         };
 
         // Send FCU with payload attributes through the engine API to trigger
         // payload building. The forkchoice state points at the current head;
         // the attributes carry the L1 block data for the new zone block.
+        let attributes_for_raft = attributes.clone();
         let res = self
             .to_engine
             .fork_choice_updated(self.forkchoice_state(), Some(attributes))
@@ -421,21 +543,16 @@ impl ZoneEngine {
             eyre::bail!("No payload");
         };
 
-        let header = payload.block().sealed_header().clone();
-        let block_number = header.number();
-        let res = self.to_engine.new_payload(payload.into()).await?;
+        let header = self
+            .execute_or_commit_payload(payload, attributes_for_raft, stop)
+            .await?;
 
-        if !res.is_valid() {
-            eyre::bail!("Invalid payload for block {block_number}");
-        }
-
-        if let Some(collector) = &self.proof_collector {
-            stop.run_until_cancelled(collector.collect_and_persist(block_number, header.hash()))
-                .await
-                .ok_or_else(|| eyre::eyre!("engine stopped while waiting for witness persistence"))?
-                .wrap_err_with(|| {
-                    format!("collect proofs before canonicalizing Zone block {block_number}")
-                })?;
+        if self.fast_production.is_some() {
+            // State-machine application already revalidated or revoked exact-anchor authority on
+            // every replica before the client write returned. The block is committed/canonical,
+            // so advance the local producer head even when authority was revoked.
+            self.last_header = header;
+            return Ok(());
         }
 
         // Consume the L1 input only after witness persistence succeeds.
@@ -457,6 +574,196 @@ impl ZoneEngine {
             error!(target: "zone::engine", "Error sending post-newPayload FCU: {:?}", e);
         }
 
+        Ok(())
+    }
+
+    async fn execute_or_commit_payload(
+        &self,
+        payload: <ZonePayloadTypes as reth_node_api::PayloadTypes>::BuiltPayload,
+        mut attributes: ZonePayloadAttributes,
+        stop: &CancellationToken,
+    ) -> eyre::Result<SealedHeader<TempoHeader>> {
+        if let Some(fast) = &self.fast_production {
+            eyre::ensure!(fast.is_leader(), "local node is not the OpenRaft leader");
+            let (mut header, mut input) = self
+                .prepare_fast_input(fast.epoch, payload, &attributes, stop)
+                .await?;
+            let admission = if matches!(attributes.tempo_import, TempoImport::CheckpointOnly(_)) {
+                FastBatchAdmission::Open
+            } else {
+                fast.batch.admit(&input)?
+            };
+            if let FastBatchAdmission::Boundary(marker) = admission {
+                attributes.fast_settlement_boundary = Some(marker);
+                let result = self
+                    .to_engine
+                    .fork_choice_updated(self.forkchoice_state(), Some(attributes.clone()))
+                    .await?;
+                eyre::ensure!(
+                    !result.is_invalid(),
+                    "invalid canonical fast-settlement boundary attributes"
+                );
+                let payload_id = result
+                    .payload_id
+                    .ok_or_eyre("No fast-settlement boundary payload id")?;
+                let Some(Ok(rebuilt)) = self
+                    .payload_builder
+                    .resolve_kind(payload_id, PayloadKind::WaitForPending)
+                    .await
+                else {
+                    eyre::bail!("No fast-settlement boundary payload");
+                };
+                (header, input) = self
+                    .prepare_fast_input(fast.epoch, rebuilt, &attributes, stop)
+                    .await?;
+                fast.batch.record_ready(&mut input)?;
+            }
+            let commit = stop
+                .run_until_cancelled(fast.raft.commit(input))
+                .await
+                .ok_or_else(|| eyre::eyre!("engine stopped while waiting for Raft commit"))??;
+            eyre::ensure!(
+                commit.block.block_hash == header.hash(),
+                "committed execution returned a different block hash"
+            );
+            loop {
+                match fast.certification.certify_commit(commit.clone()).await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        warn!(target: "zone::fast", %error, term = commit.term, index = commit.index, "retrying durable outcome certification for committed entry");
+                        stop.run_until_cancelled(tokio::time::sleep(Duration::from_millis(100)))
+                            .await
+                            .ok_or_else(|| {
+                                eyre::eyre!(
+                                    "engine stopped while certifying committed Raft entry ({}, {})",
+                                    commit.term,
+                                    commit.index
+                                )
+                            })?;
+                    }
+                }
+            }
+            return Ok(header);
+        }
+
+        let header = payload.block().sealed_header().clone();
+        let block_number = header.number();
+        let res = self.to_engine.new_payload(payload.into()).await?;
+        if !res.is_valid() {
+            eyre::bail!("Invalid payload for block {block_number}");
+        }
+        if let Some(collector) = &self.proof_collector {
+            stop.run_until_cancelled(collector.collect_and_persist(block_number, header.hash()))
+                .await
+                .ok_or_else(|| eyre::eyre!("engine stopped while waiting for witness persistence"))?
+                .wrap_err_with(|| {
+                    format!("collect proofs before canonicalizing Zone block {block_number}")
+                })?;
+        }
+        Ok(header)
+    }
+
+    async fn prepare_fast_input(
+        &self,
+        epoch: u64,
+        payload: <ZonePayloadTypes as reth_node_api::PayloadTypes>::BuiltPayload,
+        attributes: &ZonePayloadAttributes,
+        stop: &CancellationToken,
+    ) -> eyre::Result<(SealedHeader<TempoHeader>, ReplicatedBlockInput)> {
+        let collector = self.proof_collector.as_ref().ok_or_else(|| {
+            eyre::eyre!("T14 fast production requires durable witness collection")
+        })?;
+        let header = payload.block().sealed_header().clone();
+        let status = self.to_engine.new_payload(payload.clone().into()).await?;
+        eyre::ensure!(status.is_valid(), "Reth rejected proposed fast block");
+        let witness = stop
+            .run_until_cancelled(collector.collect_and_persist(header.number(), header.hash()))
+            .await
+            .ok_or_else(|| eyre::eyre!("engine stopped while collecting fast witness"))??
+            .ok_or_else(|| eyre::eyre!("new fast block witness was unexpectedly pruned"))?;
+        let block = payload.block().clone().into_block();
+        let transactions = block
+            .body
+            .transactions
+            .iter()
+            .map(|transaction| alloy_eips::eip2718::Encodable2718::encoded_2718(transaction).into())
+            .collect();
+        Ok((
+            header.clone(),
+            ReplicatedBlockInput {
+                epoch,
+                parent_hash: header.parent_hash(),
+                block_input: alloy_rlp::encode(block).into(),
+                transactions,
+                l1_inputs: bincode::serialize(attributes)?.into(),
+                replay_witness: minicbor_serde::to_vec(witness.as_ref())?.into(),
+            },
+        ))
+    }
+
+    async fn advance_same_anchor(&mut self, stop: &CancellationToken) -> eyre::Result<()> {
+        let Some(fast) = self.fast_production.as_ref() else {
+            return Ok(());
+        };
+        if !fast.pending.load(Ordering::Acquire) || !fast.is_leader() {
+            return Ok(());
+        }
+        let opening = *fast.anchor.read().expect("fast anchor lock poisoned");
+        let wall_clock_millis: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let timestamp_millis = wall_clock_millis.max(self.last_header.timestamp_millis() + 1);
+        fast.admission.admit_live(timestamp_millis)?;
+        let timestamp_secs = timestamp_millis / 1_000;
+        let attributes = ZonePayloadAttributes {
+            inner: EthPayloadAttributes {
+                timestamp: timestamp_secs,
+                prev_randao: B256::ZERO,
+                suggested_fee_recipient: self.fee_recipient,
+                withdrawals: self
+                    .chain_spec
+                    .is_shanghai_active_at_timestamp(timestamp_secs)
+                    .then(Default::default),
+                parent_beacon_block_root: self
+                    .chain_spec
+                    .is_cancun_active_at_timestamp(timestamp_secs)
+                    .then_some(B256::ZERO),
+                slot_number: None,
+                target_gas_limit: None,
+            },
+            timestamp_millis_part: timestamp_millis % 1_000,
+            tempo_import: TempoImport::SameAnchor(opening),
+            fast_settlement_boundary: None,
+        };
+        let result = self
+            .to_engine
+            .fork_choice_updated(self.forkchoice_state(), Some(attributes.clone()))
+            .await?;
+        eyre::ensure!(
+            !result.is_invalid(),
+            "invalid same-anchor payload attributes"
+        );
+        let payload_id = result.payload_id.ok_or_eyre("No same-anchor payload id")?;
+        let Some(Ok(payload)) = self
+            .payload_builder
+            .resolve_kind(payload_id, PayloadKind::WaitForPending)
+            .await
+        else {
+            eyre::bail!("No same-anchor payload");
+        };
+        // Do not produce empty heartbeats. A due canonical 500 ms boundary is not a heartbeat:
+        // its second pass appends the actual finalization transaction even without a new user tx.
+        let boundary_due = fast.batch.status(timestamp_millis)?.due.is_some();
+        if payload.block().body().transactions.len() <= 1 && !boundary_due {
+            fast.pending.store(false, Ordering::Release);
+            return Ok(());
+        }
+        let header = self
+            .execute_or_commit_payload(payload, attributes, stop)
+            .await?;
+        self.last_header = header;
+        fast.pending.store(false, Ordering::Release);
         Ok(())
     }
 }

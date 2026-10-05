@@ -57,6 +57,11 @@ impl ZonePrecompileEnv {
             non_creditable_slots,
         }
     }
+
+    /// Active Tempo execution fork captured for this transaction.
+    pub(crate) const fn spec(&self) -> TempoHardfork {
+        self.cfg.spec
+    }
 }
 
 /// Result of applying zone-specific pre-execution rules.

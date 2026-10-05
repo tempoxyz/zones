@@ -15,6 +15,7 @@ workspace = true
 # zones
 tempo-zone-contracts = { workspace = true, default-features = false }
 zone-primitives = { workspace = true, default-features = false }
+zone-fast-transfer.workspace = true
 
 # tempo (workspace deps already have default-features = false)
 tempo-chainspec = { workspace = true, default-features = false }
@@ -26,10 +27,12 @@ tempo-primitives = { workspace = true, default-features = false }
 # alloy
 alloy-consensus = { workspace = true, default-features = false }
 alloy = { workspace = true, default-features = false }
+alloy-eips = { workspace = true, default-features = false }
 alloy-evm = { workspace = true, default-features = false }
 alloy-primitives = { workspace = true, default-features = false }
 alloy-rlp = { workspace = true, default-features = false }
 alloy-sol-types = { workspace = true, default-features = false }
+alloy-trie = { workspace = true, default-features = false }
 
 # revm
 revm = { workspace = true, default-features = false }
@@ -58,10 +61,12 @@ std = [
     "zone-primitives/std",
     "tempo-primitives/std",
     "alloy-consensus/std",
+    "alloy-eips/std",
     "alloy-evm/std",
     "alloy-primitives/std",
     "alloy-rlp/std",
     "alloy-sol-types/std",
+    "alloy-trie/std",
     "revm/std",
     "aes-gcm/std",
     "k256/std",

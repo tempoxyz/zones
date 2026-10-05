@@ -24,6 +24,10 @@ pub(crate) const TRANSACTION_CHANNEL: u64 = 3;
 pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;
 /// Follower-to-leader settlement signature channel.
 pub(crate) const SETTLEMENT_SIGNATURE_CHANNEL: u64 = 5;
+/// OpenRaft request frames between authenticated current quorum members.
+pub(crate) const RAFT_REQUEST_CHANNEL: u64 = 6;
+/// OpenRaft responses returned to the authenticated request origin.
+pub(crate) const RAFT_RESPONSE_CHANNEL: u64 = 7;
 /// Commonware derives receive capacity from this burst size and the retained peer count.
 /// Forwarded transactions are retried from the sender's pool, so a small per-peer burst bounds
 /// memory before the transaction-specific wire limit can run without sacrificing eventual relay.
@@ -66,19 +70,20 @@ pub(crate) type Oracle = lookup::Oracle<PublicKey>;
 ///
 /// Start from Commonware's production defaults and override only the settings required by the
 /// Zone's controlled 3-5 sequencer topology.
-fn setup_commonware_config(
+pub(crate) fn setup_commonware_config(
     ed25519_private_key: PrivateKey,
     namespace: &[u8],
     listen: SocketAddr,
     max_peers: NonZeroUsize,
     bypass_ip_check: bool,
+    max_message_size: u32,
 ) -> lookup::Config<PrivateKey> {
     let mut config = lookup::Config::recommended(
         ed25519_private_key,
         namespace,
         listen,
         max_peers,
-        MAX_MESSAGE_SIZE,
+        max_message_size,
     );
 
     // Zone membership is fixed by the manifest and registered at a single peer-set index.
@@ -131,6 +136,7 @@ pub(crate) fn instantiate(
         listen,
         max_peers,
         bypass_ip_check,
+        MAX_MESSAGE_SIZE,
     );
     let peers = peer_sets(manifest, &local_ed25519_public_key)?;
     let (network, oracle) = lookup::Network::new(context.child("network"), config);
@@ -206,6 +212,11 @@ pub(crate) fn transaction_quota() -> Quota {
 /// ACKs are small fixed-shape EIP-712 statements plus one secp256k1 signature.
 pub(crate) fn settlement_quota() -> Quota {
     Quota::per_second(NZU32!(8))
+}
+
+/// Election heartbeats and bounded append batches for a three-member cluster.
+pub(crate) fn raft_quota() -> Quota {
+    Quota::per_second(NZU32!(512)).allow_burst(NZU32!(32))
 }
 
 #[cfg(test)]

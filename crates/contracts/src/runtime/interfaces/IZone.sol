@@ -26,7 +26,6 @@ enum Capability {
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneToken {
-
     function mint(address to, uint256 amount) external;
 
     function burn(uint256 amount) external;
@@ -38,8 +37,7 @@ interface IZoneToken {
         string calldata currency,
         address quoteToken,
         address policyAdmin
-    )
-        external;
+    ) external;
 
     function ISSUER_ROLE() external view returns (bytes32);
 
@@ -50,7 +48,6 @@ interface IZoneToken {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 
     function balanceOf(address account) external view returns (uint256);
-
 }
 
 /// @notice Common types for the Zone protocol
@@ -283,9 +280,9 @@ address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 //   slot 29: _fastEpochs (mapping(uint64 => FastEpochConfig))
 //   slot 30: _fastEpochMembers (mapping(uint64 => address[]))
 //   slot 31: _isFastEpochMember (mapping(uint64 => mapping(address => bool)))
-//   slot 32: _fastPeerBarrierRoots (mapping(uint64 => mapping(bytes32 => bytes32)))
-//   slot 33: _fastPeerBarrierWatermarks (mapping(uint64 => mapping(bytes32 => uint64)))
-//   slot 34: _fastPeerBarrierRecorded (mapping(uint64 => mapping(bytes32 => bool)))
+//   slot 32: _fastEpochPeers (mapping(uint64 => address[]))
+//   slot 33: _isFastEpochPeer (mapping(uint64 => mapping(address => bool)))
+//   slot 34: _fastPeerBarriers (mapping(uint64 => mapping(address => FastPeerBarrier)))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -300,21 +297,21 @@ bytes32 constant PORTAL_TOKEN_ENABLEMENT_HASH_SLOT = bytes32(uint256(26));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(20));
 bytes32 constant PORTAL_ENFORCEMENT_MODES_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
-bytes32 constant PORTAL_MAX_TEMPO_GAS_RATE_SLOT =
-    bytes32(uint256(PORTAL_ENFORCEMENT_MODES_SLOT) + 1);
+bytes32 constant PORTAL_MAX_TEMPO_GAS_RATE_SLOT = bytes32(uint256(PORTAL_ENFORCEMENT_MODES_SLOT) + 1);
 bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_LEADER_SLOT = bytes32(uint256(PORTAL_MAX_TEMPO_GAS_RATE_SLOT) + 1);
 bytes32 constant PORTAL_PAUSE_SLOT = bytes32(uint256(25));
-bytes32 constant PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT =
-    bytes32(uint256(PORTAL_LEADER_SLOT) + 1);
+bytes32 constant PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT = bytes32(uint256(PORTAL_LEADER_SLOT) + 1);
 bytes32 constant PORTAL_FAST_EPOCH_SLOT = bytes32(uint256(28));
 bytes32 constant PORTAL_FAST_EPOCHS_SLOT = bytes32(uint256(29));
+bytes32 constant PORTAL_FAST_EPOCH_MEMBERS_SLOT = bytes32(uint256(30));
+bytes32 constant PORTAL_FAST_EPOCH_PEERS_SLOT = bytes32(uint256(32));
+bytes32 constant PORTAL_FAST_PEER_BARRIERS_SLOT = bytes32(uint256(34));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
-
     /// @notice Verify a batch proof
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
@@ -349,17 +346,12 @@ interface IVerifier {
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
-    )
-        external
-        view
-        returns (bool);
-
+    ) external view returns (bool);
 }
 
 /// @title IZoneFactory
 /// @notice Interface for creating zones
 interface IZoneFactory {
-
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     struct CreateZoneParams {
@@ -404,9 +396,7 @@ interface IZoneFactory {
     /// @param params The initial token, admin, sequencer set, threshold, and RPC URL.
     /// @return zoneId The newly assigned zone ID.
     /// @return portal The deployed portal address for the new zone.
-    function createZone(CreateZoneParams calldata params)
-        external
-        returns (uint32 zoneId, address portal);
+    function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
 
     /// @notice Returns the next zone ID that will be assigned.
     function nextZoneId() external view returns (uint32);
@@ -418,7 +408,6 @@ interface IZoneFactory {
     /// @param portal The portal address to check.
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
-
 }
 
 /// @notice Per-token configuration in the portal's token registry
@@ -429,23 +418,115 @@ struct TokenConfig {
     bool depositsActive; // admin can pause/unpause deposits; does not affect withdrawals
 }
 
+enum FastProofMode {
+    Unset,
+    OperatorAttested,
+    ProofRequired
+}
+
 /// @notice Finalized authority and distributed-drain metadata for one fast protocol epoch.
 /// @dev Historical entries and member arrays are permanent verification material.
 struct FastEpochConfig {
     uint32 protocolVersion;
     uint8 threshold;
+    FastProofMode proofMode;
     bool closed;
+    bool retired;
     uint16 expectedPeerBarriers;
-    uint16 receivedPeerBarriers;
+    uint16 recordedPeerBarriers;
+    uint16 finalizedPeerBarriers;
     uint64 activatedAtTempoBlock;
     bytes32 rosterHash;
+    bytes32 peersHash;
+    bytes32 expectedVerifierCodeHash;
+    bytes32 expectedVerifierConfigHash;
     bytes32 closureHash;
+    uint256 finalSettlementHeight;
+    bytes32 finalSettlementBlockHash;
+    uint64 finalSettlementWithdrawalBatchIndex;
+    bytes32 barriersHash;
+    bytes32 finalSettlementHash;
+    uint64 nextEpoch;
+    bytes32 nextRosterHash;
+    uint64 checkpointLogTerm;
+    uint64 checkpointLogIndex;
+    uint256 checkpointHeight;
+    bytes32 checkpointBlockHash;
+    bytes32 checkpointStateRoot;
+    bytes32 checkpointHash;
+}
+
+struct FastPeerBarrier {
+    bool recorded;
+    bool finalized;
+    uint64 sourceEpoch;
+    uint64 importedAnchorNumber;
+    bytes32 importedAnchorHash;
+    uint64 logTerm;
+    uint64 logIndex;
+    uint256 blockHeight;
+    bytes32 blockHash;
+    bytes32 stateRoot;
+    uint64 lockLogWatermark;
+    bytes32 completeLockRoot;
+    bytes32 unresolvedRoot;
+    uint64 unresolvedCount;
+    bytes32 barrierHash;
+    bytes32 terminalRoot;
+    bytes32 dispositionRoot;
+    uint64 resolvedCount;
+    bytes32 remainingUnresolvedRoot;
+    uint64 remainingUnresolvedCount;
+    bytes32 resolutionHash;
+}
+
+struct FastBarrierStatement {
+    address destinationPortal;
+    uint64 destinationEpoch;
+    bytes32 closureHash;
+    address sourcePortal;
+    uint64 sourceEpoch;
+    uint64 importedAnchorNumber;
+    bytes32 importedAnchorHash;
+    uint64 logTerm;
+    uint64 logIndex;
+    uint256 blockHeight;
+    bytes32 blockHash;
+    bytes32 stateRoot;
+    uint64 lockLogWatermark;
+    bytes32 completeLockRoot;
+    bytes32 unresolvedRoot;
+    uint64 unresolvedCount;
+}
+
+struct FastBarrierResolution {
+    bytes32 barrierHash;
+    bytes32 terminalRoot;
+    bytes32 dispositionRoot;
+    uint64 resolvedCount;
+    bytes32 remainingUnresolvedRoot;
+    uint64 remainingUnresolvedCount;
+}
+
+struct FastCheckpointStatement {
+    address portal;
+    uint64 oldEpoch;
+    uint64 nextEpoch;
+    bytes32 nextRosterHash;
+    uint256 finalZoneHeight;
+    bytes32 finalBlockHash;
+    uint64 finalWithdrawalBatchIndex;
+    bytes32 finalSettlementHash;
+    uint64 checkpointLogTerm;
+    uint64 checkpointLogIndex;
+    uint256 checkpointHeight;
+    bytes32 checkpointBlockHash;
+    bytes32 checkpointStateRoot;
 }
 
 /// @title IZonePortal
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
-
     /// @notice Emitted after a batch is accepted by `submitBatch`.
     /// @dev `withdrawalQueueIndex` is the logical (non-wrapping) withdrawal queue index the
     ///      batch's hash chain was enqueued under, or `NO_QUEUE_INDEX` (`type(uint256).max`)
@@ -462,11 +543,7 @@ interface IZonePortal {
     );
 
     event WithdrawalProcessed(
-        address indexed to,
-        bytes32 indexed senderTag,
-        address token,
-        uint128 amount,
-        bool callbackSuccess
+        address indexed to, bytes32 indexed senderTag, address token, uint128 amount, bool callbackSuccess
     );
 
     event WithdrawalBounceBack(
@@ -500,9 +577,7 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
-    event DepositBounceBack(
-        address indexed tempoRefundRecipient, address token, uint128 amount, uint128 bouncebackFee
-    );
+    event DepositBounceBack(address indexed tempoRefundRecipient, address token, uint128 amount, uint128 bouncebackFee);
 
     event DepositBounceBackPending(
         address indexed tempoRefundRecipient, address token, uint128 amount, uint128 bouncebackFee
@@ -555,27 +630,47 @@ interface IZonePortal {
     /// @param epoch The new monotonic leadership epoch.
     /// @param activationTempoBlock The Tempo block that recorded the transition.
     event LeaderUpdated(
-        address indexed previousLeader,
-        address indexed newLeader,
-        uint64 indexed epoch,
-        uint64 activationTempoBlock
+        address indexed previousLeader, address indexed newLeader, uint64 indexed epoch, uint64 activationTempoBlock
     );
 
     event FastEpochActivated(
         uint64 indexed epoch,
         uint32 indexed protocolVersion,
         bytes32 indexed rosterHash,
-        uint8 threshold,
-        uint16 expectedPeerBarriers,
-        address[] members
+        bytes32 peersHash,
+        FastProofMode proofMode,
+        bytes32 expectedVerifierCodeHash,
+        bytes32 expectedVerifierConfigHash,
+        address[] members,
+        address[] peerPortals
     );
     event FastEpochClosed(uint64 indexed epoch, bytes32 indexed closureHash);
     event FastPeerBarrierRecorded(
         uint64 indexed epoch,
-        bytes32 indexed peerZone,
+        address indexed peerPortal,
+        uint64 sourceEpoch,
+        uint64 lockLogWatermark,
+        bytes32 barrierHash,
+        bytes32 completeLockRoot,
         bytes32 unresolvedRoot,
-        uint64 lockLogWatermark
+        uint64 unresolvedCount
     );
+    event FastPeerBarrierFinalized(
+        uint64 indexed epoch,
+        address indexed peerPortal,
+        bytes32 resolutionHash,
+        bytes32 terminalRoot,
+        bytes32 dispositionRoot
+    );
+    event FastFinalSettlementRecorded(
+        uint64 indexed epoch,
+        uint256 zoneHeight,
+        bytes32 indexed blockHash,
+        uint64 withdrawalBatchIndex,
+        bytes32 settlementHash
+    );
+    event FastCheckpointInstalled(uint64 indexed epoch, uint64 indexed nextEpoch, bytes32 indexed checkpointHash);
+    event FastEpochRetired(uint64 indexed epoch);
 
     /// @notice Emitted when the independently mutable enforcement flags are initialized or updated.
     event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
@@ -626,7 +721,11 @@ interface IZonePortal {
     error FastEpochActive(uint64 epoch);
     error InvalidFastEpoch();
     error FastEpochNotDrained(uint64 epoch, uint16 received, uint16 expected);
-    error FastPeerBarrierAlreadyRecorded(bytes32 peerZone);
+    error FastPeerBarrierAlreadyRecorded(address peerPortal);
+    error FastPeerBarrierNotRecorded(address peerPortal);
+    error FastPeerBarrierAlreadyFinalized(address peerPortal);
+    error InvalidFastCertificate();
+    error InvalidFastProofConfiguration();
     error InvalidQuorumCertificate();
     error InvalidCallbackTarget();
     error CallbackDidNotReturnToZone();
@@ -647,8 +746,7 @@ interface IZonePortal {
         uint8 threshold,
         address verifier,
         string calldata rpcUrl
-    )
-        external;
+    ) external;
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
@@ -762,7 +860,6 @@ interface IZonePortal {
     function setLeader(address newLeader, uint64 expectedEpoch) external;
 
     /// @notice Hash pin shared by the compatible factory, native executor and proof verifier.
-    /// @dev Zero in this source revision, making activation unreachable until all seams upgrade.
     function FAST_PROTOCOL_NATIVE_PIN() external view returns (bytes32);
 
     function FAST_EXPECTED_PEER_BARRIERS() external view returns (uint16);
@@ -779,37 +876,57 @@ interface IZonePortal {
 
     function isFastEpochMember(uint64 epoch, address account) external view returns (bool);
 
-    function fastPeerBarrier(
-        uint64 epoch,
-        bytes32 peerZone
-    )
-        external
-        view
-        returns (bytes32 unresolvedRoot, uint64 lockLogWatermark);
+    function fastEpochPeerCount(uint64 epoch) external view returns (uint256);
+
+    function fastEpochPeerAt(uint64 epoch, uint256 index) external view returns (address);
+
+    function isFastEpochPeer(uint64 epoch, address peerPortal) external view returns (bool);
+
+    function fastPeerBarrier(uint64 epoch, address peerPortal) external view returns (FastPeerBarrier memory);
 
     /// @notice Factory-only activation. The native pin must be nonzero and exactly match.
     function configureFastEpoch(
-        bytes32 nativeProtocolPin,
         uint64 epoch,
         uint32 protocolVersion,
+        FastProofMode proofMode,
+        bytes32 expectedVerifierCodeHash,
+        bytes32 expectedVerifierConfigHash,
         address[] calldata members,
-        uint8 threshold,
-        uint16 expectedPeerBarriers,
+        address[] calldata peerPortals,
         bytes32 rosterHash
-    )
-        external;
+    ) external;
 
     /// @notice Factory-only irreversible admission closure for the current epoch.
     function closeFastEpoch(uint64 epoch, bytes32 closureHash) external;
 
     /// @notice Factory-only authenticated source barrier; duplicate peers never advance drain.
     function recordFastPeerBarrier(
+        FastBarrierStatement calldata statement,
+        bytes[] calldata signatures
+    ) external;
+
+    function finalizeFastPeerBarrier(
         uint64 epoch,
-        bytes32 peerZone,
-        bytes32 unresolvedRoot,
-        uint64 lockLogWatermark
-    )
-        external;
+        address peerPortal,
+        FastBarrierResolution calldata resolution,
+        bytes[] calldata signatures
+    ) external;
+
+    function recordFastFinalSettlement(
+        uint64 epoch,
+        uint256 finalZoneHeight,
+        bytes32 finalBlockHash,
+        uint64 finalWithdrawalBatchIndex,
+        bytes[] calldata signatures
+    ) external;
+
+    function installFastCheckpoint(
+        FastCheckpointStatement calldata statement,
+        address[] calldata nextMembers,
+        bytes[] calldata signatures
+    ) external;
+
+    function retireFastEpoch(uint64 epoch) external;
 
     /*//////////////////////////////////////////////////////////////
                           TOKEN REGISTRY
@@ -892,10 +1009,7 @@ interface IZonePortal {
     /// @return x The X coordinate of the secp256k1 public key
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
     /// @return pubkey The address derived from the public key
-    function sequencerEncryptionKey()
-        external
-        view
-        returns (bytes32 x, uint8 yParity, address pubkey);
+    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity, address pubkey);
 
     /// @notice Set the sequencer's encryption public key. Only callable by an active sequencer or admin.
     /// @dev Appends to key history. The new key becomes active at the current Tempo block.
@@ -904,14 +1018,7 @@ interface IZonePortal {
     /// @param popV Recovery id of the proof-of-possession signature
     /// @param popR R component of the proof-of-possession signature
     /// @param popS S component of the proof-of-possession signature
-    function setSequencerEncryptionKey(
-        bytes32 x,
-        uint8 yParity,
-        uint8 popV,
-        bytes32 popR,
-        bytes32 popS
-    )
-        external;
+    function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
 
     /// @notice Get the number of encryption keys in the history
     /// @return The total count of keys (including current)
@@ -958,10 +1065,7 @@ interface IZonePortal {
     /// @param keyIndex The key index to check
     /// @return valid True if the key can be used for new deposits
     /// @return expiresAtBlock Block number when this key expires (0 if current key, never expires)
-    function isEncryptionKeyValid(uint256 keyIndex)
-        external
-        view
-        returns (bool valid, uint64 expiresAtBlock);
+    function isEncryptionKeyValid(uint256 keyIndex) external view returns (bool valid, uint64 expiresAtBlock);
 
     /// @notice Alias for `depositEncrypted`.
     /// @dev This entrypoint accepts only encrypted recipient and memo data and emits
@@ -972,9 +1076,7 @@ interface IZonePortal {
         uint256 keyIndex,
         DepositPayload calldata encrypted,
         address tempoRefundRecipient
-    )
-        external
-        returns (bytes32 newCurrentDepositQueueHash);
+    ) external returns (bytes32 newCurrentDepositQueueHash);
 
     /// @notice Deposit with encrypted recipient and memo
     /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key
@@ -992,9 +1094,7 @@ interface IZonePortal {
         uint256 keyIndex,
         DepositPayload calldata encrypted,
         address tempoRefundRecipient
-    )
-        external
-        returns (bytes32 newCurrentDepositQueueHash);
+    ) external returns (bytes32 newCurrentDepositQueueHash);
 
     function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
@@ -1005,8 +1105,7 @@ interface IZonePortal {
         bytes32 senderTag,
         uint64 gasLimit,
         bytes calldata data
-    )
-        external;
+    ) external;
 
     function refunds(address token, address owner) external view returns (uint128);
 
@@ -1024,15 +1123,12 @@ interface IZonePortal {
         bytes calldata proof,
         uint256 zoneHeight,
         bytes[] calldata signatures
-    )
-        external;
-
+    ) external;
 }
 
 /// @title IZoneMessenger
 /// @notice Interface for the shared zone messenger on Tempo (handles withdrawal callbacks)
 interface IZoneMessenger {
-
     /// @notice Relay a withdrawal message. Only callable by the registered portal for `zoneId`.
     /// @dev Transfers tokens it received from the portal to target, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
@@ -1051,15 +1147,12 @@ interface IZoneMessenger {
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    )
-        external;
-
+    ) external;
 }
 
 /// @title IWithdrawalReceiver
 /// @notice Interface for contracts that receive withdrawals with callbacks
 interface IWithdrawalReceiver {
-
     function onWithdrawalReceived(
         uint32 zoneId,
         address sourcePortal,
@@ -1067,10 +1160,7 @@ interface IWithdrawalReceiver {
         address token,
         uint128 amount,
         bytes calldata callbackData
-    )
-        external
-        returns (bytes4);
-
+    ) external returns (bytes4);
 }
 
 /// @notice Withdrawal batch parameters stored in state for proof access
@@ -1087,10 +1177,7 @@ struct LastBatch {
 ///      System-only contract. Only ZoneInbox can call finalizeTempo().
 ///      Only ZoneInbox and ZoneOutbox can call readTempoStorageSlot(s).
 interface ITempoState {
-
-    event TempoBlockFinalized(
-        bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot
-    );
+    event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
 
     error InvalidParentHash();
     error InvalidBlockNumber();
@@ -1114,20 +1201,12 @@ interface ITempoState {
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
-    function readTempoStorageSlots(
-        address account,
-        bytes32[] calldata slots
-    )
-        external
-        view
-        returns (bytes32[] memory);
-
+    function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
 }
 
 /// @title IZoneInbox
 /// @notice Interface for zone-side system contract that advances Tempo state and processes deposits
 interface IZoneInbox {
-
     event TempoAdvanced(
         bytes32 indexed tempoBlockHash,
         uint64 indexed tempoBlockNumber,
@@ -1149,9 +1228,7 @@ interface IZoneInbox {
     );
 
     /// @notice Emitted when a deposit fails (invalid ciphertext, funds returned to sender)
-    event DepositFailed(
-        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
-    );
+    event DepositFailed(bytes32 indexed depositHash, address indexed sender, address token, uint128 amount);
 
     event DepositRejected(
         bytes32 indexed depositHash,
@@ -1162,13 +1239,9 @@ interface IZoneInbox {
         address tempoRefundRecipient
     );
 
-    event WithdrawalBounceBackProcessed(
-        address indexed zoneFallbackRecipient, address token, uint128 amount
-    );
+    event WithdrawalBounceBackProcessed(address indexed zoneFallbackRecipient, address token, uint128 amount);
 
-    event WithdrawalBounceBackPending(
-        address indexed zoneFallbackRecipient, address token, uint128 amount
-    );
+    event WithdrawalBounceBackPending(address indexed zoneFallbackRecipient, address token, uint128 amount);
 
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
@@ -1226,15 +1299,12 @@ interface IZoneInbox {
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
-    )
-        external;
-
+    ) external;
 }
 
 /// @title IZoneOutbox
 /// @notice Interface for zone outbox on the zone
 interface IZoneOutbox {
-
     error OnlySequencer();
     error GasLimitTooHigh();
     error OnlyZoneInbox();
@@ -1298,9 +1368,7 @@ interface IZoneOutbox {
     function lastFallbackNonce() external view returns (uint64);
 
     /// @notice Resolve and delete a fallback recipient. Only callable by ZoneInbox.
-    function consumeFallbackRecipient(uint64 fallbackNonce)
-        external
-        returns (address zoneFallbackRecipient);
+    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address zoneFallbackRecipient);
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory);
@@ -1345,15 +1413,9 @@ interface IZoneOutbox {
         address zoneFallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo
-    )
-        external;
+    ) external;
 
-    function enqueueDepositBounceBack(
-        address token,
-        uint128 amount,
-        address tempoRefundRecipient
-    )
-        external;
+    function enqueueDepositBounceBack(address token, uint128 amount, address tempoRefundRecipient) external;
 
     /// @notice Finalize batch at end of block - build withdrawal hash and write to state
     /// @dev Only callable by sequencer. Required per batch. `count` must equal
@@ -1361,12 +1423,7 @@ interface IZoneOutbox {
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count The number of pending withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(
-        uint256 count,
-        uint64 blockNumber,
-        bytes[] calldata encryptedSenders
-    )
+    function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders)
         external
         returns (bytes32 withdrawalQueueHash);
-
 }

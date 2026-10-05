@@ -6,13 +6,25 @@
 
 extern crate alloc;
 
-use alloc::{string::String, vec::Vec};
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloc::{boxed::Box, string::String, vec::Vec};
+use alloy_primitives::{Address, B256, U256, b256, keccak256};
 
 /// Maximum encoded user intent size.
 pub const MAX_INTENT_BYTES: usize = 2 * 1024;
 /// Maximum encoded quorum certificate size.
 pub const MAX_CERTIFICATE_BYTES: usize = 4 * 1024;
+/// Maximum canonical direct-service envelope size. Each nested value retains its independent
+/// bound; this combined bound cannot be used to borrow space from another field.
+pub const MAX_SERVICE_ENVELOPE_BYTES: usize =
+    2 + 4 + MAX_INTENT_BYTES + 4 + MAX_CERTIFICATE_BYTES + 4 + MAX_CERTIFICATE_BYTES;
+/// Maximum framed peer message (tag plus length plus maximum certificate payload).
+pub const MAX_PEER_MESSAGE_BYTES: usize = 1 + 4 + MAX_CERTIFICATE_BYTES;
+/// Maximum encoded receipt-inclusion plus authenticated header-ancestry evidence.
+pub const MAX_RETIREMENT_PROOF_BYTES: usize = 512 * 1024;
+/// Maximum receipt-trie nodes accepted in one retirement proof.
+pub const MAX_RECEIPT_PROOF_NODES: usize = 1_024;
+/// Maximum Zone headers accepted in one authenticated ancestry chunk.
+pub const MAX_RETIREMENT_HEADERS: usize = 256;
 /// Encoded secp256k1 signature length (`r || s || yParity`).
 pub const SIGNATURE_BYTES: usize = 65;
 
@@ -21,6 +33,15 @@ const INTENT_HASH_TAG: &[u8] = b"tempo.zone.fast-transfer.intent.v1";
 const QUOTE_HASH_TAG: &[u8] = b"tempo.zone.fast-transfer.quote.v1";
 const OUTCOME_HASH_TAG: &[u8] = b"tempo.zone.fast-transfer.outcome.v1";
 const SETTLEMENT_HASH_TAG: &[u8] = b"tempo.zone.fast-transfer.settlement.v1";
+const ZONE_DOMAIN_HASH_TAG: &[u8] = b"tempo.zone.fast-transfer.zone-domain.v1";
+const CANCELLATION_HASH_TAG: &[u8] = b"tempo.zone.fast-transfer.cancellation.v1";
+const TRANSPORT_SESSION_HASH_TAG: &[u8] = b"tempo.zone.fast-transfer.transport-session.v1";
+const FAST_BARRIER_DOMAIN: &[u8] = b"TEMPO_ZONE_FAST_BARRIER_T14_V1";
+const FAST_BARRIER_RESOLUTION_DOMAIN: &[u8] = b"TEMPO_ZONE_FAST_BARRIER_RESOLUTION_T14_V1";
+const FAST_CHECKPOINT_DOMAIN: &[u8] = b"TEMPO_ZONE_FAST_CHECKPOINT_T14_V1";
+/// Nonzero commitment used by the finalized registry for an empty unresolved-lock set.
+pub const FAST_EMPTY_UNRESOLVED_ROOT: B256 =
+    b256!("9926609188c0819360afc29d8a841336912689fd33ce43cd524280a13263456e");
 
 /// A deterministic codec failure.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -224,6 +245,13 @@ impl CanonicalDecode for ZoneDomain {
     }
 }
 
+impl ZoneDomain {
+    /// Stable storage/routing key for the complete authority domain.
+    pub fn domain_hash(&self) -> B256 {
+        tagged_hash(ZONE_DOMAIN_HASH_TAG, self)
+    }
+}
+
 /// Cross-Zone identity and mappings for one TIP-20 asset.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AssetId {
@@ -414,6 +442,11 @@ impl StandingQuote {
     /// Hash binding every quote field.
     pub fn quote_hash(&self) -> B256 {
         tagged_hash(QUOTE_HASH_TAG, self)
+    }
+
+    /// Decode one complete bounded standing quote.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        decode_exact(bytes, MAX_CERTIFICATE_BYTES)
     }
 }
 
@@ -733,6 +766,651 @@ impl CanonicalDecode for OutcomeCertificate {
     }
 }
 
+/// Sender-authorized cancellation serialized against destination payment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancellationRequest {
+    /// Stable transfer identifier.
+    pub transfer_id: B256,
+    /// Complete immutable intent hash.
+    pub intent_hash: B256,
+    /// Source sender whose escrow is locked.
+    pub sender: Address,
+    /// Source authority domain pinned by the lock.
+    pub source: ZoneDomain,
+    /// Recoverable signature by `sender` over [`Self::request_hash`].
+    pub signature: SignatureBytes,
+}
+
+impl CancellationRequest {
+    /// Hash signed by the sender. Certificate and transport domains cannot replay as cancellation.
+    pub fn request_hash(&self) -> B256 {
+        struct Unsigned<'a>(&'a CancellationRequest);
+        impl CanonicalEncode for Unsigned<'_> {
+            fn encode_to(&self, out: &mut Vec<u8>) {
+                out.extend_from_slice(self.0.transfer_id.as_slice());
+                out.extend_from_slice(self.0.intent_hash.as_slice());
+                out.extend_from_slice(self.0.sender.as_slice());
+                self.0.source.encode_to(out);
+            }
+        }
+        tagged_hash(CANCELLATION_HASH_TAG, &Unsigned(self))
+    }
+
+    /// Decode one bounded cancellation request.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        decode_exact(bytes, MAX_CERTIFICATE_BYTES)
+    }
+}
+
+impl CanonicalEncode for CancellationRequest {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.transfer_id.as_slice());
+        out.extend_from_slice(self.intent_hash.as_slice());
+        out.extend_from_slice(self.sender.as_slice());
+        self.source.encode_to(out);
+        self.signature.encode_to(out);
+    }
+}
+
+impl CanonicalDecode for CancellationRequest {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            transfer_id: reader.b256()?,
+            intent_hash: reader.b256()?,
+            sender: reader.address()?,
+            source: ZoneDomain::decode_from(reader)?,
+            signature: SignatureBytes::decode_from(reader)?,
+        })
+    }
+}
+
+/// Canonical direct-operator service payload.
+///
+/// The variant tags and independent length prefixes are part of the wire protocol. Decoding the
+/// envelope also verifies that every attached certificate/cancellation binds the exact intent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ServiceEnvelope {
+    /// Destination quote publication.
+    Quote(QuoteCertificate),
+    /// Source lock, with an optional sender cancellation already serialized against payment.
+    Locked {
+        intent: TransferIntent,
+        certificate: OutcomeCertificate,
+        cancellation: Option<Box<CancellationRequest>>,
+    },
+    /// Destination `Paid` or permanent `Rejected` result.
+    Terminal {
+        intent: TransferIntent,
+        certificate: OutcomeCertificate,
+    },
+    /// Source `Released` or `Refunded` result.
+    Disposition {
+        intent: TransferIntent,
+        certificate: OutcomeCertificate,
+    },
+}
+
+impl ServiceEnvelope {
+    /// Decode one complete bounded envelope and reject trailing bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        decode_exact(bytes, MAX_SERVICE_ENVELOPE_BYTES)
+    }
+
+    fn validate_binding(&self) -> Result<(), CodecError> {
+        let (intent, certificate) = match self {
+            Self::Quote(_) => return Ok(()),
+            Self::Locked {
+                intent,
+                certificate,
+                cancellation,
+            } => {
+                if let Some(cancellation) = cancellation
+                    && (cancellation.transfer_id != intent.transfer_id()
+                        || cancellation.intent_hash != intent.intent_hash()
+                        || cancellation.sender != intent.sender
+                        || cancellation.source != intent.source)
+                {
+                    return Err(CodecError::InvalidValue(
+                        "cancellation does not bind service intent",
+                    ));
+                }
+                (intent, certificate)
+            }
+            Self::Terminal {
+                intent,
+                certificate,
+            }
+            | Self::Disposition {
+                intent,
+                certificate,
+            } => (intent, certificate),
+        };
+        if certificate.body.transfer_id != intent.transfer_id()
+            || certificate.body.intent_hash != intent.intent_hash()
+        {
+            return Err(CodecError::InvalidValue(
+                "certificate does not bind service intent",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl CanonicalEncode for ServiceEnvelope {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        out.push(1); // service-envelope version
+        match self {
+            Self::Quote(quote) => {
+                out.push(0);
+                put_bytes(out, &quote.canonical_bytes());
+            }
+            Self::Locked {
+                intent,
+                certificate,
+                cancellation,
+            } => {
+                out.push(1);
+                put_bytes(out, &intent.canonical_bytes());
+                put_bytes(out, &certificate.canonical_bytes());
+                put_bytes(
+                    out,
+                    &cancellation
+                        .as_ref()
+                        .map(|request| request.canonical_bytes())
+                        .unwrap_or_default(),
+                );
+            }
+            Self::Terminal {
+                intent,
+                certificate,
+            } => {
+                out.push(2);
+                put_bytes(out, &intent.canonical_bytes());
+                put_bytes(out, &certificate.canonical_bytes());
+            }
+            Self::Disposition {
+                intent,
+                certificate,
+            } => {
+                out.push(3);
+                put_bytes(out, &intent.canonical_bytes());
+                put_bytes(out, &certificate.canonical_bytes());
+            }
+        }
+    }
+}
+
+impl CanonicalDecode for ServiceEnvelope {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        if reader.u8()? != 1 {
+            return Err(CodecError::InvalidValue(
+                "unsupported service envelope version",
+            ));
+        }
+        let value = match reader.u8()? {
+            0 => Self::Quote(decode_exact(
+                &reader.bounded_bytes("quote", MAX_CERTIFICATE_BYTES)?,
+                MAX_CERTIFICATE_BYTES,
+            )?),
+            1 => {
+                let intent = decode_exact(
+                    &reader.bounded_bytes("intent", MAX_INTENT_BYTES)?,
+                    MAX_INTENT_BYTES,
+                )?;
+                let certificate = decode_exact(
+                    &reader.bounded_bytes("certificate", MAX_CERTIFICATE_BYTES)?,
+                    MAX_CERTIFICATE_BYTES,
+                )?;
+                let cancellation = reader.bounded_bytes("cancellation", MAX_CERTIFICATE_BYTES)?;
+                Self::Locked {
+                    intent,
+                    certificate,
+                    cancellation: if cancellation.is_empty() {
+                        None
+                    } else {
+                        Some(Box::new(decode_exact(
+                            &cancellation,
+                            MAX_CERTIFICATE_BYTES,
+                        )?))
+                    },
+                }
+            }
+            2 => Self::Terminal {
+                intent: decode_exact(
+                    &reader.bounded_bytes("intent", MAX_INTENT_BYTES)?,
+                    MAX_INTENT_BYTES,
+                )?,
+                certificate: decode_exact(
+                    &reader.bounded_bytes("certificate", MAX_CERTIFICATE_BYTES)?,
+                    MAX_CERTIFICATE_BYTES,
+                )?,
+            },
+            3 => Self::Disposition {
+                intent: decode_exact(
+                    &reader.bounded_bytes("intent", MAX_INTENT_BYTES)?,
+                    MAX_INTENT_BYTES,
+                )?,
+                certificate: decode_exact(
+                    &reader.bounded_bytes("certificate", MAX_CERTIFICATE_BYTES)?,
+                    MAX_CERTIFICATE_BYTES,
+                )?,
+            },
+            value => {
+                return Err(CodecError::InvalidTag {
+                    field: "service envelope",
+                    value,
+                });
+            }
+        };
+        value.validate_binding()?;
+        Ok(value)
+    }
+}
+
+/// Historical source-quorum statement proving the complete lock set at a destination closure.
+/// Field order exactly matches `IZoneFactory.FastBarrierStatement`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FastBarrierStatement {
+    pub destination_portal: Address,
+    pub destination_epoch: u64,
+    pub closure_hash: B256,
+    pub source_portal: Address,
+    pub source_epoch: u64,
+    pub imported_anchor_number: u64,
+    pub imported_anchor_hash: B256,
+    pub log_term: u64,
+    pub log_index: u64,
+    pub block_height: U256,
+    pub block_hash: B256,
+    pub state_root: B256,
+    pub lock_log_watermark: u64,
+    pub complete_lock_root: B256,
+    pub unresolved_root: B256,
+    pub unresolved_count: u64,
+}
+
+impl FastBarrierStatement {
+    /// Exact purpose-separated Solidity ABI digest verified by the Tempo factory.
+    pub fn registry_digest(&self, l1_chain_id: u64) -> B256 {
+        let mut encoded = Vec::with_capacity(18 * 32);
+        put_abi_b256(&mut encoded, keccak256(FAST_BARRIER_DOMAIN));
+        put_abi_u256(&mut encoded, U256::from(l1_chain_id));
+        put_abi_address(&mut encoded, self.destination_portal);
+        put_abi_u64(&mut encoded, self.destination_epoch);
+        put_abi_b256(&mut encoded, self.closure_hash);
+        put_abi_address(&mut encoded, self.source_portal);
+        put_abi_u64(&mut encoded, self.source_epoch);
+        put_abi_u64(&mut encoded, self.imported_anchor_number);
+        put_abi_b256(&mut encoded, self.imported_anchor_hash);
+        put_abi_u64(&mut encoded, self.log_term);
+        put_abi_u64(&mut encoded, self.log_index);
+        put_abi_u256(&mut encoded, self.block_height);
+        put_abi_b256(&mut encoded, self.block_hash);
+        put_abi_b256(&mut encoded, self.state_root);
+        put_abi_u64(&mut encoded, self.lock_log_watermark);
+        put_abi_b256(&mut encoded, self.complete_lock_root);
+        put_abi_b256(&mut encoded, self.unresolved_root);
+        put_abi_u64(&mut encoded, self.unresolved_count);
+        keccak256(encoded)
+    }
+}
+
+/// Source-quorum proof that the exact authenticated barrier set reached terminal disposition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FastBarrierResolution {
+    pub barrier_hash: B256,
+    pub terminal_root: B256,
+    pub disposition_root: B256,
+    pub resolved_count: u64,
+    pub remaining_unresolved_root: B256,
+    pub remaining_unresolved_count: u64,
+}
+
+impl FastBarrierResolution {
+    /// Exact purpose-separated Solidity ABI digest verified by the Tempo factory.
+    pub fn registry_digest(
+        &self,
+        l1_chain_id: u64,
+        destination_portal: Address,
+        destination_epoch: u64,
+        source_portal: Address,
+    ) -> B256 {
+        let mut encoded = Vec::with_capacity(11 * 32);
+        put_abi_b256(&mut encoded, keccak256(FAST_BARRIER_RESOLUTION_DOMAIN));
+        put_abi_u256(&mut encoded, U256::from(l1_chain_id));
+        put_abi_address(&mut encoded, destination_portal);
+        put_abi_u64(&mut encoded, destination_epoch);
+        put_abi_address(&mut encoded, source_portal);
+        put_abi_b256(&mut encoded, self.barrier_hash);
+        put_abi_b256(&mut encoded, self.terminal_root);
+        put_abi_b256(&mut encoded, self.disposition_root);
+        put_abi_u64(&mut encoded, self.resolved_count);
+        put_abi_b256(&mut encoded, self.remaining_unresolved_root);
+        put_abi_u64(&mut encoded, self.remaining_unresolved_count);
+        keccak256(encoded)
+    }
+}
+
+/// Next-roster acknowledgment of the exact retired accepted prefix and installed checkpoint.
+/// Field order exactly matches `IZoneFactory.FastCheckpointStatement`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FastCheckpointStatement {
+    pub portal: Address,
+    pub old_epoch: u64,
+    pub next_epoch: u64,
+    pub next_roster_hash: B256,
+    pub final_zone_height: U256,
+    pub final_block_hash: B256,
+    pub final_withdrawal_batch_index: u64,
+    pub final_settlement_hash: B256,
+    pub checkpoint_log_term: u64,
+    pub checkpoint_log_index: u64,
+    pub checkpoint_height: U256,
+    pub checkpoint_block_hash: B256,
+    pub checkpoint_state_root: B256,
+}
+
+impl FastCheckpointStatement {
+    /// Exact purpose-separated Solidity ABI digest signed by two distinct next-roster members.
+    pub fn registry_digest(&self, l1_chain_id: u64) -> B256 {
+        let mut encoded = Vec::with_capacity(15 * 32);
+        put_abi_b256(&mut encoded, keccak256(FAST_CHECKPOINT_DOMAIN));
+        put_abi_u256(&mut encoded, U256::from(l1_chain_id));
+        put_abi_address(&mut encoded, self.portal);
+        put_abi_u64(&mut encoded, self.old_epoch);
+        put_abi_u64(&mut encoded, self.next_epoch);
+        put_abi_b256(&mut encoded, self.next_roster_hash);
+        put_abi_u256(&mut encoded, self.final_zone_height);
+        put_abi_b256(&mut encoded, self.final_block_hash);
+        put_abi_u64(&mut encoded, self.final_withdrawal_batch_index);
+        put_abi_b256(&mut encoded, self.final_settlement_hash);
+        put_abi_u64(&mut encoded, self.checkpoint_log_term);
+        put_abi_u64(&mut encoded, self.checkpoint_log_index);
+        put_abi_u256(&mut encoded, self.checkpoint_height);
+        put_abi_b256(&mut encoded, self.checkpoint_block_hash);
+        put_abi_b256(&mut encoded, self.checkpoint_state_root);
+        keccak256(encoded)
+    }
+}
+
+fn put_abi_b256(out: &mut Vec<u8>, value: B256) {
+    out.extend_from_slice(value.as_slice());
+}
+
+fn put_abi_u256(out: &mut Vec<u8>, value: U256) {
+    out.extend_from_slice(&value.to_be_bytes::<32>());
+}
+
+fn put_abi_u64(out: &mut Vec<u8>, value: u64) {
+    put_abi_u256(out, U256::from(value));
+}
+
+fn put_abi_address(out: &mut Vec<u8>, value: Address) {
+    out.extend_from_slice(&[0; 12]);
+    out.extend_from_slice(value.as_slice());
+}
+
+/// Finalized proof that a source release was included in an accepted source prefix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExposureRetirementEvidence {
+    /// Transfer whose destination exposure is retired.
+    pub transfer_id: B256,
+    /// Exact immutable intent hash.
+    pub intent_hash: B256,
+    /// Source Portal accepted block hash, or a transitive ancestry checkpoint previously
+    /// authenticated to that accepted hash at the destination's finalized L1 anchor.
+    pub accepted_source_block_hash: B256,
+    /// Hash of the successful release receipt proven below.
+    pub release_receipt_hash: B256,
+    /// Destination token whose source exposure is decremented.
+    pub destination_token: Address,
+    /// Source reimbursement beneficiary bound by the paid record.
+    pub beneficiary: Address,
+    /// Destination principal only; the separately accounted route fee is excluded.
+    pub principal: U256,
+    /// Receipt inclusion proof against the releasing Zone block header.
+    pub receipt_proof: Vec<u8>,
+    /// At most 256 headers linking that block to an authenticated descendant/checkpoint.
+    pub header_chain: Vec<u8>,
+}
+
+/// Bounded ordered-receipt-trie inclusion proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiptInclusionProof {
+    /// Zero-based transaction/receipt index in the releasing block.
+    pub transaction_index: u64,
+    /// Canonical EIP-2718 receipt bytes including the receipt bloom.
+    pub receipt: Vec<u8>,
+    /// Root-to-leaf Merkle-Patricia proof nodes.
+    pub nodes: Vec<Vec<u8>>,
+}
+
+impl ReceiptInclusionProof {
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        decode_exact(bytes, MAX_RETIREMENT_PROOF_BYTES)
+    }
+}
+
+impl CanonicalEncode for ReceiptInclusionProof {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.transaction_index.to_be_bytes());
+        put_bytes(out, &self.receipt);
+        let count = u16::try_from(self.nodes.len()).expect("receipt proof node count fits u16");
+        out.extend_from_slice(&count.to_be_bytes());
+        for node in &self.nodes {
+            put_bytes(out, node);
+        }
+    }
+}
+
+impl CanonicalDecode for ReceiptInclusionProof {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let transaction_index = reader.u64()?;
+        let receipt = reader.bounded_bytes("receipt", MAX_RETIREMENT_PROOF_BYTES)?;
+        let count = usize::from(reader.u16()?);
+        if count > MAX_RECEIPT_PROOF_NODES {
+            return Err(CodecError::TooLarge {
+                field: "receipt proof nodes",
+                actual: count,
+                maximum: MAX_RECEIPT_PROOF_NODES,
+            });
+        }
+        let mut nodes = Vec::with_capacity(count);
+        for _ in 0..count {
+            nodes.push(reader.bounded_bytes("receipt proof node", MAX_RETIREMENT_PROOF_BYTES)?);
+        }
+        Ok(Self {
+            transaction_index,
+            receipt,
+            nodes,
+        })
+    }
+}
+
+/// Consecutive RLP Zone headers ordered from the releasing block to an accepted descendant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeaderAncestryProof {
+    pub headers: Vec<Vec<u8>>,
+}
+
+impl HeaderAncestryProof {
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        decode_exact(bytes, MAX_RETIREMENT_PROOF_BYTES)
+    }
+}
+
+impl CanonicalEncode for HeaderAncestryProof {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        let count = u16::try_from(self.headers.len()).expect("header count fits u16");
+        out.extend_from_slice(&count.to_be_bytes());
+        for header in &self.headers {
+            put_bytes(out, header);
+        }
+    }
+}
+
+impl CanonicalDecode for HeaderAncestryProof {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        let count = usize::from(reader.u16()?);
+        if count == 0 || count > MAX_RETIREMENT_HEADERS {
+            return Err(CodecError::TooLarge {
+                field: "retirement headers",
+                actual: count,
+                maximum: MAX_RETIREMENT_HEADERS,
+            });
+        }
+        let mut headers = Vec::with_capacity(count);
+        for _ in 0..count {
+            headers.push(reader.bounded_bytes("retirement header", MAX_RETIREMENT_PROOF_BYTES)?);
+        }
+        Ok(Self { headers })
+    }
+}
+
+/// Replay-resistant proof binding an authenticated transport session to a certificate roster key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransportSessionProof {
+    /// Fresh request identity, retained through the challenge and acknowledgment.
+    pub request_id: B256,
+    /// Actual authenticated Commonware initiating peer key, not a socket address.
+    pub initiator_ed25519: B256,
+    /// Actual authenticated Commonware responding peer key.
+    pub responder_ed25519: B256,
+    /// Initiating Zone epoch.
+    pub initiator: ZoneDomain,
+    /// Initiating replica certificate key.
+    pub initiator_member: Address,
+    /// Responding Zone epoch.
+    pub responder: ZoneDomain,
+    /// Responding replica certificate key.
+    pub responder_member: Address,
+    /// Fresh 32-byte nonce generated by the initiator.
+    pub initiator_nonce: B256,
+    /// Fresh 32-byte nonce generated by the responder.
+    pub responder_nonce: B256,
+    /// Durable delivery stream bound to this fresh authenticated exchange.
+    pub stream: u64,
+    /// Exact frame sequence; a proof cannot authenticate a different frame position.
+    pub sequence: u64,
+    /// `false` for the initiator proof, `true` for the responder proof.
+    pub responder_role: bool,
+    /// Signature by the role's member over the complete transcript hash.
+    pub signature: SignatureBytes,
+}
+
+impl TransportSessionProof {
+    /// Domain-separated handshake transcript digest.
+    pub fn session_hash(&self) -> B256 {
+        struct Unsigned<'a>(&'a TransportSessionProof);
+        impl CanonicalEncode for Unsigned<'_> {
+            fn encode_to(&self, out: &mut Vec<u8>) {
+                out.extend_from_slice(self.0.request_id.as_slice());
+                out.extend_from_slice(self.0.initiator_ed25519.as_slice());
+                out.extend_from_slice(self.0.responder_ed25519.as_slice());
+                self.0.initiator.encode_to(out);
+                out.extend_from_slice(self.0.initiator_member.as_slice());
+                self.0.responder.encode_to(out);
+                out.extend_from_slice(self.0.responder_member.as_slice());
+                out.extend_from_slice(self.0.initiator_nonce.as_slice());
+                out.extend_from_slice(self.0.responder_nonce.as_slice());
+                out.extend_from_slice(&self.0.stream.to_be_bytes());
+                out.extend_from_slice(&self.0.sequence.to_be_bytes());
+                out.push(u8::from(self.0.responder_role));
+            }
+        }
+        tagged_hash(TRANSPORT_SESSION_HASH_TAG, &Unsigned(self))
+    }
+
+    /// Decode one bounded session proof.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        decode_exact(bytes, MAX_CERTIFICATE_BYTES)
+    }
+}
+
+impl CanonicalEncode for TransportSessionProof {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.request_id.as_slice());
+        out.extend_from_slice(self.initiator_ed25519.as_slice());
+        out.extend_from_slice(self.responder_ed25519.as_slice());
+        self.initiator.encode_to(out);
+        out.extend_from_slice(self.initiator_member.as_slice());
+        self.responder.encode_to(out);
+        out.extend_from_slice(self.responder_member.as_slice());
+        out.extend_from_slice(self.initiator_nonce.as_slice());
+        out.extend_from_slice(self.responder_nonce.as_slice());
+        out.extend_from_slice(&self.stream.to_be_bytes());
+        out.extend_from_slice(&self.sequence.to_be_bytes());
+        out.push(u8::from(self.responder_role));
+        self.signature.encode_to(out);
+    }
+}
+
+impl CanonicalDecode for TransportSessionProof {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            request_id: reader.b256()?,
+            initiator_ed25519: reader.b256()?,
+            responder_ed25519: reader.b256()?,
+            initiator: ZoneDomain::decode_from(reader)?,
+            initiator_member: reader.address()?,
+            responder: ZoneDomain::decode_from(reader)?,
+            responder_member: reader.address()?,
+            initiator_nonce: reader.b256()?,
+            responder_nonce: reader.b256()?,
+            stream: reader.u64()?,
+            sequence: reader.u64()?,
+            responder_role: match reader.u8()? {
+                0 => false,
+                1 => true,
+                value => {
+                    return Err(CodecError::InvalidTag {
+                        field: "transport role",
+                        value,
+                    });
+                }
+            },
+            signature: SignatureBytes::decode_from(reader)?,
+        })
+    }
+}
+
+impl ExposureRetirementEvidence {
+    /// Decode one bounded retirement proof, rejecting trailing data and oversized proof chunks.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        decode_exact(bytes, MAX_RETIREMENT_PROOF_BYTES)
+    }
+}
+
+impl CanonicalEncode for ExposureRetirementEvidence {
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.transfer_id.as_slice());
+        out.extend_from_slice(self.intent_hash.as_slice());
+        out.extend_from_slice(self.accepted_source_block_hash.as_slice());
+        out.extend_from_slice(self.release_receipt_hash.as_slice());
+        out.extend_from_slice(self.destination_token.as_slice());
+        out.extend_from_slice(self.beneficiary.as_slice());
+        put_u256(out, self.principal);
+        put_bytes(out, &self.receipt_proof);
+        put_bytes(out, &self.header_chain);
+    }
+}
+
+impl CanonicalDecode for ExposureRetirementEvidence {
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            transfer_id: reader.b256()?,
+            intent_hash: reader.b256()?,
+            accepted_source_block_hash: reader.b256()?,
+            release_receipt_hash: reader.b256()?,
+            destination_token: reader.address()?,
+            beneficiary: reader.address()?,
+            principal: reader.u256()?,
+            receipt_proof: reader.bounded_bytes("receipt proof", MAX_RETIREMENT_PROOF_BYTES)?,
+            header_chain: reader.bounded_bytes("header chain", MAX_RETIREMENT_PROOF_BYTES)?,
+        })
+    }
+}
+
 /// Settlement statement signed under a domain distinct from transfer outcomes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SettlementStatement {
@@ -926,5 +1604,124 @@ mod tests {
         let encoded = certificate.canonical_bytes();
         assert_eq!(OutcomeCertificate::decode(&encoded).unwrap(), certificate);
         assert!(encoded.len() <= MAX_CERTIFICATE_BYTES);
+    }
+
+    #[test]
+    fn service_envelope_round_trip_rejects_trailing_and_cross_intent_certificate() {
+        let intent = intent();
+        let certificate = OutcomeCertificate {
+            body: CertificateBody {
+                transfer_id: intent.transfer_id(),
+                intent_hash: intent.intent_hash(),
+                zone: intent.destination,
+                log_term: 1,
+                log_index: 2,
+                block_height: 3,
+                block_hash: B256::repeat_byte(4),
+                state_root: B256::repeat_byte(5),
+                transaction_hash: B256::repeat_byte(6),
+                outcome: TransferOutcome::Rejected {
+                    reason: RejectionReason::Cancelled,
+                },
+            },
+            signatures: [SignatureBytes([7; 65]), SignatureBytes([8; 65])],
+        };
+        let envelope = ServiceEnvelope::Terminal {
+            intent: intent.clone(),
+            certificate: certificate.clone(),
+        };
+        let encoded = envelope.canonical_bytes();
+        assert!(encoded.len() <= MAX_SERVICE_ENVELOPE_BYTES);
+        assert_eq!(ServiceEnvelope::decode(&encoded).unwrap(), envelope);
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            ServiceEnvelope::decode(&trailing),
+            Err(CodecError::TrailingBytes)
+        );
+
+        let mut other = intent;
+        other.transfer_nonce += 1;
+        let mismatched = ServiceEnvelope::Terminal {
+            intent: other,
+            certificate,
+        }
+        .canonical_bytes();
+        assert!(matches!(
+            ServiceEnvelope::decode(&mismatched),
+            Err(CodecError::InvalidValue(_))
+        ));
+    }
+
+    #[test]
+    fn barrier_and_checkpoint_digests_are_purpose_separated() {
+        let barrier = FastBarrierStatement {
+            destination_portal: Address::repeat_byte(1),
+            destination_epoch: 2,
+            closure_hash: B256::repeat_byte(3),
+            source_portal: Address::repeat_byte(4),
+            source_epoch: 5,
+            imported_anchor_number: 6,
+            imported_anchor_hash: B256::repeat_byte(7),
+            log_term: 8,
+            log_index: 9,
+            block_height: U256::from(10),
+            block_hash: B256::repeat_byte(11),
+            state_root: B256::repeat_byte(12),
+            lock_log_watermark: 13,
+            complete_lock_root: B256::repeat_byte(14),
+            unresolved_root: FAST_EMPTY_UNRESOLVED_ROOT,
+            unresolved_count: 0,
+        };
+        let resolution = FastBarrierResolution {
+            barrier_hash: barrier.registry_digest(1),
+            terminal_root: B256::repeat_byte(15),
+            disposition_root: B256::repeat_byte(16),
+            resolved_count: 0,
+            remaining_unresolved_root: FAST_EMPTY_UNRESOLVED_ROOT,
+            remaining_unresolved_count: 0,
+        };
+        assert_ne!(
+            barrier.registry_digest(1),
+            resolution.registry_digest(
+                1,
+                barrier.destination_portal,
+                barrier.destination_epoch,
+                barrier.source_portal,
+            )
+        );
+        let mut changed = barrier.clone();
+        changed.log_index += 1;
+        assert_ne!(barrier.registry_digest(1), changed.registry_digest(1));
+    }
+
+    #[test]
+    fn retirement_subproofs_round_trip_and_enforce_counts() {
+        let receipt = ReceiptInclusionProof {
+            transaction_index: 7,
+            receipt: vec![1, 2, 3],
+            nodes: vec![vec![4, 5], vec![6]],
+        };
+        assert_eq!(
+            ReceiptInclusionProof::decode(&receipt.canonical_bytes()).unwrap(),
+            receipt
+        );
+
+        let ancestry = HeaderAncestryProof {
+            headers: vec![vec![0xf8, 1], vec![0xf8, 2]],
+        };
+        assert_eq!(
+            HeaderAncestryProof::decode(&ancestry.canonical_bytes()).unwrap(),
+            ancestry
+        );
+        assert!(matches!(
+            HeaderAncestryProof::decode(&[0, 0]),
+            Err(CodecError::TooLarge {
+                field: "retirement headers",
+                actual: 0,
+                ..
+            })
+        ));
     }
 }

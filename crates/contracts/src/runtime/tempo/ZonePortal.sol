@@ -10,8 +10,14 @@ import {
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
     EncryptionKeyEntry,
+    FastBarrierResolution,
+    FastBarrierStatement,
+    FastCheckpointStatement,
     FastEpochConfig,
+    FastPeerBarrier,
+    FastProofMode,
     IVerifier,
+    IZoneFactory,
     IZoneMessenger,
     IZonePortal,
     MAX_WITHDRAWAL_CALLBACK_GAS,
@@ -24,20 +30,19 @@ import {
     ZONE_FACTORY_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS
 } from "../interfaces/IZone.sol";
-import { getBlockHash } from "../libraries/BlockHashHistory.sol";
-import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
-import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "../libraries/EncryptedDeposit.sol";
-import { Secp256k1Lib } from "../libraries/Secp256k1Lib.sol";
-import { WithdrawalQueue, WithdrawalQueueLib } from "../libraries/WithdrawalQueueLib.sol";
-import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
-import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
-import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
-import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
+import {getBlockHash} from "../libraries/BlockHashHistory.sol";
+import {DepositQueueLib} from "../libraries/DepositQueueLib.sol";
+import {ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE} from "../libraries/EncryptedDeposit.sol";
+import {Secp256k1Lib} from "../libraries/Secp256k1Lib.sol";
+import {WithdrawalQueue, WithdrawalQueueLib} from "../libraries/WithdrawalQueueLib.sol";
+import {StdPrecompiles} from "tempo-std/StdPrecompiles.sol";
+import {ITIP20} from "tempo-std/interfaces/ITIP20.sol";
+import {ITIP20Factory} from "tempo-std/interfaces/ITIP20Factory.sol";
+import {ITIP403Registry} from "tempo-std/interfaces/ITIP403Registry.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows zone tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
-
     using WithdrawalQueueLib for WithdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
@@ -45,8 +50,7 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice TIP-403 registry for transfer policy authorization checks
-    ITIP403Registry internal constant TIP403_REGISTRY =
-        ITIP403Registry(StdPrecompiles.TIP403_REGISTRY_ADDRESS);
+    ITIP403Registry internal constant TIP403_REGISTRY = ITIP403Registry(StdPrecompiles.TIP403_REGISTRY_ADDRESS);
 
     /// @notice Fixed gas value for deposit fee calculation
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
@@ -100,19 +104,32 @@ contract ZonePortal is IZonePortal {
     /// @notice Delay before a capability abdication becomes effective.
     uint64 public constant ABDICATION_DELAY = PAUSE_DURATION;
 
-    bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-    );
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 internal constant NAME_HASH = keccak256("ZonePortal");
     bytes32 internal constant VERSION_HASH = keccak256("1");
     bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
         "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 tokenEnablementTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
     );
+    bytes32 internal constant FAST_SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
+        "FastSettlementAttestation(uint32 zoneId,uint64 fastEpoch,bytes32 rosterHash,uint256 previousZoneHeight,bytes32 previousBlockHash,uint64 previousWithdrawalBatchIndex,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 tokenEnablementTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
+    );
+    bytes32 internal constant FAST_BARRIER_DOMAIN = keccak256("TEMPO_ZONE_FAST_BARRIER_T14_V1");
+    bytes32 internal constant FAST_BARRIER_RESOLUTION_DOMAIN =
+        keccak256("TEMPO_ZONE_FAST_BARRIER_RESOLUTION_T14_V1");
+    bytes32 internal constant FAST_FINAL_SETTLEMENT_DOMAIN =
+        keccak256("TEMPO_ZONE_FAST_FINAL_SETTLEMENT_T14_V1");
+    bytes32 internal constant FAST_CHECKPOINT_DOMAIN = keccak256("TEMPO_ZONE_FAST_CHECKPOINT_T14_V1");
+    bytes32 internal constant FAST_BARRIERS_DOMAIN = keccak256("TEMPO_ZONE_FAST_BARRIERS_T14_V1");
+    bytes32 public constant FAST_EMPTY_UNRESOLVED_ROOT =
+        keccak256("TEMPO_ZONE_FAST_EMPTY_UNRESOLVED_T14_V1");
+    bytes32 public constant T13_PROTOTYPE_VERIFIER_CODE_HASH =
+        0xcf7b19d3c186e4fd235c94907d10bba5c1ce21d6e815676b00aaf298b456de14;
+    bytes32 internal constant DEVELOPMENT_PROTOTYPE_VERIFIER_CODE_HASH =
+        0xc6bc17dc6724fb475ce3c59ec94e01bd733c2996b41bc82281b4d638b928cc33;
 
     /// @notice Cross-component compatibility pin for the fast protocol.
-    /// @dev Deliberately zero: the pinned factory, executor and verifier do not implement the
-    ///      matching protocol. A future coordinated fork changes this consensus constant.
-    bytes32 public constant FAST_PROTOCOL_NATIVE_PIN = bytes32(0);
+    bytes32 public constant FAST_PROTOCOL_NATIVE_PIN = keccak256("TEMPO_ZONE_FAST_PROTOCOL_T14_V1");
     /// @notice Ten-Zone topology requires a closure barrier from each of the other nine Zones.
     uint16 public constant FAST_EXPECTED_PEER_BARRIERS = 9;
     /*//////////////////////////////////////////////////////////////
@@ -251,12 +268,9 @@ contract ZonePortal is IZonePortal {
     mapping(uint64 epoch => FastEpochConfig config) internal _fastEpochs;
     mapping(uint64 epoch => address[] members) internal _fastEpochMembers;
     mapping(uint64 epoch => mapping(address member => bool)) internal _isFastEpochMember;
-    mapping(uint64 epoch => mapping(bytes32 peerZone => bytes32 unresolvedRoot)) internal
-        _fastPeerBarrierRoots;
-    mapping(uint64 epoch => mapping(bytes32 peerZone => uint64 lockLogWatermark)) internal
-        _fastPeerBarrierWatermarks;
-    mapping(uint64 epoch => mapping(bytes32 peerZone => bool recorded)) internal
-        _fastPeerBarrierRecorded;
+    mapping(uint64 epoch => address[] peerPortals) internal _fastEpochPeers;
+    mapping(uint64 epoch => mapping(address peerPortal => bool)) internal _isFastEpochPeer;
+    mapping(uint64 epoch => mapping(address peerPortal => FastPeerBarrier barrier)) internal _fastPeerBarriers;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -275,10 +289,7 @@ contract ZonePortal is IZonePortal {
         uint8 _threshold,
         address _verifier,
         string calldata _rpcUrl
-    )
-        external
-        onlyDelegateCall
-    {
+    ) external onlyDelegateCall {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         if (_initialized) revert AlreadyInitialized();
 
@@ -362,24 +373,12 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @inheritdoc IZonePortal
-    function setSequencerSet(
-        address[] calldata newSequencers,
-        uint8 newThreshold
-    )
-        external
-        onlyAdmin
-    {
+    function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external onlyAdmin {
         _rejectLegacyAuthorityChangeDuringFastEpoch();
         _replaceSequencerSet(newSequencers, newThreshold, true);
     }
 
-    function _replaceSequencerSet(
-        address[] calldata newSequencers,
-        uint8 newThreshold,
-        bool rejectUnchanged
-    )
-        internal
-    {
+    function _replaceSequencerSet(address[] calldata newSequencers, uint8 newThreshold, bool rejectUnchanged) internal {
         uint256 length = newSequencers.length;
         if (length == 0 || length > MAX_SEQUENCERS || newThreshold == 0 || newThreshold > length) {
             revert InvalidSequencerSet();
@@ -471,7 +470,7 @@ contract ZonePortal is IZonePortal {
     /// @inheritdoc IZonePortal
     function fastEpochActive() public view returns (bool) {
         uint64 epoch = fastEpoch;
-        return FAST_PROTOCOL_NATIVE_PIN != bytes32(0) && epoch != 0 && !_fastEpochs[epoch].closed;
+        return epoch != 0 && !_fastEpochs[epoch].retired;
     }
 
     /// @inheritdoc IZonePortal
@@ -495,65 +494,74 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @inheritdoc IZonePortal
-    function fastPeerBarrier(
-        uint64 epoch,
-        bytes32 peerZone
-    )
-        external
-        view
-        returns (bytes32 unresolvedRoot, uint64 lockLogWatermark)
-    {
-        return (_fastPeerBarrierRoots[epoch][peerZone], _fastPeerBarrierWatermarks[epoch][peerZone]);
+    function fastEpochPeerCount(uint64 epoch) external view returns (uint256) {
+        return _fastEpochPeers[epoch].length;
+    }
+
+    /// @inheritdoc IZonePortal
+    function fastEpochPeerAt(uint64 epoch, uint256 index) external view returns (address) {
+        return _fastEpochPeers[epoch][index];
+    }
+
+    /// @inheritdoc IZonePortal
+    function isFastEpochPeer(uint64 epoch, address peerPortal) external view returns (bool) {
+        return _isFastEpochPeer[epoch][peerPortal];
+    }
+
+    /// @inheritdoc IZonePortal
+    function fastPeerBarrier(uint64 epoch, address peerPortal) external view returns (FastPeerBarrier memory) {
+        return _fastPeerBarriers[epoch][peerPortal];
     }
 
     /// @inheritdoc IZonePortal
     function configureFastEpoch(
-        bytes32 nativeProtocolPin,
         uint64 epoch,
         uint32 protocolVersion,
+        FastProofMode proofMode,
+        bytes32 expectedVerifierCodeHash,
+        bytes32 expectedVerifierConfigHash,
         address[] calldata members,
-        uint8 threshold,
-        uint16 expectedPeerBarriers,
+        address[] calldata peerPortals,
         bytes32 rosterHash
-    )
-        external
-        onlyDelegateCall
-    {
+    ) external onlyDelegateCall {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
-        if (FAST_PROTOCOL_NATIVE_PIN == bytes32(0) || nativeProtocolPin != FAST_PROTOCOL_NATIVE_PIN)
-        {
-            revert FastProtocolUnavailable();
-        }
         if (
-            epoch == 0 || epoch <= fastEpoch || protocolVersion == 0 || members.length != 3
-                || threshold != 2 || expectedPeerBarriers != FAST_EXPECTED_PEER_BARRIERS
+            epoch == 0 || epoch <= fastEpoch || protocolVersion == 0 || proofMode == FastProofMode.Unset
+                || expectedVerifierCodeHash == bytes32(0) || expectedVerifierConfigHash == bytes32(0)
+                || members.length != 3 || peerPortals.length != FAST_EXPECTED_PEER_BARRIERS
         ) revert InvalidFastEpoch();
+        if (
+            verifier.codehash != expectedVerifierCodeHash
+                || (proofMode == FastProofMode.ProofRequired
+                    && (expectedVerifierCodeHash == T13_PROTOTYPE_VERIFIER_CODE_HASH
+                        || expectedVerifierCodeHash == DEVELOPMENT_PROTOTYPE_VERIFIER_CODE_HASH
+                        || _verifierAcceptsInvalidProof()))
+        ) revert InvalidFastProofConfiguration();
 
-        // Canonical immutable roster commitment shared by L1, native execution and certificate
-        // verification. Solidity ABI encoding is unambiguous for this typed tuple and array.
         bytes32 expectedRosterHash = keccak256(
             abi.encode(
-                keccak256("TEMPO_ZONE_FAST_ROSTER_V1"),
-                zoneId,
+                keccak256("TEMPO_ZONE_FAST_ROSTER_T14_V1"),
                 address(this),
                 epoch,
                 protocolVersion,
-                threshold,
-                expectedPeerBarriers,
-                members
+                uint8(2),
+                proofMode,
+                expectedVerifierCodeHash,
+                expectedVerifierConfigHash,
+                members,
+                peerPortals
             )
         );
         if (rosterHash != expectedRosterHash) revert InvalidFastEpoch();
+        bytes32 peersHash = keccak256(abi.encode(peerPortals));
 
         uint64 previous = fastEpoch;
         if (previous != 0) {
             FastEpochConfig storage prior = _fastEpochs[previous];
-            if (!prior.closed) revert FastEpochActive(previous);
-            if (prior.receivedPeerBarriers != prior.expectedPeerBarriers) {
-                revert FastEpochNotDrained(
-                    previous, prior.receivedPeerBarriers, prior.expectedPeerBarriers
-                );
-            }
+            if (!prior.retired) revert FastEpochActive(previous);
+            if (
+                prior.nextEpoch != epoch || prior.nextRosterHash != rosterHash || prior.checkpointHash == bytes32(0)
+            ) revert InvalidFastCertificate();
         }
 
         for (uint256 i; i < members.length; ++i) {
@@ -565,20 +573,58 @@ contract ZonePortal is IZonePortal {
             _fastEpochMembers[epoch].push(member);
             _isFastEpochMember[epoch][member] = true;
         }
+        for (uint256 i; i < peerPortals.length; ++i) {
+            address peer = peerPortals[i];
+            if (peer == address(0) || peer == address(this) || !IZoneFactory(ZONE_FACTORY_ADDRESS).isZonePortal(peer)) {
+                revert InvalidFastEpoch();
+            }
+            for (uint256 j; j < i; ++j) {
+                if (peerPortals[j] == peer) revert InvalidFastEpoch();
+            }
+            _fastEpochPeers[epoch].push(peer);
+            _isFastEpochPeer[epoch][peer] = true;
+        }
 
         _fastEpochs[epoch] = FastEpochConfig({
             protocolVersion: protocolVersion,
-            threshold: threshold,
+            threshold: 2,
+            proofMode: proofMode,
             closed: false,
-            expectedPeerBarriers: expectedPeerBarriers,
-            receivedPeerBarriers: 0,
+            retired: false,
+            expectedPeerBarriers: FAST_EXPECTED_PEER_BARRIERS,
+            recordedPeerBarriers: 0,
+            finalizedPeerBarriers: 0,
             activatedAtTempoBlock: uint64(block.number),
             rosterHash: rosterHash,
-            closureHash: bytes32(0)
+            peersHash: peersHash,
+            expectedVerifierCodeHash: expectedVerifierCodeHash,
+            expectedVerifierConfigHash: expectedVerifierConfigHash,
+            closureHash: bytes32(0),
+            finalSettlementHeight: 0,
+            finalSettlementBlockHash: bytes32(0),
+            finalSettlementWithdrawalBatchIndex: 0,
+            barriersHash: bytes32(0),
+            finalSettlementHash: bytes32(0),
+            nextEpoch: 0,
+            nextRosterHash: bytes32(0),
+            checkpointLogTerm: 0,
+            checkpointLogIndex: 0,
+            checkpointHeight: 0,
+            checkpointBlockHash: bytes32(0),
+            checkpointStateRoot: bytes32(0),
+            checkpointHash: bytes32(0)
         });
         fastEpoch = epoch;
         emit FastEpochActivated(
-            epoch, protocolVersion, rosterHash, threshold, expectedPeerBarriers, members
+            epoch,
+            protocolVersion,
+            rosterHash,
+            peersHash,
+            proofMode,
+            expectedVerifierCodeHash,
+            expectedVerifierConfigHash,
+            members,
+            peerPortals
         );
     }
 
@@ -586,7 +632,7 @@ contract ZonePortal is IZonePortal {
     function closeFastEpoch(uint64 epoch, bytes32 closureHash) external onlyDelegateCall {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         FastEpochConfig storage config = _fastEpochs[epoch];
-        if (epoch == 0 || epoch != fastEpoch || config.closed || closureHash == bytes32(0)) {
+        if (epoch == 0 || epoch != fastEpoch || config.closed || config.retired || closureHash == bytes32(0)) {
             revert InvalidFastEpoch();
         }
         config.closed = true;
@@ -596,26 +642,276 @@ contract ZonePortal is IZonePortal {
 
     /// @inheritdoc IZonePortal
     function recordFastPeerBarrier(
+        FastBarrierStatement calldata statement,
+        bytes[] calldata signatures
+    ) external onlyDelegateCall {
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
+        FastEpochConfig storage config = _fastEpochs[statement.destinationEpoch];
+        if (
+            statement.destinationPortal != address(this) || statement.destinationEpoch == 0
+                || statement.destinationEpoch != fastEpoch || !config.closed || config.retired
+                || statement.closureHash != config.closureHash || statement.sourcePortal == address(this)
+                || statement.sourceEpoch == 0 || statement.importedAnchorHash == bytes32(0)
+                || statement.blockHash == bytes32(0) || statement.stateRoot == bytes32(0)
+                || statement.completeLockRoot == bytes32(0)
+                || (statement.unresolvedCount == 0 && statement.unresolvedRoot != FAST_EMPTY_UNRESOLVED_ROOT)
+                || (statement.unresolvedCount != 0
+                    && (statement.unresolvedRoot == bytes32(0)
+                        || statement.unresolvedRoot == FAST_EMPTY_UNRESOLVED_ROOT))
+                || !_isFastEpochPeer[statement.destinationEpoch][statement.sourcePortal]
+        ) {
+            revert InvalidFastEpoch();
+        }
+        if (_fastPeerBarriers[statement.destinationEpoch][statement.sourcePortal].recorded) {
+            revert FastPeerBarrierAlreadyRecorded(statement.sourcePortal);
+        }
+        bytes32 barrierHash = keccak256(abi.encode(FAST_BARRIER_DOMAIN, block.chainid, statement));
+        _verifyHistoricalFastQuorum(statement.sourcePortal, statement.sourceEpoch, barrierHash, signatures);
+        _fastPeerBarriers[statement.destinationEpoch][statement.sourcePortal] = FastPeerBarrier({
+            recorded: true,
+            finalized: false,
+            sourceEpoch: statement.sourceEpoch,
+            importedAnchorNumber: statement.importedAnchorNumber,
+            importedAnchorHash: statement.importedAnchorHash,
+            logTerm: statement.logTerm,
+            logIndex: statement.logIndex,
+            blockHeight: statement.blockHeight,
+            blockHash: statement.blockHash,
+            stateRoot: statement.stateRoot,
+            lockLogWatermark: statement.lockLogWatermark,
+            completeLockRoot: statement.completeLockRoot,
+            unresolvedRoot: statement.unresolvedRoot,
+            unresolvedCount: statement.unresolvedCount,
+            barrierHash: barrierHash,
+            terminalRoot: bytes32(0),
+            dispositionRoot: bytes32(0),
+            resolvedCount: 0,
+            remainingUnresolvedRoot: bytes32(0),
+            remainingUnresolvedCount: 0,
+            resolutionHash: bytes32(0)
+        });
+        config.recordedPeerBarriers += 1;
+        emit FastPeerBarrierRecorded(
+            statement.destinationEpoch,
+            statement.sourcePortal,
+            statement.sourceEpoch,
+            statement.lockLogWatermark,
+            barrierHash,
+            statement.completeLockRoot,
+            statement.unresolvedRoot,
+            statement.unresolvedCount
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function finalizeFastPeerBarrier(
         uint64 epoch,
-        bytes32 peerZone,
-        bytes32 unresolvedRoot,
-        uint64 lockLogWatermark
-    )
-        external
-        onlyDelegateCall
-    {
+        address peerPortal,
+        FastBarrierResolution calldata resolution,
+        bytes[] calldata signatures
+    ) external onlyDelegateCall {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         FastEpochConfig storage config = _fastEpochs[epoch];
-        if (!config.closed || peerZone == bytes32(0)) revert InvalidFastEpoch();
-        if (_fastPeerBarrierRecorded[epoch][peerZone]) {
-            revert FastPeerBarrierAlreadyRecorded(peerZone);
+        FastPeerBarrier storage barrier = _fastPeerBarriers[epoch][peerPortal];
+        if (
+            !config.closed || config.retired || !barrier.recorded || barrier.finalized
+                || resolution.barrierHash != barrier.barrierHash || resolution.terminalRoot == bytes32(0)
+                || resolution.dispositionRoot == bytes32(0) || resolution.resolvedCount != barrier.unresolvedCount
+                || resolution.remainingUnresolvedRoot != FAST_EMPTY_UNRESOLVED_ROOT
+                || resolution.remainingUnresolvedCount != 0
+        ) revert InvalidFastCertificate();
+        bytes32 resolutionHash = keccak256(
+            abi.encode(FAST_BARRIER_RESOLUTION_DOMAIN, block.chainid, address(this), epoch, peerPortal, resolution)
+        );
+        _verifyHistoricalFastQuorum(peerPortal, barrier.sourceEpoch, resolutionHash, signatures);
+        barrier.finalized = true;
+        barrier.terminalRoot = resolution.terminalRoot;
+        barrier.dispositionRoot = resolution.dispositionRoot;
+        barrier.resolvedCount = resolution.resolvedCount;
+        barrier.remainingUnresolvedRoot = resolution.remainingUnresolvedRoot;
+        barrier.remainingUnresolvedCount = resolution.remainingUnresolvedCount;
+        barrier.resolutionHash = resolutionHash;
+        config.finalizedPeerBarriers += 1;
+        emit FastPeerBarrierFinalized(
+            epoch, peerPortal, resolutionHash, resolution.terminalRoot, resolution.dispositionRoot
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function recordFastFinalSettlement(
+        uint64 epoch,
+        uint256 finalZoneHeight,
+        bytes32 finalBlockHash,
+        uint64 finalWithdrawalBatchIndex,
+        bytes[] calldata signatures
+    ) external onlyDelegateCall {
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
+        FastEpochConfig storage config = _fastEpochs[epoch];
+        if (
+            !config.closed || config.retired || config.recordedPeerBarriers != config.expectedPeerBarriers
+                || config.finalizedPeerBarriers != config.expectedPeerBarriers
+                || config.finalSettlementHash != bytes32(0) || zoneHeight != finalZoneHeight
+                || blockHash != finalBlockHash || withdrawalBatchIndex != finalWithdrawalBatchIndex
+        ) revert FastEpochNotDrained(epoch, config.finalizedPeerBarriers, config.expectedPeerBarriers);
+        bytes32 barriersHash = FAST_BARRIERS_DOMAIN;
+        address[] storage peers = _fastEpochPeers[epoch];
+        for (uint256 i; i < peers.length; ++i) {
+            FastPeerBarrier storage barrier = _fastPeerBarriers[epoch][peers[i]];
+            if (!barrier.finalized || barrier.resolutionHash == bytes32(0)) {
+                revert FastEpochNotDrained(epoch, config.finalizedPeerBarriers, config.expectedPeerBarriers);
+            }
+            barriersHash = keccak256(
+                abi.encode(barriersHash, peers[i], barrier.barrierHash, barrier.resolutionHash)
+            );
         }
-        if (config.receivedPeerBarriers >= config.expectedPeerBarriers) revert InvalidFastEpoch();
-        _fastPeerBarrierRoots[epoch][peerZone] = unresolvedRoot;
-        _fastPeerBarrierWatermarks[epoch][peerZone] = lockLogWatermark;
-        _fastPeerBarrierRecorded[epoch][peerZone] = true;
-        config.receivedPeerBarriers += 1;
-        emit FastPeerBarrierRecorded(epoch, peerZone, unresolvedRoot, lockLogWatermark);
+        bytes32 settlementHash = keccak256(
+            abi.encode(
+                FAST_FINAL_SETTLEMENT_DOMAIN,
+                block.chainid,
+                address(this),
+                epoch,
+                config.rosterHash,
+                config.closureHash,
+                finalZoneHeight,
+                finalBlockHash,
+                finalWithdrawalBatchIndex,
+                barriersHash
+            )
+        );
+        _verifyHistoricalFastQuorum(address(this), epoch, settlementHash, signatures);
+        config.finalSettlementHeight = finalZoneHeight;
+        config.finalSettlementBlockHash = finalBlockHash;
+        config.finalSettlementWithdrawalBatchIndex = finalWithdrawalBatchIndex;
+        config.barriersHash = barriersHash;
+        config.finalSettlementHash = settlementHash;
+        emit FastFinalSettlementRecorded(
+            epoch, finalZoneHeight, finalBlockHash, finalWithdrawalBatchIndex, settlementHash
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function installFastCheckpoint(
+        FastCheckpointStatement calldata statement,
+        address[] calldata nextMembers,
+        bytes[] calldata signatures
+    ) external onlyDelegateCall {
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
+        FastEpochConfig storage config = _fastEpochs[statement.oldEpoch];
+        if (
+            config.finalSettlementHash == bytes32(0) || config.checkpointHash != bytes32(0)
+                || statement.portal != address(this) || statement.oldEpoch == 0
+                || statement.nextEpoch <= statement.oldEpoch || statement.nextRosterHash == bytes32(0)
+                || statement.finalZoneHeight != config.finalSettlementHeight
+                || statement.finalBlockHash != config.finalSettlementBlockHash
+                || statement.finalWithdrawalBatchIndex != config.finalSettlementWithdrawalBatchIndex
+                || statement.finalSettlementHash != config.finalSettlementHash
+                || statement.checkpointStateRoot == bytes32(0)
+        ) revert InvalidFastCertificate();
+        bytes32 checkpointHash = keccak256(abi.encode(FAST_CHECKPOINT_DOMAIN, block.chainid, statement));
+        _verifyNextRosterQuorum(nextMembers, checkpointHash, signatures);
+        config.nextEpoch = statement.nextEpoch;
+        config.nextRosterHash = statement.nextRosterHash;
+        config.checkpointLogTerm = statement.checkpointLogTerm;
+        config.checkpointLogIndex = statement.checkpointLogIndex;
+        config.checkpointHeight = statement.checkpointHeight;
+        config.checkpointBlockHash = statement.checkpointBlockHash;
+        config.checkpointStateRoot = statement.checkpointStateRoot;
+        config.checkpointHash = checkpointHash;
+        emit FastCheckpointInstalled(statement.oldEpoch, statement.nextEpoch, checkpointHash);
+    }
+
+    /// @inheritdoc IZonePortal
+    function retireFastEpoch(uint64 epoch) external onlyDelegateCall {
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
+        FastEpochConfig storage config = _fastEpochs[epoch];
+        if (
+            !config.closed || config.retired || config.recordedPeerBarriers != config.expectedPeerBarriers
+                || config.finalizedPeerBarriers != config.expectedPeerBarriers
+                || config.finalSettlementHash == bytes32(0) || config.checkpointHash == bytes32(0)
+        ) revert FastEpochNotDrained(epoch, config.finalizedPeerBarriers, config.expectedPeerBarriers);
+        config.retired = true;
+        emit FastEpochRetired(epoch);
+    }
+
+    function _verifyHistoricalFastQuorum(
+        address sourcePortal,
+        uint64 sourceEpoch,
+        bytes32 digest,
+        bytes[] calldata signatures
+    ) private view {
+        if (sourceEpoch == 0 || signatures.length != 2) revert InvalidFastCertificate();
+        address first;
+        for (uint256 i; i < signatures.length; ++i) {
+            address signer;
+            try StdPrecompiles.SIGNATURE_VERIFIER.recover(digest, signatures[i]) returns (address recovered) {
+                signer = recovered;
+            } catch {
+                revert InvalidFastCertificate();
+            }
+            (bool success, bytes memory result) = sourcePortal.staticcall(
+                abi.encodeCall(IZonePortal.isFastEpochMember, (sourceEpoch, signer))
+            );
+            if (!success || result.length != 32) {
+                revert InvalidFastCertificate();
+            }
+            bool authorized = abi.decode(result, (bool));
+            if (signer == address(0) || signer == first || !authorized) {
+                revert InvalidFastCertificate();
+            }
+            first = signer;
+        }
+    }
+
+    function _verifierAcceptsInvalidProof() private view returns (bool) {
+        try IVerifier(verifier).verify(
+            zoneId,
+            0,
+            0,
+            bytes32(0),
+            0,
+            0,
+            BlockTransition({prevBlockHash: bytes32(0), nextBlockHash: bytes32(0)}),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            TokenEnablementTransition({prevProcessedTokenCount: 0, nextProcessedTokenCount: 0}),
+            bytes32(0),
+            "",
+            ""
+        ) returns (bool accepted) {
+            return accepted;
+        } catch {
+            return false;
+        }
+    }
+
+    function _verifyNextRosterQuorum(
+        address[] calldata members,
+        bytes32 digest,
+        bytes[] calldata signatures
+    ) private view {
+        if (
+            members.length != 3 || signatures.length != 2 || members[0] == address(0)
+                || members[1] == address(0) || members[2] == address(0) || members[0] == members[1]
+                || members[0] == members[2] || members[1] == members[2]
+        ) revert InvalidFastCertificate();
+        address first;
+        for (uint256 i; i < signatures.length; ++i) {
+            address signer;
+            try StdPrecompiles.SIGNATURE_VERIFIER.recover(digest, signatures[i]) returns (address recovered) {
+                signer = recovered;
+            } catch {
+                revert InvalidFastCertificate();
+            }
+            if (
+                signer == address(0) || signer == first
+                    || (signer != members[0] && signer != members[1] && signer != members[2])
+            ) revert InvalidFastCertificate();
+            first = signer;
+        }
     }
 
     function _rejectLegacyAuthorityChangeDuringFastEpoch() private view {
@@ -804,10 +1100,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Pause deposits and withdrawal processing for 30 days.
     function pause() external whenNotPaused {
         _requireCapabilityActive(Capability.PausePortal);
-        if (
-            msg.sender != admin && !isSequencer(msg.sender)
-                && !hasRole(msg.sender, Role.PauseGuardian)
-        ) {
+        if (msg.sender != admin && !isSequencer(msg.sender) && !hasRole(msg.sender, Role.PauseGuardian)) {
             revert NotPauseAuthority();
         }
         pauseExpiry = uint64(block.timestamp) + PAUSE_DURATION;
@@ -845,10 +1138,7 @@ contract ZonePortal is IZonePortal {
             revert TokenNotEnabled();
         }
         if (!tokenEnablementCursorInitialized) revert TokenEnablementCursorNotInitialized();
-        if (
-            _enabledTokens.length - lastProcessedEnabledTokenCount
-                >= MAX_UNPROCESSED_TOKEN_ENABLEMENTS
-        ) {
+        if (_enabledTokens.length - lastProcessedEnabledTokenCount >= MAX_UNPROCESSED_TOKEN_ENABLEMENTS) {
             revert TokenEnablementBlockCapacityExceeded(MAX_UNPROCESSED_TOKEN_ENABLEMENTS);
         }
         _enableTokenInternal(_token);
@@ -877,8 +1167,7 @@ contract ZonePortal is IZonePortal {
         string memory symbol = ITIP20(_token).symbol();
         string memory currency = ITIP20(_token).currency();
         if (
-            bytes(name).length > MAX_TOKEN_METADATA_BYTES
-                || bytes(symbol).length > MAX_TOKEN_METADATA_BYTES
+            bytes(name).length > MAX_TOKEN_METADATA_BYTES || bytes(symbol).length > MAX_TOKEN_METADATA_BYTES
                 || bytes(currency).length > MAX_TOKEN_METADATA_BYTES
         ) {
             revert TokenMetadataTooLong();
@@ -896,9 +1185,8 @@ contract ZonePortal is IZonePortal {
             revert TokenTransferPolicyNotSet();
         }
 
-        tokenEnablementHash =
-            keccak256(abi.encode(tokenEnablementHash, _token, name, symbol, currency));
-        _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
+        tokenEnablementHash = keccak256(abi.encode(tokenEnablementHash, _token, name, symbol, currency));
+        _tokenConfigs[_token] = TokenConfig({enabled: true, depositsActive: true});
         _enabledTokens.push(_token);
 
         emit TokenEnabled(_token, name, symbol, currency);
@@ -919,11 +1207,7 @@ contract ZonePortal is IZonePortal {
     /// @return x The X coordinate
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
     /// @return pubkey The address derived from the public key
-    function sequencerEncryptionKey()
-        external
-        view
-        returns (bytes32 x, uint8 yParity, address pubkey)
-    {
+    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity, address pubkey) {
         if (_encryptionKeys.length == 0) revert NoEncryptionKeySet();
         EncryptionKeyEntry storage current = _encryptionKeys[_encryptionKeys.length - 1];
         return (current.x, current.yParity, Secp256k1Lib.deriveAddress(current.x, current.yParity));
@@ -941,13 +1225,7 @@ contract ZonePortal is IZonePortal {
     /// @param popV Recovery id of the proof-of-possession signature
     /// @param popR R component of the proof-of-possession signature
     /// @param popS S component of the proof-of-possession signature
-    function setSequencerEncryptionKey(
-        bytes32 x,
-        uint8 yParity,
-        uint8 popV,
-        bytes32 popR,
-        bytes32 popS
-    )
+    function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS)
         external
         onlySequencerOrAdmin
     {
@@ -966,12 +1244,8 @@ contract ZonePortal is IZonePortal {
         }
 
         uint64 activationBlock = uint64(block.number);
-        _encryptionKeys.push(
-            EncryptionKeyEntry({ x: x, yParity: yParity, activationBlock: activationBlock })
-        );
-        emit SequencerEncryptionKeyUpdated(
-            x, yParity, expected, _encryptionKeys.length - 1, activationBlock
-        );
+        _encryptionKeys.push(EncryptionKeyEntry({x: x, yParity: yParity, activationBlock: activationBlock}));
+        emit SequencerEncryptionKeyUpdated(x, yParity, expected, _encryptionKeys.length - 1, activationBlock);
     }
 
     /// @notice Get the number of keys in the history
@@ -982,11 +1256,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Get a historical encryption key by index
     /// @param index The index in the key history (0 = first key)
     /// @return entry The key entry with activation block
-    function encryptionKeyAt(uint256 index)
-        external
-        view
-        returns (EncryptionKeyEntry memory entry)
-    {
+    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry) {
         if (index >= _encryptionKeys.length) {
             revert InvalidEncryptionKeyIndex(index);
         }
@@ -1028,11 +1298,7 @@ contract ZonePortal is IZonePortal {
     /// @param keyIndex The key index to check
     /// @return valid True if the key can be used for new deposits
     /// @return expiresAtBlock Block number when this key expires (0 if current key)
-    function isEncryptionKeyValid(uint256 keyIndex)
-        public
-        view
-        returns (bool valid, uint64 expiresAtBlock)
-    {
+    function isEncryptionKeyValid(uint256 keyIndex) public view returns (bool valid, uint64 expiresAtBlock) {
         if (keyIndex >= _encryptionKeys.length) {
             return (false, 0);
         }
@@ -1092,13 +1358,7 @@ contract ZonePortal is IZonePortal {
         return !_isAccessEnforced || hasRole(account, Role.Account);
     }
 
-    function _collectDepositFunds(
-        address _token,
-        uint128 amount
-    )
-        internal
-        returns (uint128 fee, uint128 netAmount)
-    {
+    function _collectDepositFunds(address _token, uint128 amount) internal returns (uint128 fee, uint128 netAmount) {
         fee = calculateDepositFee();
         uint128 bouncebackFee = calculateBouncebackFee();
         if (amount < fee + bouncebackFee) revert DepositTooSmall();
@@ -1111,13 +1371,7 @@ contract ZonePortal is IZonePortal {
         }
     }
 
-    function _recordDeposit(
-        bytes32 newCurrentDepositQueueHash,
-        uint64 maximum
-    )
-        internal
-        returns (uint64 thisDeposit)
-    {
+    function _recordDeposit(bytes32 newCurrentDepositQueueHash, uint64 maximum) internal returns (uint64 thisDeposit) {
         if (depositCount - lastProcessedDepositNumber >= maximum) {
             revert DepositBlockCapacityExceeded(maximum);
         }
@@ -1133,11 +1387,7 @@ contract ZonePortal is IZonePortal {
         uint256 keyIndex,
         DepositPayload calldata encrypted,
         address tempoRefundRecipient
-    )
-        external
-        whenNotPaused
-        returns (bytes32 newCurrentDepositQueueHash)
-    {
+    ) external whenNotPaused returns (bytes32 newCurrentDepositQueueHash) {
         return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
     }
 
@@ -1157,11 +1407,7 @@ contract ZonePortal is IZonePortal {
         uint256 keyIndex,
         DepositPayload calldata encrypted,
         address tempoRefundRecipient
-    )
-        public
-        whenNotPaused
-        returns (bytes32 newCurrentDepositQueueHash)
-    {
+    ) public whenNotPaused returns (bytes32 newCurrentDepositQueueHash) {
         return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
     }
 
@@ -1171,10 +1417,7 @@ contract ZonePortal is IZonePortal {
         uint256 keyIndex,
         DepositPayload calldata encrypted,
         address tempoRefundRecipient
-    )
-        internal
-        returns (bytes32 newCurrentDepositQueueHash)
-    {
+    ) internal returns (bytes32 newCurrentDepositQueueHash) {
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
         // Enforced gateways may deposit callback returns without also being allowed accounts.
         _requireAllowedDepositor(msg.sender);
@@ -1200,9 +1443,7 @@ contract ZonePortal is IZonePortal {
         // Validate ciphertext length — GCM ciphertext == plaintext length (tag is separate)
         // Prevents DoS: oversized ciphertexts inflate zone-side AES-GCM processing cost
         if (encrypted.ciphertext.length != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
-            revert InvalidCiphertextLength(
-                encrypted.ciphertext.length, ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
-            );
+            revert InvalidCiphertextLength(encrypted.ciphertext.length, ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE);
         }
 
         // Validate encryption key
@@ -1229,8 +1470,7 @@ contract ZonePortal is IZonePortal {
         });
 
         // Insert the deposit into the queue.
-        newCurrentDepositQueueHash =
-            DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
+        newCurrentDepositQueueHash = DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
         uint64 maximum = MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_PROCESSING_DEPOSIT_RESERVE;
 
         // A withdrawal callback may return one deposit through the capacity reserved from
@@ -1267,20 +1507,22 @@ contract ZonePortal is IZonePortal {
     /// @dev Withdrawals must be supplied in queue order. `remainingQueue` is the queue suffix
     ///      after the last supplied withdrawal, or zero if the batch exhausts the current slot.
     ///      Plain-transfer and callback failures bounce back without blocking the FIFO.
-    function processWithdrawals(
-        Withdrawal[] calldata withdrawals,
-        bytes32 remainingQueue
-    )
+    function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue)
         external
-        onlySequencer
         whenNotPaused
         nonReentrantWithdrawal
     {
+        uint64 currentFastEpoch = fastEpoch;
+        if (fastEpochActive()) {
+            if (!_isFastEpochMember[currentFastEpoch][msg.sender]) revert NotSequencer();
+            if (_fastEpochs[currentFastEpoch].finalSettlementHash != bytes32(0)) {
+                revert InvalidFastEpoch();
+            }
+        } else if (!isSequencer(msg.sender)) {
+            revert NotSequencer();
+        }
         uint256 unprocessed = depositCount - lastProcessedDepositNumber;
-        if (
-            unprocessed > MAX_UNPROCESSED_DEPOSITS
-                || withdrawals.length > MAX_UNPROCESSED_DEPOSITS - unprocessed
-        ) {
+        if (unprocessed > MAX_UNPROCESSED_DEPOSITS || withdrawals.length > MAX_UNPROCESSED_DEPOSITS - unprocessed) {
             revert DepositBlockCapacityExceeded(MAX_UNPROCESSED_DEPOSITS);
         }
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
@@ -1309,9 +1551,7 @@ contract ZonePortal is IZonePortal {
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
             _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
-            emit WithdrawalProcessed(
-                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false
-            );
+            emit WithdrawalProcessed(withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false);
             return;
         }
 
@@ -1320,8 +1560,7 @@ contract ZonePortal is IZonePortal {
             // Re-check current roles without reverting so an in-flight withdrawal to a revoked
             // account or newly registered gateway bounces without blocking the FIFO.
             success = (!_isGatewayEnforced || !hasRole(withdrawal.to, Role.CallbackGateway))
-                && _isAllowed(withdrawal.to)
-                && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
+                && _isAllowed(withdrawal.to) && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
             // Isolate callback effects so failure can be caught without reverting the dequeue.
             try this.deliverWithdrawal(
@@ -1341,9 +1580,7 @@ contract ZonePortal is IZonePortal {
         if (!success) {
             _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
         }
-        emit WithdrawalProcessed(
-            withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, success
-        );
+        emit WithdrawalProcessed(withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, success);
     }
 
     /// @notice Deliver a callback withdrawal in a revertable self-call frame.
@@ -1355,10 +1592,7 @@ contract ZonePortal is IZonePortal {
         bytes32 senderTag,
         uint64 gasLimit,
         bytes calldata data
-    )
-        external
-        onlySelf
-    {
+    ) external onlySelf {
         if (_isGatewayEnforced && !hasRole(target, Role.CallbackGateway)) {
             revert InvalidCallbackTarget();
         }
@@ -1371,8 +1605,7 @@ contract ZonePortal is IZonePortal {
         _withdrawalReentrancyStatus = CALLBACK_DEPOSIT_AVAILABLE;
 
         // We copy whatever the messenger reverts with, so keep its errors small.
-        IZoneMessenger(messenger)
-            .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
+        IZoneMessenger(messenger).relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
 
         // Return to the normal withdrawal-processing state. If relayMessage reverts, this write
         // and any callback deposit are reverted together.
@@ -1402,8 +1635,7 @@ contract ZonePortal is IZonePortal {
         }
         uint128 refundAmount = withdrawal.amount - collectedFee;
 
-        bool success =
-            _isAllowed(withdrawal.to) && _tryTransfer(_token, withdrawal.to, refundAmount);
+        bool success = _isAllowed(withdrawal.to) && _tryTransfer(_token, withdrawal.to, refundAmount);
 
         if (success) {
             emit DepositBounceBack(withdrawal.to, _token, refundAmount, collectedFee);
@@ -1431,14 +1663,7 @@ contract ZonePortal is IZonePortal {
     /// @param to The recipient address.
     /// @param amount The token amount to transfer.
     /// @return success True if the transfer completed directly to `to` and returned true.
-    function _tryTransfer(
-        address token,
-        address to,
-        uint128 amount
-    )
-        internal
-        returns (bool success)
-    {
+    function _tryTransfer(address token, address to, uint128 amount) internal returns (bool success) {
         address effectiveRecipient;
         try StdPrecompiles.ADDRESS_REGISTRY.resolveRecipient(to) returns (address resolved) {
             effectiveRecipient = resolved;
@@ -1446,9 +1671,7 @@ contract ZonePortal is IZonePortal {
             return false;
         }
 
-        try TIP403_REGISTRY.validateReceivePolicy(
-            token, address(this), effectiveRecipient
-        ) returns (
+        try TIP403_REGISTRY.validateReceivePolicy(token, address(this), effectiveRecipient) returns (
             bool authorized, ITIP403Registry.BlockedReason
         ) {
             if (!authorized) return false;
@@ -1468,17 +1691,13 @@ contract ZonePortal is IZonePortal {
     /// @param amount The amount to bounce back
     /// @param fallbackNonce The nonce resolving to the zone bounce-back recipient
     function _enqueueBounceBack(address _token, uint128 amount, uint64 fallbackNonce) internal {
-        WithdrawalBounceBackDeposit memory depositData = WithdrawalBounceBackDeposit({
-            token: _token, to: address(uint160(fallbackNonce)), amount: amount
-        });
+        WithdrawalBounceBackDeposit memory depositData =
+            WithdrawalBounceBackDeposit({token: _token, to: address(uint160(fallbackNonce)), amount: amount});
 
-        bytes32 newCurrentDepositQueueHash =
-            DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
+        bytes32 newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash, MAX_UNPROCESSED_DEPOSITS);
 
-        emit WithdrawalBounceBack(
-            newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit
-        );
+        emit WithdrawalBounceBack(newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1497,10 +1716,30 @@ contract ZonePortal is IZonePortal {
         bytes calldata proof,
         uint256 nextZoneHeight,
         bytes[] calldata signatures
-    )
-        external
-        onlySequencer
-    {
+    ) external {
+        uint64 currentFastEpoch = fastEpoch;
+        bool useFastAuthority = fastEpochActive();
+        if (useFastAuthority) {
+            if (!_isFastEpochMember[currentFastEpoch][msg.sender]) revert NotSequencer();
+            // Once the exact accepted prefix is recorded as final, neither settlement nor
+            // withdrawal queue state may advance while checkpoint installation/retirement runs.
+            if (_fastEpochs[currentFastEpoch].finalSettlementHash != bytes32(0)) {
+                revert InvalidFastEpoch();
+            }
+            FastEpochConfig storage fastConfig = _fastEpochs[currentFastEpoch];
+            if (
+                fastConfig.proofMode == FastProofMode.Unset
+                    || verifier.codehash != fastConfig.expectedVerifierCodeHash
+                    || keccak256(verifierConfig) != fastConfig.expectedVerifierConfigHash
+                    || (fastConfig.proofMode == FastProofMode.ProofRequired
+                        && (proof.length == 0
+                            || fastConfig.expectedVerifierCodeHash == T13_PROTOTYPE_VERIFIER_CODE_HASH
+                            || fastConfig.expectedVerifierCodeHash
+                                == DEVELOPMENT_PROTOTYPE_VERIFIER_CODE_HASH))
+            ) revert InvalidFastProofConfiguration();
+        } else if (!isSequencer(msg.sender)) {
+            revert NotSequencer();
+        }
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
         }
@@ -1555,8 +1794,7 @@ contract ZonePortal is IZonePortal {
         //   - in-range:    cannot process more deposits than have been enqueued
         if (
             depositQueueTransition.prevDepositNumber != lastProcessedDepositNumber
-                || depositQueueTransition.nextDepositNumber
-                    < depositQueueTransition.prevDepositNumber
+                || depositQueueTransition.nextDepositNumber < depositQueueTransition.prevDepositNumber
                 || depositQueueTransition.nextDepositNumber > depositCount
         ) {
             revert InvalidDepositTransition();
@@ -1570,17 +1808,14 @@ contract ZonePortal is IZonePortal {
         uint64 expectedPrev = tokenEnablementCursorInitialized ? lastProcessedEnabledTokenCount : 0;
         if (
             tokenEnablementTransition.prevProcessedTokenCount != expectedPrev
-                || tokenEnablementTransition.nextProcessedTokenCount
-                    < tokenEnablementTransition.prevProcessedTokenCount
+                || tokenEnablementTransition.nextProcessedTokenCount < tokenEnablementTransition.prevProcessedTokenCount
                 || tokenEnablementTransition.nextProcessedTokenCount > enabledCount
         ) {
             revert InvalidTokenEnablementTransition();
         }
         if (
-            !tokenEnablementCursorInitialized
-                && tokenEnablementTransition.nextProcessedTokenCount != 0
-                && enabledCount - tokenEnablementTransition.nextProcessedTokenCount
-                    > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
+            !tokenEnablementCursorInitialized && tokenEnablementTransition.nextProcessedTokenCount != 0
+                && enabledCount - tokenEnablementTransition.nextProcessedTokenCount > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
         ) {
             revert InvalidTokenEnablementTransition();
         }
@@ -1608,10 +1843,7 @@ contract ZonePortal is IZonePortal {
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
-        if (
-            tokenEnablementCursorInitialized
-                || tokenEnablementTransition.nextProcessedTokenCount != 0
-        ) {
+        if (tokenEnablementCursorInitialized || tokenEnablementTransition.nextProcessedTokenCount != 0) {
             lastProcessedEnabledTokenCount = tokenEnablementTransition.nextProcessedTokenCount;
             tokenEnablementCursorInitialized = true;
         }
@@ -1642,37 +1874,64 @@ contract ZonePortal is IZonePortal {
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes[] memory signatures
-    )
-        internal
-        view
-        returns (bool)
-    {
-        uint256 threshold = sequencerThreshold;
-        if (
-            nextZoneHeight <= zoneHeight || signatures.length < threshold
-                || signatures.length > _sequencers.length
-        ) {
-            return false;
-        }
+    ) internal view returns (bool) {
+        if (nextZoneHeight <= zoneHeight) return false;
 
-        bytes32 structHash = keccak256(
-            abi.encode(
-                SETTLEMENT_ATTESTATION_TYPEHASH,
-                zoneId,
-                sequencerSetVersion,
-                nextZoneHeight,
-                withdrawalBatchIndex + 1,
-                verifier,
-                tempoBlockNumber,
-                anchorBlockNumber,
-                anchorBlockHash,
-                keccak256(abi.encode(blockTransition)),
-                keccak256(abi.encode(depositQueueTransition)),
-                keccak256(abi.encode(tokenEnablementTransition)),
-                withdrawalQueueHash,
-                keccak256(verifierConfig)
-            )
-        );
+        uint64 currentFastEpoch = fastEpoch;
+        bool useFastAuthority = fastEpochActive();
+        uint256 threshold;
+        uint256 maximumSigners;
+        bytes32 structHash;
+        if (useFastAuthority) {
+            // The T14 registry fixes a three-member roster and a two-member certificate.
+            threshold = 2;
+            maximumSigners = 2;
+            if (signatures.length != threshold) return false;
+            structHash = keccak256(
+                abi.encode(
+                    FAST_SETTLEMENT_ATTESTATION_TYPEHASH,
+                    zoneId,
+                    currentFastEpoch,
+                    _fastEpochs[currentFastEpoch].rosterHash,
+                    zoneHeight,
+                    blockHash,
+                    withdrawalBatchIndex,
+                    nextZoneHeight,
+                    withdrawalBatchIndex + 1,
+                    verifier,
+                    tempoBlockNumber,
+                    anchorBlockNumber,
+                    anchorBlockHash,
+                    keccak256(abi.encode(blockTransition)),
+                    keccak256(abi.encode(depositQueueTransition)),
+                    keccak256(abi.encode(tokenEnablementTransition)),
+                    withdrawalQueueHash,
+                    keccak256(verifierConfig)
+                )
+            );
+        } else {
+            threshold = sequencerThreshold;
+            maximumSigners = _sequencers.length;
+            if (signatures.length < threshold || signatures.length > maximumSigners) return false;
+            structHash = keccak256(
+                abi.encode(
+                    SETTLEMENT_ATTESTATION_TYPEHASH,
+                    zoneId,
+                    sequencerSetVersion,
+                    nextZoneHeight,
+                    withdrawalBatchIndex + 1,
+                    verifier,
+                    tempoBlockNumber,
+                    anchorBlockNumber,
+                    anchorBlockHash,
+                    keccak256(abi.encode(blockTransition)),
+                    keccak256(abi.encode(depositQueueTransition)),
+                    keccak256(abi.encode(tokenEnablementTransition)),
+                    withdrawalQueueHash,
+                    keccak256(verifierConfig)
+                )
+            );
+        }
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         address[] memory recovered = new address[](signatures.length);
 
@@ -1681,14 +1940,15 @@ contract ZonePortal is IZonePortal {
             address signer;
             // The shared TIP-1020 verifier owns signature-format and canonicality checks.
             // Convert its reverts into `false` so the public verifier remains non-reverting.
-            try StdPrecompiles.SIGNATURE_VERIFIER.recover(digest, signature) returns (
-                address recoveredSigner
-            ) {
+            try StdPrecompiles.SIGNATURE_VERIFIER.recover(digest, signature) returns (address recoveredSigner) {
                 signer = recoveredSigner;
             } catch {
                 return false;
             }
-            if (signer == address(0) || !isSequencer(signer)) return false;
+            if (
+                signer == address(0)
+                    || (useFastAuthority ? !_isFastEpochMember[currentFastEpoch][signer] : !isSequencer(signer))
+            ) return false;
             for (uint256 j = 0; j < i; ++j) {
                 if (recovered[j] == signer) return false;
             }
@@ -1699,11 +1959,6 @@ contract ZonePortal is IZonePortal {
     }
 
     function _domainSeparator() internal view returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                EIP712_DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(this)
-            )
-        );
+        return keccak256(abi.encode(EIP712_DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(this)));
     }
-
 }

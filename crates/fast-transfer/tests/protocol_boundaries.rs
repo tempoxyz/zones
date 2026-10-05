@@ -330,10 +330,16 @@ fn replenishment_job_uses_permanent_identity_and_monotonic_two_leg_stages() {
     let withdrawal = WithdrawalRecord {
         transaction_intent_hash: hash(0x90),
         signer_nonce: 7,
-        fallback_nonce: 8,
+        fallback_nonce: Some(8),
+        withdrawal_index: None,
+        sender_tag: None,
+        submission_hashes: Vec::new(),
         transaction_hash: None,
         accepted_batch_hash: None,
         queue_index: None,
+        source_transaction_cost: None,
+        withdrawal_fee: None,
+        l1_transaction_cost: None,
     };
     assert!(job.request_withdrawal(withdrawal.clone()).unwrap());
     assert!(!job.request_withdrawal(withdrawal).unwrap());
@@ -347,6 +353,9 @@ fn replenishment_job_uses_permanent_identity_and_monotonic_two_leg_stages() {
         signer_nonce: 11,
         queue_index: None,
         transaction_hash: None,
+        submission_hashes: Vec::new(),
+        transaction_cost: None,
+        deposit_fee: None,
     };
     assert!(job.submit_deposit(deposit.clone()).unwrap());
     assert!(!job.submit_deposit(deposit).unwrap());
