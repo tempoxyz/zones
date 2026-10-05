@@ -26,8 +26,8 @@ use zone_rpc::{
 mod auth_tokens;
 
 use auth_tokens::{
-    build_token_with_signature, now_secs, sign_keychain_signature, sign_p256_signature,
-    sign_webauthn_signature,
+    build_token_with_signature, now_secs, rewrap_keychain_signature, sign_keychain_signature,
+    sign_p256_signature, sign_webauthn_signature,
 };
 
 // ---------------------------------------------------------------------------
@@ -965,6 +965,61 @@ async fn ws_reject_unauthorized_keychain_token() {
     let err = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
         .await
         .expect_err("missing keychain authorization should fail");
+    let tungstenite::Error::Http(response) = err else {
+        panic!("expected HTTP error, got {err:?}");
+    };
+    assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn ws_rejects_legacy_v1_keychain_token() {
+    let root_account = Address::repeat_byte(0x44);
+    let access_signer = P256SigningKey::random(&mut thread_rng());
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+    let (signature, key_id) = sign_keychain_signature(digest, &access_signer, root_account, 0x03)
+        .expect("keychain signing should succeed");
+    // The key is authorized, so only the V1 check can reject the token.
+    let ctx = TestContext::start(MockZoneRpcApi::with_key(
+        root_account,
+        key_id,
+        KeyInfoSignatureType::P256,
+    ))
+    .await;
+    let token = build_token_with_signature(signature, &fields);
+
+    let err = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect_err("legacy V1 keychain token should fail");
+    let tungstenite::Error::Http(response) = err else {
+        panic!("expected HTTP error, got {err:?}");
+    };
+    assert_eq!(response.status(), 403);
+}
+
+/// A token signed for one account cannot be re-wrapped to authenticate as another account that
+/// authorized the same key.
+#[tokio::test]
+async fn ws_rejects_rewrapped_v2_keychain_token() {
+    let account_a = Address::repeat_byte(0x44);
+    let account_b = Address::repeat_byte(0x45);
+    let access_signer = P256SigningKey::random(&mut thread_rng());
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+    let (signature, key_id) = sign_keychain_signature(digest, &access_signer, account_a, 0x04)
+        .expect("keychain signing should succeed");
+    let ctx = TestContext::start(MockZoneRpcApi::with_key(
+        account_b,
+        key_id,
+        KeyInfoSignatureType::P256,
+    ))
+    .await;
+    let token =
+        build_token_with_signature(rewrap_keychain_signature(&signature, account_b), &fields);
+
+    let err = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect_err("re-wrapped V2 keychain token should fail");
     let tungstenite::Error::Http(response) = err else {
         panic!("expected HTTP error, got {err:?}");
     };

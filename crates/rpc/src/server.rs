@@ -330,6 +330,14 @@ pub(crate) async fn authenticate_token(
 
     let signature =
         TempoSignature::from_bytes(&token.signature).map_err(|_| AuthError::InvalidSignature)?;
+
+    // V1 keychain signatures do not bind the wrapper's `user_address` into the signed hash, so
+    // the same inner signature can be re-wrapped for any account that authorized the same key.
+    // Only V2 (address-bound) keychain signatures are accepted.
+    if signature.is_legacy_keychain() {
+        return Err(AuthError::LegacyKeychainSignature.into());
+    }
+
     let caller = signature
         .recover_signer(&token.digest)
         .map_err(|_| AuthError::InvalidSignature)?;
@@ -409,6 +417,7 @@ mod tests {
     use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
         KeyInfo, SignatureType as KeyInfoSignatureType,
     };
+    use tempo_primitives::transaction::tt_signature::{KeychainSignature, TempoSignature};
 
     #[allow(dead_code)]
     mod auth_tokens {
@@ -418,7 +427,9 @@ mod tests {
         ));
     }
 
-    use auth_tokens::{build_token_with_signature, now_secs, sign_keychain_signature};
+    use auth_tokens::{
+        build_token_with_signature, now_secs, rewrap_keychain_signature, sign_keychain_signature,
+    };
 
     const ZONE_ID: u32 = 7;
     const CHAIN_ID: u64 = 99;
@@ -492,6 +503,16 @@ mod tests {
         stub!(zone_get_authorization_token_info, _c: crate::auth::AuthContext);
         stub!(zone_get_zone_info, _c: crate::auth::AuthContext);
         stub!(zone_get_encryption_key, _c: crate::auth::AuthContext);
+    }
+
+    fn p256_key_info(key_id: Address) -> KeyInfo {
+        KeyInfo {
+            signatureType: KeyInfoSignatureType::P256,
+            keyId: key_id,
+            expiry: now_secs() + 300,
+            enforceLimits: false,
+            isRevoked: false,
+        }
     }
 
     fn test_config() -> RedactedRpcConfig {
@@ -668,5 +689,148 @@ mod tests {
             AuthenticateError::Invalid(crate::auth::AuthError::ExpiredKeychainKey)
         ));
         assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn v2_keychain_token_authenticates_as_wrapper_account() {
+        let account_a = Address::repeat_byte(0x55);
+        let access_signer = P256SigningKey::random(&mut thread_rng());
+        let now = now_secs();
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let (signature, key_id) = sign_keychain_signature(digest, &access_signer, account_a, 0x04)
+            .expect("keychain signing failed");
+        let token = build_token_with_signature(signature, &fields);
+        let api = TestApi::with_key_info(account_a, key_id, p256_key_info(key_id));
+
+        let ctx = authenticate_token(&token, &test_config(), &api)
+            .await
+            .expect("V2 keychain token should authenticate");
+        assert_eq!(ctx.caller, account_a);
+        assert_eq!(ctx.keychain_key_id, Some(key_id));
+    }
+
+    #[tokio::test]
+    async fn legacy_v1_keychain_token_is_rejected() {
+        let account_a = Address::repeat_byte(0x55);
+        let access_signer = P256SigningKey::random(&mut thread_rng());
+        let now = now_secs();
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let (signature, key_id) = sign_keychain_signature(digest, &access_signer, account_a, 0x03)
+            .expect("keychain signing failed");
+        let token = build_token_with_signature(signature, &fields);
+        // The key is authorized, so only the V1 check can reject the token.
+        let api = TestApi::with_key_info(account_a, key_id, p256_key_info(key_id));
+
+        let err = authenticate_token(&token, &test_config(), &api)
+            .await
+            .expect_err("legacy V1 keychain token should be rejected");
+        assert!(matches!(
+            err,
+            AuthenticateError::Invalid(crate::auth::AuthError::LegacyKeychainSignature)
+        ));
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    /// A V1 token signed for account A can be re-wrapped for account B without invalidating the
+    /// inner signature, so B would be impersonated if B authorized the same key.
+    #[tokio::test]
+    async fn rewrapped_v1_keychain_token_is_rejected_for_shared_key() {
+        let account_a = Address::repeat_byte(0x55);
+        let account_b = Address::repeat_byte(0x66);
+        let access_signer = P256SigningKey::random(&mut thread_rng());
+        let now = now_secs();
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let (signature, key_id) = sign_keychain_signature(digest, &access_signer, account_a, 0x03)
+            .expect("keychain signing failed");
+        let rewrapped = rewrap_keychain_signature(&signature, account_b);
+        let token = build_token_with_signature(rewrapped, &fields);
+        let api = TestApi::with_key_info(account_b, key_id, p256_key_info(key_id));
+
+        let err = authenticate_token(&token, &test_config(), &api)
+            .await
+            .expect_err("re-wrapped legacy token should be rejected");
+        assert!(matches!(
+            err,
+            AuthenticateError::Invalid(crate::auth::AuthError::LegacyKeychainSignature)
+        ));
+    }
+
+    /// V2 binds `user_address` into the signed hash, so re-wrapping fails signature verification
+    /// even when the target account authorized the same key.
+    #[tokio::test]
+    async fn rewrapped_v2_keychain_token_is_rejected_for_shared_key() {
+        let account_a = Address::repeat_byte(0x55);
+        let account_b = Address::repeat_byte(0x66);
+        let access_signer = P256SigningKey::random(&mut thread_rng());
+        let now = now_secs();
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let (signature, key_id) = sign_keychain_signature(digest, &access_signer, account_a, 0x04)
+            .expect("keychain signing failed");
+        let rewrapped = rewrap_keychain_signature(&signature, account_b);
+        let token = build_token_with_signature(rewrapped, &fields);
+        let api = TestApi::with_key_info(account_a, key_id, p256_key_info(key_id));
+        api.key_infos
+            .lock()
+            .insert((account_b, key_id), p256_key_info(key_id));
+
+        let err = authenticate_token(&token, &test_config(), &api)
+            .await
+            .expect_err("re-wrapped V2 token should be rejected");
+        assert!(matches!(
+            err,
+            AuthenticateError::Invalid(crate::auth::AuthError::InvalidSignature)
+        ));
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    /// A primitive signature cannot be wrapped as a keychain token for another account.
+    #[tokio::test]
+    async fn primitive_token_wrapped_as_v2_keychain_is_rejected() {
+        let account_b = Address::repeat_byte(0x66);
+        let access_signer = P256SigningKey::random(&mut thread_rng());
+        let now = now_secs();
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let TempoSignature::Primitive(primitive) =
+            auth_tokens::sign_p256_signature(digest, &access_signer).expect("p256 signing failed")
+        else {
+            panic!("expected primitive signature");
+        };
+        let key_id = TempoSignature::Primitive(primitive.clone())
+            .recover_signer(&digest)
+            .expect("p256 recovery failed");
+        for signature in [
+            TempoSignature::Keychain(KeychainSignature::new(account_b, primitive.clone())),
+            TempoSignature::Keychain(KeychainSignature::new_v1(account_b, primitive)),
+        ] {
+            let token = build_token_with_signature(signature, &fields);
+            let api = TestApi::with_key_info(account_b, key_id, p256_key_info(key_id));
+
+            let err = authenticate_token(&token, &test_config(), &api)
+                .await
+                .expect_err("wrapped primitive token should be rejected");
+            assert!(err.is_invalid());
+        }
+    }
+
+    #[tokio::test]
+    async fn primitive_token_still_authenticates() {
+        let access_signer = P256SigningKey::random(&mut thread_rng());
+        let now = now_secs();
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let signature =
+            auth_tokens::sign_p256_signature(digest, &access_signer).expect("p256 signing failed");
+        let expected = signature
+            .recover_signer(&digest)
+            .expect("p256 recovery failed");
+        let token = build_token_with_signature(signature, &fields);
+        let api = TestApi {
+            key_infos: Mutex::new(HashMap::new()),
+        };
+
+        let ctx = authenticate_token(&token, &test_config(), &api)
+            .await
+            .expect("primitive token should authenticate");
+        assert_eq!(ctx.caller, expected);
+        assert_eq!(ctx.keychain_key_id, None);
     }
 }
