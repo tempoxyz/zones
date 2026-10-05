@@ -92,7 +92,7 @@ impl ProductionPermit {
             Some(record) if record.leader == self.local_ed25519_public_key => None,
             Some(record) => Some(EngineExit::Demoted {
                 tempo_anchor,
-                epoch: record.epoch,
+                epoch: record.epoch(),
             }),
         }
     }

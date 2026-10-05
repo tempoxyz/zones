@@ -722,13 +722,13 @@ fn validate_live_block_sender(
         return Ok(());
     };
     match schedule.leader_for(anchor_number) {
-        Some(record) if &record.leader == sender => Ok(()),
+        Some(record) if record.leader() == sender => Ok(()),
         Some(record) => {
             eyre::bail!(
                 "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
                  the schedule assigns that anchor to {} (epoch {})",
                 record.leader,
-                record.epoch,
+                record.epoch(),
             );
         }
         None => {

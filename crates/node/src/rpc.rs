@@ -566,13 +566,13 @@ where
     let status = context.status.lock().expect("poisoned").clone();
     let latest = context.schedule.latest();
     let active_leader = latest.as_ref().map(|record| {
-        let node = context.manifest.node_by_ed25519_public_key(&record.leader);
+        let node = context.manifest.node_by_ed25519_public_key(record.leader());
         ActiveLeaderInfo {
             name: node.map(|node| node.name().to_owned()),
             sequencer_address: node.and_then(|node| node.secp256k1_address()),
             p2p_public_key: record.leader.to_string(),
-            epoch: U64::from(record.epoch),
-            activation_tempo_block: U64::from(record.activation_tempo_block),
+            epoch: U64::from(record.epoch()),
+            activation_tempo_block: U64::from(record.activation_tempo_block()),
         }
     });
 

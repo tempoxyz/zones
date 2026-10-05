@@ -1121,7 +1121,7 @@ where
         .ok_or_else(|| eyre::eyre!("forced recovery Tempo anchor overflow"))?;
 
     let recovery_portal_epoch = if recovery_anchor == snapshot_anchor {
-        portal_leadership.epoch
+        portal_leadership.epoch()
     } else {
         ZonePortal::new(portal_address, l1_provider)
             .leaderEpoch()
@@ -1138,7 +1138,7 @@ where
         .checked_add(1)
         .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
 
-    if portal_leadership.epoch >= recovery_epoch {
+    if portal_leadership.epoch() >= recovery_epoch {
         warn!(
             target: "reth::cli",
             leader = %recovery.leader(),
@@ -1146,8 +1146,8 @@ where
             recovery_zone_height,
             recovery_zone_hash = %recovery.recovery_block_hash(),
             snapshot_anchor,
-            portal_epoch = portal_leadership.epoch,
-            portal_activation_tempo_block = portal_leadership.activation_tempo_block,
+            portal_epoch = portal_leadership.epoch(),
+            portal_activation_tempo_block = portal_leadership.activation_tempo_block(),
             "Skipping completed manifest forced recovery; remove the stale directive"
         );
         metrics::counter!("zone_forced_recovery_directives_total", "result" => "completed")
@@ -2230,9 +2230,9 @@ mod tests {
         let restart_schedule = |snapshot_anchor| {
             let portal = LeadershipState::new(1, portal_leader.clone(), 0);
             let schedule = LeadershipSchedule::seeded(LeadershipState::new(
-                portal.epoch,
+                portal.epoch(),
                 portal_leader.clone(),
-                portal.activation_tempo_block,
+                portal.activation_tempo_block(),
             ));
             schedule.record_applied_anchor(snapshot_anchor);
             schedule

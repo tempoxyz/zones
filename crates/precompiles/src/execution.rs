@@ -112,7 +112,7 @@ pub(crate) fn create_precompile(
                 input.reservoir,
             ));
         };
-        if input.gas < input_gas {
+        if input.gas() < input_gas {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
                 input.reservoir,
@@ -120,20 +120,22 @@ pub(crate) fn create_precompile(
         }
 
         let fixed_gas = rules.fixed_gas(selector_from_calldata(data));
-        if fixed_gas.is_some_and(|gas| input.gas < gas) {
+        if fixed_gas.is_some_and(|gas| input.gas() < gas) {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
                 input.reservoir,
             ));
         }
 
+        let gas = fixed_gas.map_or(input.gas(), |_| u64::MAX);
+        let is_static_call = input.is_static_call();
         let mut storage = EvmPrecompileStorageProvider::new(
             input.internals,
-            fixed_gas.map_or(input.gas, |_| u64::MAX),
+            gas,
             input.reservoir,
             env.cfg.spec,
             env.cfg.enable_amsterdam_eip8037,
-            input.is_static,
+            is_static_call,
             env.cfg.gas_params.clone(),
         )
         .with_actions(env.actions.clone())
