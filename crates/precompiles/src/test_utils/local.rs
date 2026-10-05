@@ -7,7 +7,7 @@ use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::ops::Reduce};
 use revm::{
     Context,
     context::{CfgEnv, TxEnv},
-    database::{CacheDB, EmptyDB},
+    database::InMemoryDB,
     precompile::PrecompileResult,
 };
 use std::{cell::RefCell, rc::Rc};
@@ -27,8 +27,7 @@ use crate::{
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
 
 /// EVM context used by local precompile unit tests.
-pub(crate) type TestContext =
-    Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
+pub(crate) type TestContext = Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, InMemoryDB>;
 
 /// Create an empty test EVM context at the latest Tempo hardfork affecting Zones.
 pub(crate) fn test_context() -> TestContext {
@@ -37,7 +36,7 @@ pub(crate) fn test_context() -> TestContext {
 
 /// Create a test EVM context with the specified hardfork.
 pub(crate) fn test_context_with_hardfork(hardfork: TempoHardfork) -> TestContext {
-    Context::new(CacheDB::new(EmptyDB::new()), hardfork)
+    Context::new(InMemoryDB::default(), hardfork)
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.
