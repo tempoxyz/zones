@@ -39,6 +39,22 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// Parse the same explicitly tagged policy used by TDX transport clients.
+    pub fn from_json(bytes: &[u8]) -> io::Result<Self> {
+        #[derive(Deserialize)]
+        #[serde(tag = "backend", deny_unknown_fields)]
+        enum TaggedPolicy {
+            #[serde(rename = "tdx")]
+            Tdx { measurements: Vec<Measurements> },
+        }
+        require(bytes.len() <= 64 * 1024, "invalid TDX policy size")?;
+        let TaggedPolicy::Tdx { measurements } =
+            serde_json::from_slice(bytes).map_err(io::Error::other)?;
+        let policy = Self { measurements };
+        policy.validate()?;
+        Ok(policy)
+    }
+
     pub fn validate(&self) -> io::Result<()> {
         require(
             !self.measurements.is_empty(),

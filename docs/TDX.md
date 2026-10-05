@@ -66,10 +66,24 @@ or unused runtime fields can be valid, but must match the approved tuple exactly
 Use the existing `prove --attestation-policy <file>` utility against the host proxy
 with the original witness. It saves the SPF output and TDX proof bundle. The existing
 RPC `verify` command targets L1 and cannot validate TDX with the current Tempo pin.
-For local batch verification, use `zone_prover::tdx::Policy::verify_batch` with the
-original public inputs, returned output/bundle, and trusted current Unix time.
+For local batch verification, use the saved response with its original witness:
+
+```bash
+tempo-zone-prover-utils tdx verify-batch --input witness.json --proof proof.json \
+  --attestation-policy tdx-policy.json
+```
+
+This verifies the batch commitments and Intel evidence locally using the current
+Unix time. It does not rerun SPF.
 Attested TLS authenticates the guest and channel; batch verification separately
 checks the output's quote binding.
+
+The `tdx quote --report-data <64-byte-hex> --output quote.bin` command collects a
+raw quote inside the guest. A trusted client can check it with
+`tdx verify-quote --quote quote.bin --report-data <expected-64-byte-hex>
+--attestation-policy tdx-policy.json`. The report data must come from the verifier.
+Use `tdx connect --target <host:port> --attestation-policy tdx-policy.json` to test
+a fresh attested TLS session without sending a witness.
 
 ## First hardware test on Google Cloud
 

@@ -65,15 +65,6 @@ enum VerificationPolicy {
     Tdx(crate::tdx::Policy),
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "backend", deny_unknown_fields)]
-enum TaggedPolicy {
-    #[serde(rename = "tdx")]
-    Tdx {
-        measurements: Vec<crate::tdx::Measurements>,
-    },
-}
-
 impl RemoteProverConfig {
     pub fn from_policy_file(address: String, path: &Path) -> io::Result<Self> {
         Self::from_policy_json(address, &std::fs::read(path)?)
@@ -84,11 +75,8 @@ impl RemoteProverConfig {
         require(bytes.len() <= MAX_POLICY_BYTES, "invalid policy size")?;
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(io::Error::other)?;
         if value.get("backend").is_some() {
-            let TaggedPolicy::Tdx { measurements } =
-                serde_json::from_slice(bytes).map_err(io::Error::other)?;
             require(!address.trim().is_empty(), "invalid prover address")?;
-            let policy = crate::tdx::Policy { measurements };
-            policy.validate()?;
+            let policy = crate::tdx::Policy::from_json(bytes)?;
             return Ok(Self {
                 address,
                 policy: VerificationPolicy::Tdx(policy),
