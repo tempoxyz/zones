@@ -1,4 +1,6 @@
-use super::*;
+use super::{barrier::BarrierInclusionProof, *};
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_consensus::{Header, Sealable, TxReceipt};
 use alloy_eips::eip2718::Encodable2718;
@@ -15,11 +17,14 @@ use tempo_precompiles::{
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
     tip403_registry::ALLOW_ALL_POLICY_ID,
-    zone_factory::{PortalFastEpochConfig, PortalTokenConfig, ZonePortalStorage},
+    zone_factory::{PortalFastEpochConfig, PortalFastPeerBarrier, ZonePortalStorage},
 };
 use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxType};
 use tempo_zone_contracts::{FAST_TRANSFER_ADDRESS, IFastTransfer};
-use zone_fast_transfer::{EpochRoster, QuorumVerifier};
+use zone_fast_transfer::{
+    EpochRoster, QuorumVerifier,
+    drain::{BarrierInventory, CommittedSourceLock},
+};
 use zone_primitives::{
     constants::ZONE_OUTBOX_ADDRESS,
     fast_transfer::{
@@ -82,6 +87,7 @@ struct Authority {
 
 impl Authority {
     fn new(zone_id: u32, chain_id: u64, portal: Address, key_offset: u8) -> Self {
+        assert_eq!(FAST_PROTOCOL_NATIVE_PIN, EXPECTED_FAST_PROTOCOL_NATIVE_PIN);
         let keys = [
             signing_key(key_offset),
             signing_key(key_offset + 1),
@@ -145,7 +151,7 @@ impl Authority {
 }
 
 struct Harness {
-    ctx: TestContext,
+    ctx: Box<TestContext>,
     l1: MockL1Reader,
     portal: Address,
     precompile: DynPrecompile,
@@ -158,7 +164,7 @@ impl Harness {
         source: &Authority,
         destination: &Authority,
     ) -> eyre::Result<Self> {
-        let mut ctx = test_context_with_hardfork(hardfork);
+        let mut ctx = Box::new(test_context_with_hardfork(hardfork));
         let l1 = MockL1Reader::default();
         seed_epoch(&l1, source);
         seed_epoch(&l1, destination);
@@ -277,13 +283,22 @@ impl Harness {
     }
 
     fn resolve(&mut self, intent: &TransferIntent, lock: &OutcomeCertificate) -> PrecompileResult {
+        self.resolve_with_barrier(intent, lock, Bytes::new())
+    }
+
+    fn resolve_with_barrier(
+        &mut self,
+        intent: &TransferIntent,
+        lock: &OutcomeCertificate,
+        barrier_proof: Bytes,
+    ) -> PrecompileResult {
         self.call(
             POOL_OPERATOR,
             IFastTransfer::resolveCall {
                 canonicalIntent: intent.canonical_bytes().into(),
                 lockCertificate: lock.canonical_bytes().into(),
                 cancellation: Bytes::new(),
-                barrierProof: Bytes::new(),
+                barrierProof: barrier_proof,
             },
         )
     }
@@ -496,8 +511,188 @@ impl Scenario {
     }
 }
 
-#[test]
-fn actual_escrow_payment_release_and_t14_spend_preserve_supply() -> eyre::Result<()> {
+fn install_closed_destination_barrier(
+    scenario: &Scenario,
+    intent: &TransferIntent,
+    lock: &OutcomeCertificate,
+    retired: bool,
+) -> Bytes {
+    let closure_hash = keccak256("finalized destination closure");
+    let inventory = BarrierInventory::build(
+        L1_CHAIN_ID,
+        DESTINATION_PORTAL,
+        EPOCH,
+        closure_hash,
+        SOURCE_PORTAL,
+        EPOCH,
+        ANCHOR,
+        keccak256("imported closure anchor"),
+        lock.body.log_term,
+        lock.body.log_index,
+        lock.body.block_height,
+        lock.body.block_hash,
+        lock.body.state_root,
+        vec![CommittedSourceLock {
+            intent: intent.clone(),
+            lock: lock.clone(),
+        }],
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+    )
+    .expect("canonical source barrier inventory");
+    let statement = inventory.statement;
+    let barrier_hash = statement.registry_digest(L1_CHAIN_ID);
+    scenario
+        .destination
+        .l1
+        .with_storage(ANCHOR, || {
+            let mut portal = ZonePortalStorage::new(DESTINATION_PORTAL);
+            let mut config = portal.fast_epochs[EPOCH].read()?;
+            config.closed = true;
+            config.retired = retired;
+            config.closure_hash = closure_hash;
+            config.recorded_peer_barriers = 1;
+            portal.fast_epochs[EPOCH].write(config)?;
+            portal.fast_peer_barriers[EPOCH][SOURCE_PORTAL].write(PortalFastPeerBarrier {
+                recorded: true,
+                finalized: false,
+                source_epoch: statement.source_epoch,
+                imported_anchor_number: statement.imported_anchor_number,
+                imported_anchor_hash: statement.imported_anchor_hash,
+                log_term: statement.log_term,
+                log_index: statement.log_index,
+                block_height: statement.block_height,
+                block_hash: statement.block_hash,
+                state_root: statement.state_root,
+                lock_log_watermark: statement.lock_log_watermark,
+                complete_lock_root: statement.complete_lock_root,
+                unresolved_root: statement.unresolved_root,
+                unresolved_count: statement.unresolved_count,
+                barrier_hash,
+                terminal_root: B256::ZERO,
+                disposition_root: B256::ZERO,
+                resolved_count: 0,
+                remaining_unresolved_root: B256::ZERO,
+                remaining_unresolved_count: 0,
+                resolution_hash: B256::ZERO,
+            })
+        })
+        .expect("seed typed anchored source barrier");
+
+    let complete_proof = &inventory.locks[0].complete_proof;
+    BarrierInclusionProof {
+        destination_portal: statement.destination_portal,
+        destination_epoch: statement.destination_epoch,
+        closure_hash: statement.closure_hash,
+        source_portal: statement.source_portal,
+        source_epoch: statement.source_epoch,
+        imported_anchor_number: statement.imported_anchor_number,
+        imported_anchor_hash: statement.imported_anchor_hash,
+        barrier_hash,
+        lock_log_watermark: statement.lock_log_watermark,
+        complete_lock_root: statement.complete_lock_root,
+        leaf_index: complete_proof.leaf_index,
+        leaf_count: complete_proof.leaf_count,
+        siblings: complete_proof.siblings.clone(),
+    }
+    .encode()
+    .into()
+}
+
+fn closed_epoch_resolve_requires_exact_anchored_barrier_proof_impl() -> eyre::Result<()> {
+    let mut scenario = Scenario::new()?;
+    let intent = scenario.intent(70, 25, 0);
+    let lock = scenario.locked(&intent);
+    assert_success(scenario.destination.fund_pool(100, 0));
+    assert_success(
+        scenario
+            .destination
+            .set_exposure_limit(intent.source.domain_hash(), 25),
+    );
+    let proof = install_closed_destination_barrier(&scenario, &intent, &lock, false);
+
+    assert_revert(scenario.destination.resolve(&intent, &lock));
+    let mut mutated = proof.to_vec();
+    *mutated.last_mut().expect("proof is nonempty") ^= 1;
+    assert_revert(
+        scenario
+            .destination
+            .resolve_with_barrier(&intent, &lock, mutated.into()),
+    );
+    assert_eq!(scenario.destination.balance(RECIPIENT)?, U256::ZERO);
+    assert_eq!(scenario.destination.pool_state()?.fundedBalance, 100);
+
+    assert_success(
+        scenario
+            .destination
+            .resolve_with_barrier(&intent, &lock, proof),
+    );
+    assert_eq!(scenario.destination.balance(RECIPIENT)?, U256::from(25));
+    assert_eq!(scenario.destination.pool_state()?.fundedBalance, 75);
+
+    let mut retired = Scenario::new()?;
+    let retired_intent = retired.intent(71, 25, 0);
+    let retired_lock = retired.locked(&retired_intent);
+    assert_success(retired.destination.fund_pool(100, 0));
+    assert_success(
+        retired
+            .destination
+            .set_exposure_limit(retired_intent.source.domain_hash(), 25),
+    );
+    let retired_proof =
+        install_closed_destination_barrier(&retired, &retired_intent, &retired_lock, true);
+    assert_revert(retired.destination.resolve_with_barrier(
+        &retired_intent,
+        &retired_lock,
+        retired_proof,
+    ));
+    assert_eq!(retired.destination.balance(RECIPIENT)?, U256::ZERO);
+    assert_eq!(retired.destination.pool_state()?.fundedBalance, 100);
+    Ok(())
+}
+
+fn published_tempo_config_fields_are_consensus_pinned_impl() -> eyre::Result<()> {
+    let mut scenario = Scenario::new()?;
+    let intent = scenario.intent(72, 25, 0);
+    let lock = scenario.locked(&intent);
+    assert_success(scenario.destination.fund_pool(100, 0));
+    assert_success(
+        scenario
+            .destination
+            .set_exposure_limit(intent.source.domain_hash(), 25),
+    );
+
+    for mutation in 0..4 {
+        scenario
+            .destination
+            .l1
+            .with_storage(ANCHOR, || {
+                let mut portal = ZonePortalStorage::new(DESTINATION_PORTAL);
+                let mut config = portal.fast_epochs[EPOCH].read()?;
+                match mutation {
+                    0 => config.proof_mode = 0,
+                    1 => config.expected_verifier_code_hash = keccak256("wrong verifier code"),
+                    2 => config.expected_verifier_config_hash = keccak256("wrong verifier config"),
+                    3 => config.roster_hash = keccak256("wrong registry roster"),
+                    _ => unreachable!(),
+                }
+                portal.fast_epochs[EPOCH].write(config)
+            })
+            .expect("mutate one anchored registry field");
+        assert_revert(scenario.destination.resolve(&intent, &lock));
+        assert_eq!(scenario.destination.balance(RECIPIENT)?, U256::ZERO);
+        assert_eq!(scenario.destination.pool_state()?.fundedBalance, 100);
+        seed_epoch(&scenario.destination.l1, &scenario.destination_authority);
+    }
+
+    assert_success(scenario.destination.resolve(&intent, &lock));
+    assert_eq!(scenario.destination.balance(RECIPIENT)?, U256::from(25));
+    assert_eq!(scenario.destination.pool_state()?.fundedBalance, 75);
+    Ok(())
+}
+
+fn actual_escrow_payment_release_and_t14_spend_preserve_supply_impl() -> eyre::Result<()> {
     let mut scenario = Scenario::new()?;
     let intent = scenario.intent(1, 100, 7);
     let quote = scenario.quote(&intent);
@@ -557,8 +752,8 @@ fn actual_escrow_payment_release_and_t14_spend_preserve_supply() -> eyre::Result
     Ok(())
 }
 
-#[test]
-fn rejection_refund_and_source_business_nonce_retries_have_literal_deltas() -> eyre::Result<()> {
+fn rejection_refund_and_source_business_nonce_retries_have_literal_deltas_impl() -> eyre::Result<()>
+{
     let mut scenario = Scenario::new()?;
     let intent = scenario.intent(9, 80, 5);
     let quote = scenario.quote(&intent);
@@ -595,8 +790,7 @@ fn rejection_refund_and_source_business_nonce_retries_have_literal_deltas() -> e
     Ok(())
 }
 
-#[test]
-fn closed_account_policy_blocks_liability_without_changing_beneficiary() -> eyre::Result<()> {
+fn closed_account_policy_blocks_liability_without_changing_beneficiary_impl() -> eyre::Result<()> {
     let mut scenario = Scenario::new()?;
     let intent = scenario.intent(3, 50, 2);
     let quote = scenario.quote(&intent);
@@ -662,8 +856,7 @@ fn closed_account_policy_blocks_liability_without_changing_beneficiary() -> eyre
     Ok(())
 }
 
-#[test]
-fn closed_destination_account_roles_fail_closed_without_pool_debit() -> eyre::Result<()> {
+fn closed_destination_account_roles_fail_closed_without_pool_debit_impl() -> eyre::Result<()> {
     let mut scenario = Scenario::new()?;
     let intent = scenario.intent(5, 35, 0);
     assert_success(scenario.destination.fund_pool(100, 0));
@@ -714,8 +907,7 @@ fn closed_destination_account_roles_fail_closed_without_pool_debit() -> eyre::Re
     Ok(())
 }
 
-#[test]
-fn pool_liquidity_exposure_and_operator_withdrawal_are_serialized() -> eyre::Result<()> {
+fn pool_liquidity_exposure_and_operator_withdrawal_are_serialized_impl() -> eyre::Result<()> {
     let mut scenario = Scenario::new()?;
     let first = scenario.intent(20, 10, 0);
     let second = scenario.intent(21, 10, 0);
@@ -778,8 +970,7 @@ fn pool_liquidity_exposure_and_operator_withdrawal_are_serialized() -> eyre::Res
     Ok(())
 }
 
-#[test]
-fn pre_t14_dispatch_is_gated_with_zero_token_effects() -> eyre::Result<()> {
+fn pre_t14_dispatch_is_gated_with_zero_token_effects_impl() -> eyre::Result<()> {
     let source_authority = Authority::new(1, 10_001, SOURCE_PORTAL, 1);
     let destination_authority = Authority::new(2, 10_002, DESTINATION_PORTAL, 11);
     let mut harness = Harness::new(
@@ -798,8 +989,7 @@ fn pre_t14_dispatch_is_gated_with_zero_token_effects() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test]
-fn every_signed_outcome_field_mutation_has_zero_token_effects() -> eyre::Result<()> {
+fn every_signed_outcome_field_mutation_has_zero_token_effects_impl() -> eyre::Result<()> {
     let mut scenario = Scenario::new()?;
     let intent = scenario.intent(30, 25, 1);
     assert_success(scenario.destination.fund_pool(100, 0));
@@ -840,8 +1030,7 @@ fn every_signed_outcome_field_mutation_has_zero_token_effects() -> eyre::Result<
     Ok(())
 }
 
-#[test]
-fn receipt_trie_and_header_ancestry_retire_exposure_once() -> eyre::Result<()> {
+fn receipt_trie_and_header_ancestry_retire_exposure_once_impl() -> eyre::Result<()> {
     let mut scenario = paid_destination_scenario(40, 40)?;
     let intent = scenario.intent(40, 40, 3);
     let evidence = retirement_evidence(&intent);
@@ -872,8 +1061,8 @@ fn receipt_trie_and_header_ancestry_retire_exposure_once() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test]
-fn forged_receipt_wrong_beneficiary_wrong_root_and_ancestry_do_not_retire() -> eyre::Result<()> {
+fn forged_receipt_wrong_beneficiary_wrong_root_and_ancestry_do_not_retire_impl() -> eyre::Result<()>
+{
     let mut scenario = paid_destination_scenario(41, 40)?;
     let intent = scenario.intent(41, 40, 3);
     let valid = retirement_evidence(&intent);
@@ -929,8 +1118,8 @@ fn forged_receipt_wrong_beneficiary_wrong_root_and_ancestry_do_not_retire() -> e
     Ok(())
 }
 
-#[test]
-fn seeded_randomized_schedule_matches_literal_native_balances_and_supply() -> eyre::Result<()> {
+fn seeded_randomized_schedule_matches_literal_native_balances_and_supply_impl() -> eyre::Result<()>
+{
     const TRANSFERS: usize = 4;
     const PRINCIPAL: u64 = 10;
     const SEED: u64 = 0x005e_ed14;
@@ -1056,6 +1245,53 @@ fn seeded_randomized_schedule_matches_literal_native_balances_and_supply() -> ey
     Ok(())
 }
 
+fn run_acceptance_test(test: fn() -> eyre::Result<()>) -> eyre::Result<()> {
+    std::thread::Builder::new()
+        .name("t14-native-acceptance".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(test)?
+        .join()
+        .map_err(|_| eyre::eyre!("T14 acceptance worker panicked"))?
+}
+
+macro_rules! acceptance_tests {
+    ($($name:ident => $implementation:ident),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() -> eyre::Result<()> {
+                run_acceptance_test($implementation)
+            }
+        )+
+    };
+}
+
+acceptance_tests! {
+    published_tempo_config_fields_are_consensus_pinned =>
+        published_tempo_config_fields_are_consensus_pinned_impl,
+    closed_epoch_resolve_requires_exact_anchored_barrier_proof =>
+        closed_epoch_resolve_requires_exact_anchored_barrier_proof_impl,
+    actual_escrow_payment_release_and_t14_spend_preserve_supply =>
+        actual_escrow_payment_release_and_t14_spend_preserve_supply_impl,
+    rejection_refund_and_source_business_nonce_retries_have_literal_deltas =>
+        rejection_refund_and_source_business_nonce_retries_have_literal_deltas_impl,
+    closed_account_policy_blocks_liability_without_changing_beneficiary =>
+        closed_account_policy_blocks_liability_without_changing_beneficiary_impl,
+    closed_destination_account_roles_fail_closed_without_pool_debit =>
+        closed_destination_account_roles_fail_closed_without_pool_debit_impl,
+    pool_liquidity_exposure_and_operator_withdrawal_are_serialized =>
+        pool_liquidity_exposure_and_operator_withdrawal_are_serialized_impl,
+    pre_t14_dispatch_is_gated_with_zero_token_effects =>
+        pre_t14_dispatch_is_gated_with_zero_token_effects_impl,
+    every_signed_outcome_field_mutation_has_zero_token_effects =>
+        every_signed_outcome_field_mutation_has_zero_token_effects_impl,
+    receipt_trie_and_header_ancestry_retire_exposure_once =>
+        receipt_trie_and_header_ancestry_retire_exposure_once_impl,
+    forged_receipt_wrong_beneficiary_wrong_root_and_ancestry_do_not_retire =>
+        forged_receipt_wrong_beneficiary_wrong_root_and_ancestry_do_not_retire_impl,
+    seeded_randomized_schedule_matches_literal_native_balances_and_supply =>
+        seeded_randomized_schedule_matches_literal_native_balances_and_supply_impl,
+}
+
 fn paid_destination_scenario(nonce: u64, principal: u64) -> eyre::Result<Scenario> {
     let mut scenario = Scenario::new()?;
     let intent = scenario.intent(nonce, principal, 3);
@@ -1147,19 +1383,16 @@ fn retirement_evidence(intent: &TransferIntent) -> ExposureRetirementEvidence {
 
 fn seed_accepted_source_hash(l1: &MockL1Reader, hash: B256) {
     l1.with_storage(ANCHOR, || {
-        ZonePortalStorage::new(SOURCE_PORTAL)
-            .accepted_block_hash_handler()
-            .write(hash)
+        ZonePortalStorage::new(SOURCE_PORTAL).block_hash.write(hash)
     })
     .expect("seed finalized accepted source hash");
 }
 
 fn seed_enabled_asset(l1: &MockL1Reader, portal_address: Address, token: Address) {
     l1.with_storage(ANCHOR, || {
-        ZonePortalStorage::new(portal_address).token_configs[token].write(PortalTokenConfig {
-            enabled: true,
-            deposits_active: true,
-        })
+        let mut storage = ZonePortalStorage::new(portal_address);
+        storage.token_configs[token].enabled.write(true)?;
+        storage.token_configs[token].deposits_active.write(true)
     })
     .expect("seed finalized enabled asset");
 }
@@ -1188,9 +1421,9 @@ fn seed_epoch(l1: &MockL1Reader, authority: &Authority) {
     let portal = authority.domain.portal;
     let epoch = authority.domain.authority_epoch;
     l1.with_storage(ANCHOR, || {
-        let storage = ZonePortalStorage::new(portal);
-        storage.fast_epoch_handler().write(epoch)?;
-        storage.fast_epochs_handler()[epoch].write(PortalFastEpochConfig {
+        let mut storage = ZonePortalStorage::new(portal);
+        storage.fast_epoch.write(epoch)?;
+        storage.fast_epochs[epoch].write(PortalFastEpochConfig {
             protocol_version: u32::from(authority.domain.protocol_version),
             threshold: 2,
             proof_mode: FAST_PROOF_MODE_OPERATOR_ATTESTED,
@@ -1219,17 +1452,13 @@ fn seed_epoch(l1: &MockL1Reader, authority: &Authority) {
             checkpoint_state_root: B256::ZERO,
             checkpoint_hash: B256::ZERO,
         })?;
-        storage
-            .fast_epoch_members_at(epoch)
-            .write(authority.verifier.roster().members.to_vec())?;
+        storage.fast_epoch_members[epoch].write(authority.verifier.roster().members.to_vec())?;
         for member in authority.verifier.roster().members {
-            storage.fast_epoch_member_at(epoch, member).write(true)?;
+            storage.is_fast_epoch_member[epoch][member].write(true)?;
         }
-        storage
-            .fast_epoch_peers_at(epoch)
-            .write(authority.peers.to_vec())?;
+        storage.fast_epoch_peers[epoch].write(authority.peers.to_vec())?;
         for peer in authority.peers {
-            storage.fast_epoch_peer_at(epoch, peer).write(true)?;
+            storage.is_fast_epoch_peer[epoch][peer].write(true)?;
         }
         Ok(())
     })

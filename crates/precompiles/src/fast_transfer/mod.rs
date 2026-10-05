@@ -6,6 +6,7 @@
 
 mod barrier;
 mod dispatch;
+mod imported_barrier;
 mod inventory;
 
 #[cfg(test)]
@@ -328,6 +329,8 @@ pub struct FastTransfer {
     inventory_job_withdrawal_indexes: Mapping<B256, u64>,
     inventory_job_restored: Mapping<B256, bool>,
     replenishment_credits: Mapping<B256, u128>,
+    /// Immutable authenticated inventory hash keyed by destination epoch and source authority.
+    imported_barriers: Mapping<B256, B256>,
 }
 
 impl FastTransfer {

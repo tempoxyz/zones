@@ -156,8 +156,10 @@ impl ReplicatedBlockInput {
         let finalization_selector =
             zone_payload::abi::IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR;
         let mut matching = block.body.transactions.iter().filter(|transaction| {
-            transaction.to() == Some(zone_payload::abi::ZONE_OUTBOX_ADDRESS)
-                && transaction.input().starts_with(&finalization_selector)
+            alloy_consensus::Transaction::to(*transaction)
+                == Some(zone_payload::abi::ZONE_OUTBOX_ADDRESS)
+                && alloy_consensus::Transaction::input(*transaction)
+                    .starts_with(&finalization_selector)
         });
         let finalization = matching
             .next()

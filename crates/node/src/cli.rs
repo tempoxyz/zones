@@ -2,13 +2,15 @@
 
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
+use alloy_eips::NumHash;
 use alloy_network::EthereumWallet;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer::Signer as _;
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches, ValueEnum};
 use commonware_codec::DecodeExt as _;
+use openraft::BasicNode;
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
@@ -20,22 +22,30 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_p2p::{
     InterZoneRoutingConfig, InterZoneRoutingPeer, MAX_TRANSACTION_MESSAGE_SIZE, ManifestAddress,
-    P2pConfig, P2pPeerId, Role,
+    NextRosterHandoffRoutingConfig, P2pConfig, P2pPeerId, Role, spawn_next_roster_handoff_endpoint,
 };
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
     ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
     dev::DevCommand,
-    fast_runtime::{
-        FastReplenishmentRuntimeConfig, FastRuntimeConfig, FastServicePeerConfig,
-        FastServiceRouteConfig, FastServiceRuntimeConfig,
+    fast_drain_adapters::{
+        AuthenticatedNextRosterCheckpointSigner, DrainCommonwareEndpoint, DrainCommonwareRoute,
+        NextRosterCheckpointInstallConfig,
     },
+    fast_runtime::{
+        ExpectedCandidateRoster, FastDrainRuntimeConfig, FastExposureRuntimeConfig,
+        FastExposureSourceRuntimeConfig, FastReplenishmentRuntimeConfig, FastRuntimeConfig,
+        FastServicePeerConfig, FastServiceRouteConfig, FastServiceRuntimeConfig,
+        FinalizedFastProofPolicy, load_fast_activation, load_finalized_next_roster,
+    },
+    fast_service::PeerEndpoint,
+    fast_service_adapters::{next_roster_handoff_authority, spawn_next_roster_checkpoint_signer},
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
-use zone_fast_transfer::{ProtocolLimits, admission::ValueCaps};
-use zone_primitives::fast_transfer::QuoteCertificate;
+use zone_fast_transfer::{DurableJournal, EpochRoster, ProtocolLimits, admission::ValueCaps};
+use zone_primitives::fast_transfer::{QuoteCertificate, ZoneDomain};
 use zone_sequencer::{
     BatchAnchorConfig, DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
     HardforkProverAddress, MAX_WITHDRAWAL_BATCH_GAS, ProverAddresses, SettlementProofMode,
@@ -132,6 +142,40 @@ struct FastInterZonePeerFile {
     endpoint: String,
 }
 
+/// Runs only the authenticated pre-activation checkpoint receiver for one disjoint next-roster
+/// member. It never starts the old roster's Raft or Zone RPC services.
+#[derive(Debug, clap::Parser)]
+#[command(
+    name = "next-roster-handoff",
+    about = "Install and acknowledge a finalized T14 next-roster checkpoint"
+)]
+pub struct NextRosterHandoffCommand {
+    /// Zone genesis whose chain/fork configuration must match the finalized handoff authority.
+    #[arg(long, value_name = "GENESIS_JSON")]
+    chain: PathBuf,
+
+    /// Strict routing, key, storage, and finalized-anchor configuration.
+    #[arg(long, value_name = "CONFIG_JSON")]
+    config: PathBuf,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NextRosterHandoffFile {
+    tempo_l1_rpc_endpoint: String,
+    portal: Address,
+    imported_anchor_number: u64,
+    imported_anchor_hash: B256,
+    listen: SocketAddr,
+    bypass_ip_check: bool,
+    ed25519_key_file: PathBuf,
+    secp256k1_key_file: PathBuf,
+    storage_directory: PathBuf,
+    expected_candidate_roster: CandidateRosterFile,
+    old_peers: Vec<FastServicePeerFile>,
+    next_peers: Vec<FastServicePeerFile>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FastServiceFile {
@@ -141,12 +185,51 @@ struct FastServiceFile {
     native_chain_id: u64,
     fee_token: Address,
     commit_timeout_ms: u64,
+    drain_tempo_l1_rpc_endpoint: String,
+    drain_factory: Address,
+    drain_fee_token: Address,
+    drain_journal_directory: PathBuf,
+    drain_response_timeout_ms: u64,
+    drain_retry_interval_ms: u64,
+    exposure_tempo_l1_rpc_endpoint: String,
+    exposure_poll_interval_ms: u64,
+    exposure_rpc_timeout_ms: u64,
+    exposure_sources: Vec<FastExposureSourceFile>,
     response_timeout_ms: u64,
     health_max_age_ms: u64,
     reserved_terminal_bytes: usize,
     limits: FastServiceLimitsFile,
     peers: Vec<FastServicePeerFile>,
+    expected_candidate_roster: Option<CandidateRosterFile>,
+    next_roster_peers: Vec<FastServicePeerFile>,
     routes: Vec<FastServiceRouteFile>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateRosterFile {
+    l1_chain_id: u64,
+    zone_id: u32,
+    chain_id: u64,
+    portal: Address,
+    authority_epoch: u64,
+    roster_hash: B256,
+    protocol_version: u16,
+    threshold: u8,
+    proof_mode: u8,
+    expected_verifier_code_hash: B256,
+    expected_verifier_config_hash: B256,
+    members: [Address; 3],
+    peer_portals: [Address; 9],
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastExposureSourceFile {
+    zone_id: u32,
+    chain_id: u64,
+    portal: Address,
+    rpc_endpoint: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -195,6 +278,7 @@ const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
 pub enum ZoneCli {
     Node(Box<Cli<ZoneChainSpecParser, ZoneArgs>>),
     Dev(Box<DevCommand>),
+    NextRosterHandoff(Box<NextRosterHandoffCommand>),
 }
 
 impl ZoneCli {
@@ -202,6 +286,7 @@ impl ZoneCli {
         Cli::<ZoneChainSpecParser, ZoneArgs>::command()
             .about("Tempo Zone")
             .subcommand(DevCommand::command())
+            .subcommand(NextRosterHandoffCommand::command())
     }
 
     /// Parse CLI arguments from the environment.
@@ -230,6 +315,11 @@ impl ZoneCli {
                 .map(Box::new)
                 .map(Self::Dev);
         }
+        if let Some(("next-roster-handoff", handoff_matches)) = matches.subcommand() {
+            return NextRosterHandoffCommand::from_arg_matches(handoff_matches)
+                .map(Box::new)
+                .map(Self::NextRosterHandoff);
+        }
         Cli::from_arg_matches(&matches)
             .map(Box::new)
             .map(Self::Node)
@@ -243,8 +333,252 @@ impl ZoneCli {
         match self {
             Self::Node(cli) => run_node(*cli),
             Self::Dev(command) => (*command).run(),
+            Self::NextRosterHandoff(command) => (*command).run(),
         }
     }
+}
+
+impl NextRosterHandoffCommand {
+    pub fn run(self) -> eyre::Result<()> {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(run_next_roster_handoff(self))
+    }
+}
+
+async fn run_next_roster_handoff(command: NextRosterHandoffCommand) -> eyre::Result<()> {
+    let genesis_bytes = std::fs::read(&command.chain)
+        .map_err(|error| eyre::eyre!("failed to read {}: {error}", command.chain.display()))?;
+    let genesis: alloy_genesis::Genesis = serde_json::from_slice(&genesis_bytes)
+        .map_err(|error| eyre::eyre!("invalid {}: {error}", command.chain.display()))?;
+    let chain_spec = ZoneChainSpec::from_genesis(genesis)?;
+    let zone_id = chain_spec.zone_id();
+    let zone_chain_id = chain_spec.chain_id();
+
+    let config_bytes = std::fs::read(&command.config)
+        .map_err(|error| eyre::eyre!("failed to read {}: {error}", command.config.display()))?;
+    let config: NextRosterHandoffFile = serde_json::from_slice(&config_bytes)
+        .map_err(|error| eyre::eyre!("invalid {}: {error}", command.config.display()))?;
+    eyre::ensure!(
+        !config.tempo_l1_rpc_endpoint.is_empty()
+            && !config.portal.is_zero()
+            && config.imported_anchor_number != 0
+            && !config.imported_anchor_hash.is_zero()
+            && !config.storage_directory.as_os_str().is_empty()
+            && config.old_peers.len() == 3
+            && config.next_peers.len() == 3,
+        "next-roster handoff configuration is incomplete"
+    );
+    let imported_anchor = NumHash::new(config.imported_anchor_number, config.imported_anchor_hash);
+    let l1 = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect(&config.tempo_l1_rpc_endpoint)
+        .await?
+        .erased();
+    let loaded = load_fast_activation(
+        &l1,
+        config.portal,
+        &chain_spec,
+        imported_anchor,
+        zone_id,
+        zone_chain_id,
+    )
+    .await?
+    .ok_or_else(|| eyre::eyre!("T14 is not active at the configured finalized anchor"))?;
+    eyre::ensure!(
+        loaded.drain.closed && !loaded.drain.retired,
+        "next-roster handoff requires a closed, unretired finalized old epoch"
+    );
+    let epoch = loaded.activation.epoch();
+    let protocol_version = u16::try_from(epoch.protocol_version)
+        .map_err(|_| eyre::eyre!("finalized protocol version does not fit the wire domain"))?;
+    let old_roster = EpochRoster::from_finalized_registry(
+        ZoneDomain {
+            l1_chain_id: epoch.l1_chain_id,
+            zone_id: epoch.zone_id,
+            chain_id: epoch.zone_chain_id,
+            portal: epoch.portal,
+            authority_epoch: epoch.epoch,
+            roster_hash: epoch.roster_hash,
+            protocol_version,
+        },
+        epoch.members,
+    )
+    .map_err(|error| eyre::eyre!("invalid finalized old roster: {error}"))?;
+    let candidate = decode_candidate_roster(config.expected_candidate_roster)?;
+    eyre::ensure!(
+        candidate.peer_portals == epoch.peer_portals,
+        "candidate successor peer graph differs from the finalized old ten-Zone graph"
+    );
+    let next_roster = load_finalized_next_roster(&old_roster, loaded.drain, Some(&candidate))?
+        .ok_or_else(|| eyre::eyre!("expected candidate roster is unavailable"))?;
+
+    let (old_endpoints, mut routing_peers) =
+        decode_handoff_endpoints(config.old_peers, &old_roster)?;
+    let (next_endpoints, next_routing_peers) =
+        decode_handoff_endpoints(config.next_peers, &next_roster)?;
+    let next_membership = next_endpoints
+        .iter()
+        .enumerate()
+        .map(|(index, endpoint)| {
+            (
+                u64::try_from(index + 1).expect("three members fit u64"),
+                BasicNode::new(endpoint.ed25519.to_string()),
+            )
+        })
+        .collect();
+    routing_peers.extend(next_routing_peers);
+    let next_route = DrainCommonwareRoute {
+        zone_id,
+        portal: config.portal,
+        endpoints: next_endpoints.map(|endpoint| DrainCommonwareEndpoint {
+            member: endpoint.member,
+            identity: endpoint.ed25519,
+        }),
+    };
+    let authority =
+        next_roster_handoff_authority(&old_roster, &old_endpoints, &next_roster, &next_route)
+            .map_err(|error| eyre::eyre!("invalid finalized handoff authority: {error}"))?;
+    let routing = NextRosterHandoffRoutingConfig {
+        l1_chain_id: epoch.l1_chain_id,
+        local_zone_id: zone_id,
+        listen: config.listen,
+        bypass_ip_check: config.bypass_ip_check,
+        peers: routing_peers,
+    };
+    let signer = load_private_key_signer(&config.secp256k1_key_file, "next-roster signer").await?;
+    eyre::ensure!(
+        next_roster.members.contains(&signer.address()),
+        "next-roster signer is absent from the finalized successor roster"
+    );
+    let local_next_member = signer.address();
+    std::fs::create_dir_all(&config.storage_directory)?;
+    let signing_journal = Arc::new(DurableJournal::open(
+        config.storage_directory.join("handoff-signing-journal"),
+    )?);
+    let handler = Arc::new(AuthenticatedNextRosterCheckpointSigner::new_installing(
+        NextRosterCheckpointInstallConfig {
+            storage_directory: config.storage_directory.clone(),
+            old_roster,
+            next_roster,
+            local_next_member,
+            expected_imported_anchor_number: imported_anchor.number,
+            expected_imported_anchor_hash: imported_anchor.hash,
+            expected_final_zone_height: loaded.drain.final_settlement_height,
+            expected_final_block_hash: loaded.drain.final_settlement_block_hash,
+            expected_final_withdrawal_batch_index: loaded
+                .drain
+                .final_settlement_withdrawal_batch_index,
+            expected_final_settlement_hash: loaded.drain.final_settlement_hash,
+            next_membership,
+        },
+        signer,
+        signing_journal,
+    )?);
+    let mut endpoint = spawn_next_roster_handoff_endpoint(
+        routing,
+        &config.ed25519_key_file,
+        &config.secp256k1_key_file,
+        Some(config.storage_directory.join("handoff-commonware")),
+        authority.clone(),
+    )?;
+    let ports = endpoint
+        .take_ports()
+        .ok_or_else(|| eyre::eyre!("next-roster handoff carrier did not expose service ports"))?;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let mut worker = spawn_next_roster_checkpoint_signer(ports, handler, stop.clone()).await?;
+    info!(target: "zone::fast", zone_id, member = %local_next_member, "next-roster checkpoint handoff endpoint ready");
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            stop.cancel();
+            (&mut worker).await?;
+            endpoint.shutdown().await
+        }
+        result = endpoint.wait_for_exit() => {
+            stop.cancel();
+            (&mut worker).await?;
+            result
+        }
+        result = &mut worker => {
+            result?;
+            endpoint.shutdown().await?;
+            Err(eyre::eyre!("next-roster checkpoint signer stopped unexpectedly"))
+        }
+    }
+}
+
+fn decode_handoff_endpoints(
+    configured: Vec<FastServicePeerFile>,
+    roster: &EpochRoster,
+) -> eyre::Result<([PeerEndpoint; 3], Vec<InterZoneRoutingPeer>)> {
+    let mut configured = configured
+        .into_iter()
+        .map(|peer| (peer.certificate_member, peer))
+        .collect::<BTreeMap<_, _>>();
+    eyre::ensure!(
+        configured.len() == 3,
+        "handoff peers contain duplicate members"
+    );
+    let mut endpoints = Vec::with_capacity(3);
+    let mut routing = Vec::with_capacity(3);
+    for member in roster.members {
+        let peer = configured
+            .remove(&member)
+            .ok_or_else(|| eyre::eyre!("handoff endpoint is missing finalized member {member}"))?;
+        eyre::ensure!(
+            peer.zone_id == roster.domain.zone_id,
+            "handoff peer Zone does not match its finalized roster"
+        );
+        let encoded = const_hex::decode(&peer.ed25519_public_key)
+            .map_err(|error| eyre::eyre!("invalid handoff Ed25519 key: {error}"))?;
+        let ed25519 = P2pPeerId::decode(&encoded[..])
+            .map_err(|error| eyre::eyre!("invalid handoff Ed25519 identity: {error}"))?;
+        let address = peer
+            .endpoint
+            .parse::<ManifestAddress>()
+            .map_err(|error| eyre::eyre!("invalid handoff endpoint: {error}"))?;
+        routing.push(InterZoneRoutingPeer {
+            zone_id: peer.zone_id,
+            ed25519: ed25519.clone(),
+            endpoint: address,
+        });
+        endpoints.push(PeerEndpoint {
+            member,
+            ed25519,
+            endpoint: peer.endpoint,
+        });
+    }
+    let endpoints: [PeerEndpoint; 3] = endpoints
+        .try_into()
+        .map_err(|_| eyre::eyre!("handoff roster must contain exactly three members"))?;
+    Ok((endpoints, routing))
+}
+
+fn decode_candidate_roster(file: CandidateRosterFile) -> eyre::Result<ExpectedCandidateRoster> {
+    let roster = EpochRoster::from_finalized_registry(
+        ZoneDomain {
+            l1_chain_id: file.l1_chain_id,
+            zone_id: file.zone_id,
+            chain_id: file.chain_id,
+            portal: file.portal,
+            authority_epoch: file.authority_epoch,
+            roster_hash: file.roster_hash,
+            protocol_version: file.protocol_version,
+        },
+        file.members,
+    )
+    .map_err(|error| eyre::eyre!("invalid expected candidate roster: {error}"))?;
+    Ok(ExpectedCandidateRoster {
+        roster,
+        threshold: file.threshold,
+        proof_policy: FinalizedFastProofPolicy {
+            mode: file.proof_mode,
+            expected_verifier_code_hash: file.expected_verifier_code_hash,
+            expected_verifier_config_hash: file.expected_verifier_config_hash,
+        },
+        peer_portals: file.peer_portals,
+    })
 }
 
 /// Main entry point for the `node` command.
@@ -318,7 +652,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_deposit_decryption_keys(additional_decryption_keys);
         }
 
-        node = configure_sequencing(&args, zone_id, node).await?;
+        let legacy_settlement_store = builder.config().datadir().data_dir().join("settlement");
+        node = configure_sequencing(&args, zone_id, node, legacy_settlement_store).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
         match args.checker_mode {
@@ -374,6 +709,7 @@ async fn configure_sequencing(
     args: &ZoneArgs,
     zone_id: u32,
     mut node: ZoneNode,
+    legacy_settlement_store: PathBuf,
 ) -> eyre::Result<ZoneNode> {
     let mut p2p_config =
         args.sequencer_manifest
@@ -453,12 +789,17 @@ async fn configure_sequencing(
     };
 
     if should_sequence_blocks {
-        let settlement_proof_mode = args.settlement_proof_mode.ok_or_else(|| {
-            eyre::eyre!("sequencing requires explicit --sequencer.settlement-proof-mode")
-        })?;
-        let settlement_store_path = args.settlement_store.clone().ok_or_else(|| {
-            eyre::eyre!("sequencing requires explicit --sequencer.settlement-store")
-        })?;
+        let fast_requested = args.fast_storage.is_some()
+            || args.fast_service_config.is_some()
+            || args.fast_inter_zone_config.is_some()
+            || args.fast_replenishment_config.is_some();
+        let (settlement_proof_mode, settlement_store_path) = settlement_runtime_policy(
+            fast_requested,
+            args.enable_prover,
+            args.settlement_proof_mode,
+            args.settlement_store.clone(),
+            legacy_settlement_store,
+        )?;
         eyre::ensure!(
             !settlement_store_path.as_os_str().is_empty(),
             "--sequencer.settlement-store must not be empty"
@@ -537,6 +878,35 @@ async fn configure_sequencing(
     Ok(node)
 }
 
+fn settlement_runtime_policy(
+    fast_requested: bool,
+    prover_enabled: bool,
+    configured_mode: Option<SettlementProofModeArg>,
+    configured_store: Option<PathBuf>,
+    legacy_store: PathBuf,
+) -> eyre::Result<(SettlementProofModeArg, PathBuf)> {
+    let mode = match configured_mode {
+        Some(mode) => mode,
+        None if !fast_requested && prover_enabled => SettlementProofModeArg::ProofRequired,
+        None if !fast_requested => SettlementProofModeArg::OperatorAttested,
+        None => {
+            return Err(eyre::eyre!(
+                "T14 fast sequencing requires explicit --sequencer.settlement-proof-mode"
+            ));
+        }
+    };
+    let store = match configured_store {
+        Some(path) => path,
+        None if !fast_requested => legacy_store,
+        None => {
+            return Err(eyre::eyre!(
+                "T14 fast sequencing requires explicit --sequencer.settlement-store"
+            ));
+        }
+    };
+    Ok((mode, store))
+}
+
 async fn load_fast_service(path: &std::path::Path) -> eyre::Result<FastServiceRuntimeConfig> {
     let bytes = std::fs::read(path)
         .map_err(|error| eyre::eyre!("failed to read {}: {error}", path.display()))?;
@@ -548,9 +918,21 @@ async fn load_fast_service(path: &std::path::Path) -> eyre::Result<FastServiceRu
             && !file.native_rpc_endpoint.is_empty()
             && !file.fee_token.is_zero()
             && file.commit_timeout_ms != 0
+            && !file.drain_tempo_l1_rpc_endpoint.is_empty()
+            && !file.drain_factory.is_zero()
+            && !file.drain_fee_token.is_zero()
+            && !file.drain_journal_directory.as_os_str().is_empty()
+            && file.drain_response_timeout_ms != 0
+            && file.drain_retry_interval_ms != 0
+            && !file.exposure_tempo_l1_rpc_endpoint.is_empty()
+            && file.exposure_poll_interval_ms != 0
+            && file.exposure_rpc_timeout_ms != 0
+            && file.exposure_sources.len() == 9
             && file.response_timeout_ms != 0
             && file.health_max_age_ms != 0
             && file.peers.len() == 30
+            && matches!(file.next_roster_peers.len(), 0 | 3)
+            && file.expected_candidate_roster.is_some() == (file.next_roster_peers.len() == 3)
             && file.routes.len() == 9,
         "fast service requires explicit nonzero provider settings, thirty peers, and nine routes"
     );
@@ -559,41 +941,49 @@ async fn load_fast_service(path: &std::path::Path) -> eyre::Result<FastServiceRu
         "fast service operator signer",
     )
     .await?;
+    let decode_peer = |peer: FastServicePeerFile| {
+        eyre::ensure!(
+            peer.zone_id != 0 && !peer.certificate_member.is_zero() && !peer.endpoint.is_empty(),
+            "fast service peer fields must be explicit and nonzero"
+        );
+        let encoded = const_hex::decode(&peer.ed25519_public_key).map_err(|error| {
+            eyre::eyre!(
+                "invalid fast service Ed25519 key for Zone {}: {error}",
+                peer.zone_id
+            )
+        })?;
+        let ed25519 = P2pPeerId::decode(&encoded[..]).map_err(|error| {
+            eyre::eyre!(
+                "invalid fast service Ed25519 key for Zone {}: {error}",
+                peer.zone_id
+            )
+        })?;
+        let endpoint = peer.endpoint.parse::<ManifestAddress>().map_err(|error| {
+            eyre::eyre!(
+                "invalid fast service endpoint for Zone {}: {error}",
+                peer.zone_id
+            )
+        })?;
+        Ok(FastServicePeerConfig {
+            zone_id: peer.zone_id,
+            certificate_member: peer.certificate_member,
+            ed25519,
+            endpoint: endpoint.to_string(),
+        })
+    };
     let peers = file
         .peers
         .into_iter()
-        .map(|peer| {
-            eyre::ensure!(
-                peer.zone_id != 0
-                    && !peer.certificate_member.is_zero()
-                    && !peer.endpoint.is_empty(),
-                "fast service peer fields must be explicit and nonzero"
-            );
-            let encoded = const_hex::decode(&peer.ed25519_public_key).map_err(|error| {
-                eyre::eyre!(
-                    "invalid fast service Ed25519 key for Zone {}: {error}",
-                    peer.zone_id
-                )
-            })?;
-            let ed25519 = P2pPeerId::decode(&encoded[..]).map_err(|error| {
-                eyre::eyre!(
-                    "invalid fast service Ed25519 key for Zone {}: {error}",
-                    peer.zone_id
-                )
-            })?;
-            let endpoint = peer.endpoint.parse::<ManifestAddress>().map_err(|error| {
-                eyre::eyre!(
-                    "invalid fast service endpoint for Zone {}: {error}",
-                    peer.zone_id
-                )
-            })?;
-            Ok(FastServicePeerConfig {
-                zone_id: peer.zone_id,
-                certificate_member: peer.certificate_member,
-                ed25519,
-                endpoint: endpoint.to_string(),
-            })
-        })
+        .map(&decode_peer)
+        .collect::<eyre::Result<Vec<_>>>()?;
+    let expected_candidate_roster = file
+        .expected_candidate_roster
+        .map(decode_candidate_roster)
+        .transpose()?;
+    let next_roster_peers = file
+        .next_roster_peers
+        .into_iter()
+        .map(decode_peer)
         .collect::<eyre::Result<Vec<_>>>()?;
     let routes = file
         .routes
@@ -631,6 +1021,8 @@ async fn load_fast_service(path: &std::path::Path) -> eyre::Result<FastServiceRu
     Ok(FastServiceRuntimeConfig {
         l1_chain_id: file.l1_chain_id,
         peers,
+        expected_candidate_roster,
+        next_roster_peers,
         routes,
         limits: ProtocolLimits {
             unresolved_zone: file.limits.unresolved_zone,
@@ -649,6 +1041,29 @@ async fn load_fast_service(path: &std::path::Path) -> eyre::Result<FastServiceRu
         native_chain_id: file.native_chain_id,
         fee_token: file.fee_token,
         commit_timeout: Duration::from_millis(file.commit_timeout_ms),
+        drain: FastDrainRuntimeConfig {
+            tempo_l1_rpc_endpoint: file.drain_tempo_l1_rpc_endpoint,
+            factory: file.drain_factory,
+            fee_token: file.drain_fee_token,
+            journal_directory: file.drain_journal_directory,
+            response_timeout: Duration::from_millis(file.drain_response_timeout_ms),
+            retry_interval: Duration::from_millis(file.drain_retry_interval_ms),
+        },
+        exposure: FastExposureRuntimeConfig {
+            tempo_l1_rpc_endpoint: file.exposure_tempo_l1_rpc_endpoint,
+            sources: file
+                .exposure_sources
+                .into_iter()
+                .map(|source| FastExposureSourceRuntimeConfig {
+                    zone_id: source.zone_id,
+                    chain_id: source.chain_id,
+                    portal: source.portal,
+                    rpc_endpoint: source.rpc_endpoint,
+                })
+                .collect(),
+            poll_interval: Duration::from_millis(file.exposure_poll_interval_ms),
+            rpc_timeout: Duration::from_millis(file.exposure_rpc_timeout_ms),
+        },
     })
 }
 
@@ -673,11 +1088,12 @@ fn validate_service_routing_bindings(
     let configured = service
         .peers
         .iter()
+        .chain(&service.next_roster_peers)
         .map(|peer| (peer.ed25519.clone(), (peer.zone_id, peer.endpoint.clone())))
         .collect::<BTreeMap<_, _>>();
     eyre::ensure!(
-        configured == routed && configured.len() == 30,
-        "C4 service peer identities/endpoints must exactly match all thirty Commonware routes"
+        configured == routed && matches!(configured.len(), 30 | 33),
+        "C4/C5 peer identities/endpoints must exactly match all Commonware routes"
     );
     Ok(())
 }
@@ -1331,6 +1747,20 @@ mod tests {
     }
 
     #[test]
+    fn next_roster_handoff_is_a_dedicated_process_mode() {
+        let parsed = ZoneCli::try_parse_from([
+            "tempo-zone",
+            "next-roster-handoff",
+            "--chain",
+            "genesis.json",
+            "--config",
+            "handoff.json",
+        ])
+        .unwrap();
+        assert!(matches!(parsed, ZoneCli::NextRosterHandoff(_)));
+    }
+
+    #[test]
     fn re_execute_parses_without_portal_address() {
         use reth_chainspec::EthChainSpec as _;
 
@@ -1758,6 +2188,44 @@ mod tests {
         .unwrap();
         assert!(parsed.zone.enable_sequencer);
         assert!(parsed.zone.sequencer_manifest.is_none());
+    }
+
+    #[test]
+    fn settlement_policy_preserves_legacy_defaults_but_fences_fast_mode() {
+        let legacy = PathBuf::from("legacy/settlement");
+        assert_eq!(
+            settlement_runtime_policy(false, false, None, None, legacy.clone()).unwrap(),
+            (SettlementProofModeArg::OperatorAttested, legacy.clone())
+        );
+        assert_eq!(
+            settlement_runtime_policy(false, true, None, None, legacy.clone()).unwrap(),
+            (SettlementProofModeArg::ProofRequired, legacy.clone())
+        );
+        assert!(settlement_runtime_policy(true, true, None, None, legacy.clone()).is_err());
+        assert!(
+            settlement_runtime_policy(
+                true,
+                true,
+                Some(SettlementProofModeArg::ProofRequired),
+                None,
+                legacy.clone(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            settlement_runtime_policy(
+                true,
+                true,
+                Some(SettlementProofModeArg::ProofRequired),
+                Some(PathBuf::from("fast/settlement")),
+                legacy,
+            )
+            .unwrap(),
+            (
+                SettlementProofModeArg::ProofRequired,
+                PathBuf::from("fast/settlement")
+            )
+        );
     }
 
     #[test]

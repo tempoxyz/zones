@@ -18,7 +18,7 @@ fn same_anchor_encoding_is_exact_and_rejects_truncation_trailing_and_wrong_forma
     for length in 0..encoded.len() {
         assert!(SameAnchorOpening::decode_calldata(&encoded[..length]).is_err());
     }
-    let mut trailing = encoded;
+    let mut trailing = encoded.to_vec();
     trailing.push(0);
     assert!(SameAnchorOpening::decode_calldata(&trailing).is_err());
 

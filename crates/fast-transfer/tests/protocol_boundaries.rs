@@ -10,7 +10,9 @@ use zone_fast_transfer::{
     AdmissionController, AdmissionDecision, DeliveryRecord, DeliveryTransition, DestinationRecord,
     ProtocolLimits, ReplenishmentJob, ReplenishmentStage, SourceRecord,
     admission::{PoolAccounting, RouteKey, ValueCaps},
-    replenishment::{DepositRecord, InventoryContribution, WithdrawalRecord},
+    replenishment::{
+        DepositRecord, InventoryContribution, TokenAmount, TransactionCost, WithdrawalRecord,
+    },
     state::{DestinationDecision, SourceStage},
 };
 use zone_primitives::fast_transfer::{AssetId, RejectionReason, TransferIntent, ZoneDomain};
@@ -330,7 +332,7 @@ fn replenishment_job_uses_permanent_identity_and_monotonic_two_leg_stages() {
     let withdrawal = WithdrawalRecord {
         transaction_intent_hash: hash(0x90),
         signer_nonce: 7,
-        fallback_nonce: Some(8),
+        fallback_nonce: None,
         withdrawal_index: None,
         sender_tag: None,
         submission_hashes: Vec::new(),
@@ -345,8 +347,38 @@ fn replenishment_job_uses_permanent_identity_and_monotonic_two_leg_stages() {
     assert!(!job.request_withdrawal(withdrawal).unwrap());
     job.reconcile_withdrawal(Some(hash(0x91)), Some(hash(0x92)), Some(3))
         .unwrap();
+    assert_eq!(
+        job.record_treasury_credit(U256::from(9_u64)),
+        Err(zone_fast_transfer::ReplenishmentError::OutOfOrder),
+        "legacy pending identities are bookkeeping, not canonical funding evidence"
+    );
+    job.bind_canonical_withdrawal(
+        hash(0x91),
+        8,
+        2,
+        hash(0x95),
+        TransactionCost {
+            transaction_hash: hash(0x91),
+            payer: source_inventory,
+            token: Some(address(0x96)),
+            amount: U256::from(3_u64),
+        },
+        TokenAmount {
+            token: address(0x97),
+            amount: U256::from(2_u64),
+        },
+    )
+    .unwrap();
+    job.record_l1_withdrawal_cost(TransactionCost {
+        transaction_hash: hash(0x98),
+        payer: treasury,
+        token: Some(address(0x99)),
+        amount: U256::from(4_u64),
+    })
+    .unwrap();
     assert!(job.record_treasury_credit(U256::from(9_u64)).unwrap());
     assert!(!job.record_treasury_credit(U256::from(9_u64)).unwrap());
+    assert_eq!(job.withdrawal_fee(), Some(U256::from(2_u64)));
 
     let deposit = DepositRecord {
         transaction_intent_hash: hash(0x93),
@@ -360,9 +392,29 @@ fn replenishment_job_uses_permanent_identity_and_monotonic_two_leg_stages() {
     assert!(job.submit_deposit(deposit.clone()).unwrap());
     assert!(!job.submit_deposit(deposit).unwrap());
     job.reconcile_deposit(Some(hash(0x94)), Some(5)).unwrap();
+    assert_eq!(
+        job.record_pool_credit(U256::from(8_u64)),
+        Err(zone_fast_transfer::ReplenishmentError::OutOfOrder),
+        "legacy pending identities cannot make deposit funds available"
+    );
+    job.bind_canonical_deposit(
+        hash(0x94),
+        TransactionCost {
+            transaction_hash: hash(0x94),
+            payer: treasury,
+            token: Some(address(0x99)),
+            amount: U256::from(5_u64),
+        },
+        TokenAmount {
+            token: address(0x97),
+            amount: U256::from(1_u64),
+        },
+    )
+    .unwrap();
     assert!(job.record_pool_credit(U256::from(8_u64)).unwrap());
     assert!(!job.record_pool_credit(U256::from(8_u64)).unwrap());
     assert_eq!(job.stage, ReplenishmentStage::PoolCredited);
     assert_eq!(job.pool_credit, Some(U256::from(8_u64)));
+    assert_eq!(job.deposit_fee(), Some(U256::from(1_u64)));
     assert!(job.record_treasury_credit(U256::from(9_u64)).is_err());
 }

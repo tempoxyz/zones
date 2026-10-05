@@ -464,12 +464,14 @@ contract FastEpochTest is BaseTest {
         assertTrue(portal.fastPeerBarrier(EPOCH, peers[0]).finalized);
     }
 
-    function test_checkpointRejectsUnsignedWrongSignerAndMutatedPrefix() public {
+    function test_checkpointRequiresSignedAcceptedFinalPrefixWithoutMutation() public {
         _activateAndClose();
         _finalizeAllBarriers();
         _recordFinalSettlement();
         address[] memory nextMembers = _memberSet(0x101, 0x102, 0x103);
         FastCheckpointStatement memory statement = _checkpointStatement(EPOCH + 1, nextMembers);
+        assertEq(statement.finalZoneHeight, 0, "exercise the accepted genesis prefix");
+        assertTrue(statement.checkpointLogIndex > 0, "genesis prefix still requires a Raft entry");
         bytes32 digest = keccak256(abi.encode(CHECKPOINT_TAG, block.chainid, statement));
 
         vm.expectRevert(IZonePortal.InvalidFastCertificate.selector);
@@ -487,14 +489,40 @@ contract FastEpochTest is BaseTest {
             )
         );
 
-        statement.checkpointStateRoot = keccak256("mutated-checkpoint-state");
-        vm.expectRevert(IZonePortal.InvalidFastCertificate.selector);
+        FastCheckpointStatement memory laterHead = _checkpointStatement(EPOCH + 1, nextMembers);
+        laterHead.checkpointHeight = statement.finalZoneHeight + 1;
+        laterHead.checkpointBlockHash = keccak256("later-unsettled-head");
+        _expectRejectedCheckpoint(laterHead, nextMembers);
+
+        FastCheckpointStatement memory substitutedHash =
+            _checkpointStatement(EPOCH + 1, nextMembers);
+        substitutedHash.checkpointBlockHash = keccak256("substituted-checkpoint-hash");
+        _expectRejectedCheckpoint(substitutedHash, nextMembers);
+
+        FastCheckpointStatement memory substitutedHeight =
+            _checkpointStatement(EPOCH + 1, nextMembers);
+        substitutedHeight.checkpointHeight = statement.finalZoneHeight + 1;
+        _expectRejectedCheckpoint(substitutedHeight, nextMembers);
+
+        FastCheckpointStatement memory emptyLogPrefix =
+            _checkpointStatement(EPOCH + 1, nextMembers);
+        emptyLogPrefix.checkpointLogIndex = 0;
+        _expectRejectedCheckpoint(emptyLogPrefix, nextMembers);
+
+        digest = keccak256(abi.encode(CHECKPOINT_TAG, block.chainid, statement));
         _factoryCall(
             abi.encodeCall(
                 IZonePortal.installFastCheckpoint,
                 (statement, nextMembers, _pair(0x101, 0x102, digest, digest))
             )
         );
+
+        FastEpochConfig memory installed = portal.fastEpochConfig(EPOCH);
+        assertEq(installed.checkpointLogIndex, 101);
+        assertEq(installed.checkpointHeight, installed.finalSettlementHeight);
+        assertEq(installed.checkpointBlockHash, installed.finalSettlementBlockHash);
+        assertTrue(installed.checkpointStateRoot != bytes32(0));
+        assertTrue(installed.checkpointHash != bytes32(0));
     }
 
     function _activateAndClose() internal {
@@ -914,6 +942,29 @@ contract FastEpochTest is BaseTest {
                     _pair(0x101, 0x102, checkpoint, checkpoint)
                 )
             )
+        );
+    }
+
+    function _expectRejectedCheckpoint(
+        FastCheckpointStatement memory statement,
+        address[] memory nextMembers
+    )
+        internal
+    {
+        FastEpochConfig memory beforeConfig = portal.fastEpochConfig(EPOCH);
+        bytes32 digest = keccak256(abi.encode(CHECKPOINT_TAG, block.chainid, statement));
+        vm.expectRevert(IZonePortal.InvalidFastCertificate.selector);
+        _factoryCall(
+            abi.encodeCall(
+                IZonePortal.installFastCheckpoint,
+                (statement, nextMembers, _pair(0x101, 0x102, digest, digest))
+            )
+        );
+        FastEpochConfig memory afterConfig = portal.fastEpochConfig(EPOCH);
+        assertEq(
+            keccak256(abi.encode(afterConfig)),
+            keccak256(abi.encode(beforeConfig)),
+            "invalid checkpoint mutated epoch state"
         );
     }
 

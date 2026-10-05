@@ -10,6 +10,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use alloy_consensus::crypto::secp256k1::recover_signer;
@@ -19,7 +20,7 @@ use zone_fast_transfer::{
     drain::{
         BarrierInventory, BarrierResolutionInventory, CheckpointImage, CommittedDisposition,
         CommittedSourceLock, CommittedTerminal, DRAIN_PEER_COUNT, DrainCertificate, DrainError,
-        barriers_hash,
+        ProvenBarrierLock, barriers_hash,
     },
 };
 use zone_primitives::fast_transfer::{
@@ -46,17 +47,33 @@ pub struct FastDrainConfig {
     pub local_roster: EpochRoster,
     pub local_member: Address,
     pub peers: [DrainPeer; DRAIN_PEER_COUNT],
-    pub next_roster: EpochRoster,
+    /// Required only for this Zone's local destination checkpoint handoff. An open source must be
+    /// able to produce A->D barriers before governance has selected A's own next roster.
+    pub next_roster: Option<EpochRoster>,
+}
+
+/// Closures observed at the current canonical imported L1 anchor. Runtime replaces this value
+/// only after a committed import; zero/remote RPC observations are never admitted.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DrainClosureObservation {
+    pub local: Option<B256>,
+    pub destinations: BTreeMap<Address, B256>,
 }
 
 impl FastDrainConfig {
     pub fn validate(&self) -> Result<(), FastDrainError> {
         if !self.local_roster.members.contains(&self.local_member)
             || self.local_roster.domain.authority_epoch == 0
-            || self.next_roster.domain.portal != self.local_roster.domain.portal
-            || self.next_roster.domain.authority_epoch <= self.local_roster.domain.authority_epoch
-            || self.next_roster.domain.l1_chain_id != self.local_roster.domain.l1_chain_id
-            || !self.next_roster.members.contains(&self.local_member)
+        {
+            return Err(FastDrainError::InvalidConfiguration);
+        }
+        if let Some(next) = &self.next_roster
+            && (next.domain.portal != self.local_roster.domain.portal
+                || next.domain.authority_epoch <= self.local_roster.domain.authority_epoch
+                || next.domain.l1_chain_id != self.local_roster.domain.l1_chain_id
+                || next.domain.zone_id != self.local_roster.domain.zone_id
+                || next.domain.chain_id != self.local_roster.domain.chain_id
+                || next.domain.protocol_version != self.local_roster.domain.protocol_version)
         {
             return Err(FastDrainError::InvalidConfiguration);
         }
@@ -66,7 +83,7 @@ impl FastDrainConfig {
             if peer.zone_id != peer.roster.domain.zone_id
                 || peer.roster.domain.portal == self.local_roster.domain.portal
                 || peer.roster.domain.l1_chain_id != self.local_roster.domain.l1_chain_id
-                || peer.closure_hash.is_zero()
+                || peer.roster.domain.protocol_version != self.local_roster.domain.protocol_version
                 || !portals.insert(peer.roster.domain.portal)
                 || !zones.insert(peer.zone_id)
             {
@@ -165,6 +182,9 @@ pub enum DrainObjectKey {
         old_epoch: u64,
         next_epoch: u64,
     },
+    Retirement {
+        epoch: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -254,9 +274,16 @@ pub trait FastDrainJournal: Send + Sync + 'static {
 pub trait FastDrainCommittedState: Send + Sync + 'static {
     fn commit_no_new_locks<'a>(
         &'a self,
-        epoch: u64,
+        destination: &'a EpochRoster,
         closure_hash: B256,
     ) -> DrainFuture<'a, Result<CommittedDrainPoint, FastDrainError>>;
+    /// Return the exact committed L1-import point that observed this local destination closure.
+    /// This is a read of canonical committed history, not a request to create another barrier.
+    fn local_destination_closure_point(
+        &self,
+        epoch: u64,
+        closure_hash: B256,
+    ) -> Result<CommittedDrainPoint, FastDrainError>;
     fn source_snapshot(
         &self,
         point: CommittedDrainPoint,
@@ -278,6 +305,7 @@ pub trait FastDrainCommittedState: Send + Sync + 'static {
     fn commit_imported_barrier<'a>(
         &'a self,
         inventory: &'a BarrierInventory,
+        certificate: DrainCertificate,
     ) -> DrainFuture<'a, Result<CommittedDrainPoint, FastDrainError>>;
     fn assert_signing_body(
         &self,
@@ -289,6 +317,17 @@ pub trait FastDrainCommittedState: Send + Sync + 'static {
     fn final_accepted_prefix(
         &self,
     ) -> Result<(FinalAcceptedPrefix, CommittedDrainPoint), FastDrainError>;
+    /// Seal the pre-published checkpoint resources after the registry exposes the exact final
+    /// settlement hash. Implementations that never originate settlement may reject this call.
+    fn record_final_settlement_hash(&self, _settlement_hash: B256) -> Result<(), FastDrainError> {
+        Err(FastDrainError::InvalidConfiguration)
+    }
+    /// Prove from canonical committed native state that every old-epoch Paid exposure is retired
+    /// by accepted source release evidence. A source disposition certificate alone is insufficient.
+    fn assert_exposure_retirement_complete(&self, epoch: u64) -> Result<(), FastDrainError>;
+    /// Prove every lock produced by this retiring source epoch has a certified destination
+    /// terminal and matching committed Released/Refunded disposition, across all destinations.
+    fn assert_source_dispositions_complete(&self, epoch: u64) -> Result<(), FastDrainError>;
     fn checkpoint_image(
         &self,
         settlement_hash: B256,
@@ -303,6 +342,11 @@ pub trait FastDrainCommittedState: Send + Sync + 'static {
 
 /// Local member key and private authenticated calls to the other two old/next roster members.
 pub trait FastDrainCommittee: Send + Sync + 'static {
+    fn install_next_checkpoint<'a>(
+        &'a self,
+        member: Address,
+        image: &'a CheckpointImage,
+    ) -> DrainFuture<'a, Result<(), FastDrainError>>;
     fn sign_local<'a>(
         &'a self,
         purpose: DrainSigningPurpose,
@@ -341,7 +385,8 @@ pub trait FastDrainTransport: Send + Sync + 'static {
 pub trait FastDrainNative: Send + Sync + 'static {
     fn resolve_old_lock<'a>(
         &'a self,
-        lock: &'a CommittedSourceLock,
+        statement: &'a FastBarrierStatement,
+        lock: &'a ProvenBarrierLock,
     ) -> DrainFuture<'a, Result<(), FastDrainError>>;
 }
 
@@ -374,6 +419,7 @@ pub trait FastDrainRegistry: Send + Sync + 'static {
         next_members: [Address; 3],
         certificate: DrainCertificate,
     ) -> Result<Vec<u8>, FastDrainError>;
+    fn encode_retire_epoch(&self, epoch: u64) -> Result<Vec<u8>, FastDrainError>;
     fn submit_prepared<'a>(
         &'a self,
         action: &'a PreparedRegistryAction,
@@ -402,6 +448,7 @@ pub trait FastDrainRegistry: Send + Sync + 'static {
         &'a self,
         epoch: u64,
     ) -> DrainFuture<'a, Result<Option<B256>, FastDrainError>>;
+    fn epoch_retired<'a>(&'a self, epoch: u64) -> DrainFuture<'a, Result<bool, FastDrainError>>;
 }
 
 pub struct FastDrainService {
@@ -443,78 +490,215 @@ impl FastDrainService {
         })
     }
 
-    /// Commit admission closure through Raft, then create, certify, register and directly deliver
-    /// all nine source barriers. Restart reuses every durable object and recollects only a missing
-    /// second signature over the identical digest.
-    pub async fn close_and_publish(&self, closure_hash: B256) -> Result<(), FastDrainError> {
+    /// Freeze and certify this source's route to one closed destination. Other destination routes
+    /// remain open. The committed adapter must return the exact durable import watermark at which
+    /// this destination closure became the canonical no-new-locks fence.
+    pub async fn produce_source_barrier(
+        &self,
+        destination: &DrainPeer,
+        closure_hash: B256,
+    ) -> Result<(), FastDrainError> {
         if closure_hash.is_zero() {
             return Err(FastDrainError::InvalidClosure);
         }
         let epoch = self.config.local_roster.domain.authority_epoch;
-        let point = match self.journal.closure(epoch)? {
-            Some((existing, point)) if existing == closure_hash => point.validate()?,
-            Some(_) => return Err(FastDrainError::ConflictingClosure),
+        let key = DrainObjectKey::OutboundBarrier {
+            epoch,
+            destination: destination.roster.domain.portal,
+        };
+        let (inventory, point) = match self.journal.barrier(&key)? {
+            Some(inventory) => {
+                let point = point_from_barrier(&inventory.statement)?;
+                (inventory, point)
+            }
             None => {
                 let point = self
                     .committed
-                    .commit_no_new_locks(epoch, closure_hash)
+                    .commit_no_new_locks(&destination.roster, closure_hash)
                     .await?
                     .validate()?;
-                self.journal.persist_closure(closure_hash, point)?;
-                point
+                self.committed.assert_imported_destination_closure(
+                    point,
+                    &destination.roster,
+                    closure_hash,
+                )?;
+                let snapshot = self.committed.source_snapshot(point, &destination.roster)?;
+                validate_source_evidence(&snapshot)?;
+                let inventory = BarrierInventory::build(
+                    self.config.local_roster.domain.l1_chain_id,
+                    destination.roster.domain.portal,
+                    destination.roster.domain.authority_epoch,
+                    closure_hash,
+                    self.config.local_roster.domain.portal,
+                    epoch,
+                    point.imported_anchor_number,
+                    point.imported_anchor_hash,
+                    point.log_term,
+                    point.log_index,
+                    point.block_height,
+                    point.block_hash,
+                    point.state_root,
+                    snapshot.locks,
+                    &snapshot.terminals,
+                    &snapshot.dispositions,
+                    &snapshot.policy_blocked,
+                )?;
+                inventory.verify_complete()?;
+                self.journal.persist_barrier(&key, &inventory)?;
+                (inventory, point)
             }
         };
+        if inventory.l1_chain_id != self.config.local_roster.domain.l1_chain_id
+            || inventory.statement.destination_portal != destination.roster.domain.portal
+            || inventory.statement.destination_epoch != destination.roster.domain.authority_epoch
+            || inventory.statement.closure_hash != closure_hash
+            || inventory.statement.source_portal != self.config.local_roster.domain.portal
+            || inventory.statement.source_epoch != epoch
+        {
+            return Err(FastDrainError::ConflictingBarrier);
+        }
+        inventory.verify_complete()?;
+        let digest = inventory.statement.registry_digest(inventory.l1_chain_id);
+        let certificate = self
+            .collect_old_certificate(DrainSigningPurpose::Barrier, &key, digest, point)
+            .await?;
+        QuorumVerifier::new(self.config.local_roster.clone())
+            .verify_source_barrier(&inventory.statement, &certificate.signatures)
+            .map_err(|error| FastDrainError::Certificate(error.to_string()))?;
+        self.transport
+            .send_barrier(destination, &inventory, certificate)
+            .await?;
+        Ok(())
+    }
+
+    /// Resume every independently observed closed-destination route without affecting open peers.
+    pub async fn produce_observed_source_barriers(&self) -> Result<(), FastDrainError> {
         for peer in &self.config.peers {
-            let key = DrainObjectKey::OutboundBarrier {
-                epoch,
-                destination: peer.roster.domain.portal,
-            };
-            let inventory = match self.journal.barrier(&key)? {
-                Some(inventory) => inventory,
-                None => {
-                    self.committed.assert_imported_destination_closure(
-                        point,
-                        &peer.roster,
-                        peer.closure_hash,
-                    )?;
-                    let snapshot = self.committed.source_snapshot(point, &peer.roster)?;
-                    validate_source_evidence(&snapshot)?;
-                    let inventory = BarrierInventory::build(
-                        self.config.local_roster.domain.l1_chain_id,
-                        peer.roster.domain.portal,
-                        peer.roster.domain.authority_epoch,
-                        peer.closure_hash,
-                        self.config.local_roster.domain.portal,
-                        epoch,
-                        point.imported_anchor_number,
-                        point.imported_anchor_hash,
-                        point.log_term,
-                        point.log_index,
-                        point.block_height,
-                        point.block_hash,
-                        point.state_root,
-                        snapshot.locks,
-                        &snapshot.terminals,
-                        &snapshot.dispositions,
-                        &snapshot.policy_blocked,
-                    )?;
-                    inventory.verify_complete()?;
-                    self.journal.persist_barrier(&key, &inventory)?;
-                    inventory
-                }
-            };
-            let digest = inventory.statement.registry_digest(inventory.l1_chain_id);
-            let certificate = self
-                .collect_old_certificate(DrainSigningPurpose::Barrier, &key, digest, point)
-                .await?;
-            QuorumVerifier::new(self.config.local_roster.clone())
-                .verify_source_barrier(&inventory.statement, &certificate.signatures)
-                .map_err(|error| FastDrainError::Certificate(error.to_string()))?;
-            self.transport
-                .send_barrier(peer, &inventory, certificate)
-                .await?;
+            if !peer.closure_hash.is_zero() {
+                self.produce_source_barrier(peer, peer.closure_hash).await?;
+            }
         }
         Ok(())
+    }
+
+    /// Record this Zone's own finalized destination closure. Retirement remains blocked until all
+    /// nine inbound barriers and resolutions are durable; this does not close any source route.
+    pub fn begin_local_destination_retirement(
+        &self,
+        closure_hash: B256,
+    ) -> Result<(), FastDrainError> {
+        if closure_hash.is_zero() {
+            return Err(FastDrainError::InvalidClosure);
+        }
+        let epoch = self.config.local_roster.domain.authority_epoch;
+        let point = self
+            .committed
+            .local_destination_closure_point(epoch, closure_hash)?
+            .validate()?;
+        self.journal.persist_closure(closure_hash, point)
+    }
+
+    /// One idempotent recovery pass. Source work is driven for each independently observed closed
+    /// destination. Local retirement is a separate all-nine inbound phase and never gates those
+    /// source barriers.
+    pub async fn drive_recovery_once(
+        &self,
+        closures: &DrainClosureObservation,
+    ) -> Result<bool, FastDrainError> {
+        if closures.destinations.iter().any(|(portal, hash)| {
+            let peer = self
+                .config
+                .peers
+                .iter()
+                .find(|peer| peer.roster.domain.portal == *portal);
+            hash.is_zero()
+                || peer.is_none()
+                || peer
+                    .is_some_and(|peer| !peer.closure_hash.is_zero() && peer.closure_hash != *hash)
+        }) {
+            return Err(FastDrainError::InvalidConfiguration);
+        }
+        let mut pending_error = None;
+        for peer in &self.config.peers {
+            if let Some(closure_hash) = closures
+                .destinations
+                .get(&peer.roster.domain.portal)
+                .copied()
+                .or((!peer.closure_hash.is_zero()).then_some(peer.closure_hash))
+            {
+                if let Err(error) = self.produce_source_barrier(peer, closure_hash).await {
+                    pending_error.get_or_insert(error);
+                    continue;
+                }
+                if let Err(error) = self.finalize_outbound_barrier(peer).await {
+                    pending_error.get_or_insert(error);
+                }
+            }
+        }
+        let Some(local_closure_hash) = closures.local else {
+            return pending_error.map_or(Ok(false), Err);
+        };
+        self.begin_local_destination_retirement(local_closure_hash)?;
+        let epoch = self.config.local_roster.domain.authority_epoch;
+        for peer in &self.config.peers {
+            let barrier_key = DrainObjectKey::InboundBarrier {
+                epoch,
+                source: peer.roster.domain.portal,
+            };
+            if self.journal.barrier(&barrier_key)?.is_none() {
+                return pending_error.map_or(Ok(false), Err);
+            }
+            let resolution_key = DrainObjectKey::Resolution {
+                destination_epoch: epoch,
+                destination: self.config.local_roster.domain.portal,
+                source: peer.roster.domain.portal,
+            };
+            if self.journal.resolution(&resolution_key)?.is_none() {
+                return pending_error.map_or(Ok(false), Err);
+            }
+        }
+        let settlement_hash = self.record_final_settlement().await?;
+        self.install_and_ack_checkpoint(settlement_hash).await?;
+        self.retire_local_epoch().await?;
+        pending_error.map_or(Ok(true), Err)
+    }
+
+    /// Long-lived closed-epoch recovery loop. A failed pass is retried from fsynced identities;
+    /// provider ambiguity, missing peers, policy-blocked liabilities and partial delivery never
+    /// trigger a reset or fabricated outcome.
+    pub async fn run_recovery_driver(
+        self: Arc<Self>,
+        retry_interval: Duration,
+        mut closures: tokio::sync::watch::Receiver<DrainClosureObservation>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), FastDrainError> {
+        if retry_interval.is_zero() {
+            return Err(FastDrainError::InvalidConfiguration);
+        }
+        loop {
+            if *shutdown.borrow() {
+                return Ok(());
+            }
+            let observation = closures.borrow().clone();
+            if let Err(error) = self.drive_recovery_once(&observation).await {
+                tracing::warn!(target: "zone::fast", %error, "C5 drain recovery pass remains pending");
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(retry_interval) => {}
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return Ok(());
+                    }
+                }
+                changed = closures.changed() => {
+                    if changed.is_err() {
+                        return Err(FastDrainError::Consensus(
+                            "canonical drain closure observer stopped".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     /// Durable destination ingestion. The full signed list is committed through Raft before any
@@ -548,7 +732,7 @@ impl FastDrainService {
             Some(_) => return Err(FastDrainError::ConflictingBarrier),
             None => {
                 self.committed
-                    .commit_imported_barrier(&inventory)
+                    .commit_imported_barrier(&inventory, certificate)
                     .await?
                     .validate()?;
                 self.journal.persist_barrier(&key, &inventory)?;
@@ -560,7 +744,9 @@ impl FastDrainService {
         for entry in &inventory.locks {
             let transfer_id = entry.lock.transfer_id();
             if !self.journal.lock_resolved(&key, transfer_id)? {
-                self.native.resolve_old_lock(&entry.lock).await?;
+                self.native
+                    .resolve_old_lock(&inventory.statement, entry)
+                    .await?;
                 self.journal.mark_lock_resolved(&key, transfer_id)?;
             }
         }
@@ -579,11 +765,7 @@ impl FastDrainService {
             .journal
             .barrier(&barrier_key)?
             .ok_or(FastDrainError::MissingBarrier)?;
-        let point = self
-            .journal
-            .closure(epoch)?
-            .ok_or(FastDrainError::MissingClosure)?
-            .1;
+        let point = point_from_barrier(&barrier.statement)?;
         let (snapshot, resolution_point) = self
             .committed
             .current_source_snapshot(point, &peer.roster)?;
@@ -623,8 +805,7 @@ impl FastDrainService {
             .await?;
         QuorumVerifier::new(self.config.local_roster.clone())
             .verify_barrier_resolution(
-                peer.roster.domain.portal,
-                peer.roster.domain.authority_epoch,
+                &barrier.statement,
                 &resolution.resolution,
                 &certificate.signatures,
             )
@@ -664,8 +845,7 @@ impl FastDrainService {
         }
         QuorumVerifier::new(source.roster.clone())
             .verify_barrier_resolution(
-                self.config.local_roster.domain.portal,
-                epoch,
+                &barrier.statement,
                 &resolution.resolution,
                 &certificate.signatures,
             )
@@ -728,6 +908,8 @@ impl FastDrainService {
             registry_order.push((peer.roster.domain.portal, barrier_hash, resolution_hash));
         }
         let barriers = barriers_hash(&registry_order)?;
+        self.committed.assert_source_dispositions_complete(epoch)?;
+        self.committed.assert_exposure_retirement_complete(epoch)?;
         let (prefix, settlement_point) = self.committed.final_accepted_prefix()?;
         if prefix.block_hash.is_zero()
             || prefix.state_root != settlement_point.state_root
@@ -767,6 +949,8 @@ impl FastDrainService {
         if observed != Some(settlement_hash) {
             return Err(FastDrainError::RegistryObservationMismatch);
         }
+        self.committed
+            .record_final_settlement_hash(settlement_hash)?;
         Ok(settlement_hash)
     }
 
@@ -778,7 +962,12 @@ impl FastDrainService {
         settlement_hash: B256,
     ) -> Result<DrainCertificate, FastDrainError> {
         let old_epoch = self.config.local_roster.domain.authority_epoch;
-        let next_epoch = self.config.next_roster.domain.authority_epoch;
+        let next_roster = self
+            .config
+            .next_roster
+            .as_ref()
+            .ok_or(FastDrainError::MissingNextRoster)?;
+        let next_epoch = next_roster.domain.authority_epoch;
         let key = DrainObjectKey::Checkpoint {
             old_epoch,
             next_epoch,
@@ -788,7 +977,7 @@ impl FastDrainService {
             None => {
                 let image = self
                     .committed
-                    .checkpoint_image(settlement_hash, &self.config.next_roster)?;
+                    .checkpoint_image(settlement_hash, next_roster)?;
                 image.validate()?;
                 self.journal.persist_checkpoint_image(&key, &image)?;
                 image
@@ -810,6 +999,20 @@ impl FastDrainService {
         {
             return Err(FastDrainError::CheckpointInstallationMismatch);
         }
+        let mut installed = 0usize;
+        for member in next_roster.members {
+            if self
+                .committee
+                .install_next_checkpoint(member, &image)
+                .await
+                .is_ok()
+            {
+                installed += 1;
+            }
+        }
+        if installed < 2 {
+            return Err(FastDrainError::UnavailableQuorum);
+        }
         let digest = image
             .statement
             .registry_digest(self.config.local_roster.domain.l1_chain_id);
@@ -819,13 +1022,13 @@ impl FastDrainService {
         QuorumVerifier::verify_next_roster_checkpoint(
             self.config.local_roster.domain.l1_chain_id,
             &image.statement,
-            self.config.next_roster.members,
+            next_roster.members,
             &certificate.signatures,
         )
         .map_err(|error| FastDrainError::Certificate(error.to_string()))?;
         let calldata = self.registry.encode_install_checkpoint(
             &image.statement,
-            self.config.next_roster.members,
+            next_roster.members,
             certificate,
         )?;
         self.submit_registry_action(&key, calldata).await?;
@@ -833,6 +1036,25 @@ impl FastDrainService {
             return Err(FastDrainError::RegistryObservationMismatch);
         }
         Ok(certificate)
+    }
+
+    /// Retire the local old epoch only after the exact checkpoint is finalized. Governance can
+    /// halt this retry loop but cannot bypass any preceding drain assertion or fabricate a result.
+    pub async fn retire_local_epoch(&self) -> Result<(), FastDrainError> {
+        let epoch = self.config.local_roster.domain.authority_epoch;
+        if self.registry.epoch_retired(epoch).await? {
+            return Ok(());
+        }
+        if self.registry.checkpoint_hash(epoch).await?.is_none() {
+            return Err(FastDrainError::CheckpointInstallationMismatch);
+        }
+        let key = DrainObjectKey::Retirement { epoch };
+        let calldata = self.registry.encode_retire_epoch(epoch)?;
+        self.submit_registry_action(&key, calldata).await?;
+        if !self.registry.epoch_retired(epoch).await? {
+            return Err(FastDrainError::RegistryObservationMismatch);
+        }
+        Ok(())
     }
 
     async fn collect_old_certificate(
@@ -853,7 +1075,12 @@ impl FastDrainService {
         digest: B256,
         point: CommittedDrainPoint,
     ) -> Result<DrainCertificate, FastDrainError> {
-        self.collect_certificate(&self.config.next_roster, purpose, key, digest, point)
+        let next = self
+            .config
+            .next_roster
+            .as_ref()
+            .ok_or(FastDrainError::MissingNextRoster)?;
+        self.collect_certificate(next, purpose, key, digest, point)
             .await
     }
 
@@ -874,37 +1101,43 @@ impl FastDrainService {
         }
         self.committed
             .assert_signing_body(purpose, key, digest, point)?;
-        let local = match self
-            .signing_journal
-            .signing_record(digest, self.config.local_member)
-            .map_err(|error| FastDrainError::Storage(error.to_string()))?
-        {
-            Some(record)
-                if record.log_term == point.log_term && record.log_index == point.log_index =>
+        let mut signatures = Vec::with_capacity(2);
+        if roster.members.contains(&self.config.local_member) {
+            let local = match self
+                .signing_journal
+                .signing_record(digest, self.config.local_member)
+                .map_err(|error| FastDrainError::Storage(error.to_string()))?
             {
-                record.signature
-            }
-            Some(_) => return Err(FastDrainError::ConflictingCertificate),
-            None => {
-                let signature = self
-                    .committee
-                    .sign_local(purpose, key, digest, point)
-                    .await?;
-                verify_member_signature(digest, signature, self.config.local_member)?;
-                self.signing_journal
-                    .persist_signing_record(SigningRecord {
-                        digest,
-                        signer: self.config.local_member,
-                        signature,
-                        log_term: point.log_term,
-                        log_index: point.log_index,
-                    })
-                    .map_err(|error| FastDrainError::Storage(error.to_string()))?;
-                signature
-            }
-        };
-        let mut second = None;
+                Some(record)
+                    if record.log_term == point.log_term && record.log_index == point.log_index =>
+                {
+                    record.signature
+                }
+                Some(_) => return Err(FastDrainError::ConflictingCertificate),
+                None => {
+                    let signature = self
+                        .committee
+                        .sign_local(purpose, key, digest, point)
+                        .await?;
+                    verify_member_signature(digest, signature, self.config.local_member)?;
+                    self.signing_journal
+                        .persist_signing_record(SigningRecord {
+                            digest,
+                            signer: self.config.local_member,
+                            signature,
+                            log_term: point.log_term,
+                            log_index: point.log_index,
+                        })
+                        .map_err(|error| FastDrainError::Storage(error.to_string()))?;
+                    signature
+                }
+            };
+            signatures.push(local);
+        }
         for member in roster.members {
+            if signatures.len() == 2 {
+                break;
+            }
             if member == self.config.local_member {
                 continue;
             }
@@ -916,8 +1149,8 @@ impl FastDrainService {
                 if record.log_term != point.log_term || record.log_index != point.log_index {
                     return Err(FastDrainError::ConflictingCertificate);
                 }
-                second = Some(record.signature);
-                break;
+                signatures.push(record.signature);
+                continue;
             }
             if let Ok(signature) = self
                 .committee
@@ -936,14 +1169,13 @@ impl FastDrainService {
                         log_index: point.log_index,
                     })
                     .map_err(|error| FastDrainError::Storage(error.to_string()))?;
-                second = Some(signature);
-                break;
+                signatures.push(signature);
             }
         }
-        let certificate = DrainCertificate {
-            digest,
-            signatures: [local, second.ok_or(FastDrainError::UnavailableQuorum)?],
-        };
+        let signatures: [SignatureBytes; 2] = signatures
+            .try_into()
+            .map_err(|_| FastDrainError::UnavailableQuorum)?;
+        let certificate = DrainCertificate { digest, signatures };
         verify_drain_certificate(roster, certificate)?;
         self.journal
             .persist_certificate(purpose, key, certificate)?;
@@ -1087,6 +1319,23 @@ fn validate_source_evidence(snapshot: &SourceDrainSnapshot) -> Result<(), FastDr
     Ok(())
 }
 
+fn point_from_barrier(
+    statement: &FastBarrierStatement,
+) -> Result<CommittedDrainPoint, FastDrainError> {
+    let block_height =
+        u64::try_from(statement.block_height).map_err(|_| FastDrainError::InvalidCommittedPoint)?;
+    CommittedDrainPoint {
+        log_term: statement.log_term,
+        log_index: statement.log_index,
+        block_height,
+        block_hash: statement.block_hash,
+        state_root: statement.state_root,
+        imported_anchor_number: statement.imported_anchor_number,
+        imported_anchor_hash: statement.imported_anchor_hash,
+    }
+    .validate()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn final_settlement_digest(
     l1_chain_id: u64,
@@ -1198,6 +1447,8 @@ pub enum FastDrainError {
     MissingResolution,
     #[error("missing durable closure")]
     MissingClosure,
+    #[error("local checkpoint retirement has no finalized next roster")]
+    MissingNextRoster,
     #[error("registry peer order differs from the finalized order")]
     WrongBarrierOrder,
     #[error("durable signature/certificate conflicts with the reconstructed body")]
@@ -1316,21 +1567,31 @@ mod tests {
     }
 
     #[test]
-    fn configuration_requires_nine_unique_finalized_destinations() {
+    fn configuration_allows_open_peers_and_disjoint_next_roster() {
         let local = roster(10, 10, 7, [60, 61, 62]);
-        let next = roster(10, 10, 8, [60, 63, 64]);
+        let next = roster(10, 10, 8, [80, 81, 82]);
         let peers = std::array::from_fn(|index| DrainPeer {
             zone_id: index as u32 + 20,
             roster: roster(index as u32 + 20, index as u8 + 20, 9, [70, 71, 72]),
-            closure_hash: B256::repeat_byte(index as u8 + 1),
+            closure_hash: if index == 0 {
+                B256::ZERO
+            } else {
+                B256::repeat_byte(index as u8 + 1)
+            },
         });
         let valid = FastDrainConfig {
             local_roster: local.clone(),
             local_member: Address::repeat_byte(60),
             peers: peers.clone(),
-            next_roster: next.clone(),
+            next_roster: Some(next.clone()),
         };
         valid.validate().expect("nine unique peers");
+        FastDrainConfig {
+            next_roster: None,
+            ..valid.clone()
+        }
+        .validate()
+        .expect("open source does not require a next roster");
 
         let mut duplicate = peers;
         duplicate[8].roster.domain.portal = duplicate[0].roster.domain.portal;
@@ -1339,7 +1600,7 @@ mod tests {
                 local_roster: local,
                 local_member: Address::repeat_byte(60),
                 peers: duplicate,
-                next_roster: next,
+                next_roster: Some(next),
             }
             .validate(),
             Err(FastDrainError::InvalidConfiguration)

@@ -6,20 +6,25 @@
 //! treats a transport acknowledgment as a payment outcome.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_consensus::crypto::secp256k1::recover_signer;
 use alloy_primitives::{Address, B256, Signature, keccak256};
-use tokio::sync::Semaphore;
+use futures::{StreamExt as _, stream::FuturesUnordered};
+use tokio::sync::{Notify, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use zone_fast_transfer::{
     AdmissionController, AdmissionError, AuthenticatedPeerSession, DeliveryRecord, DeliveryStore,
-    DeliveryTransition, DurableJournal, EpochRoster, ProtocolLimits, QuorumVerifier,
+    DeliveryTransition, DurableJournal, EconomicActionKind, EpochRoster, ProtocolLimits,
+    QuorumVerifier,
     admission::{RouteKey, ValueCaps},
 };
 use zone_primitives::fast_transfer::{
@@ -27,12 +32,21 @@ use zone_primitives::fast_transfer::{
     OutcomeCertificate, QuoteCertificate, TransferIntent, TransferOutcome,
 };
 
-use crate::fast_raft_state_machine::CommittedTransferRecord;
+use crate::{
+    fast_drain::DrainClosureObservation, fast_raft_state_machine::CommittedTransferRecord,
+};
 
 const RETRY_MIN: Duration = Duration::from_millis(50);
 const RETRY_MAX: Duration = Duration::from_secs(2);
-const DEFAULT_HEALTH_MAX_AGE: Duration = Duration::from_secs(2);
 const MAX_DELIVERY_RESERVATION: usize = MAX_INTENT_BYTES + 2 * MAX_CERTIFICATE_BYTES + 128;
+/// Native receipt waits are deliberately concurrent, but remain bounded independently per peer at
+/// the protocol's 32-verification limit. Admission can occupy at most 24 slots, leaving eight for
+/// terminal recovery even while new-payment processing is saturated.
+const SEMANTIC_CONCURRENCY_PER_PEER: usize = 32;
+const SEMANTIC_ADMISSION_CONCURRENCY_PER_PEER: usize = 24;
+/// Outbound response timeouts for one unavailable Zone cannot consume another Zone's permits.
+const SEND_CONCURRENCY_PER_PEER: usize = 4;
+const SEND_ADMISSION_CONCURRENCY_PER_PEER: usize = 2;
 
 pub type ServiceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -111,6 +125,7 @@ impl FastServiceConfig {
         if !self.local_roster.members.contains(&self.local_member)
             || self.stream == 0
             || self.routes.is_empty()
+            || self.routes.len() > 9
             || self.limits.unresolved_zone == 0
             || self.limits.unresolved_zone > 10_000
             || self.limits.unresolved_route == 0
@@ -220,8 +235,10 @@ impl ServiceDelivery {
 
     fn class(&self) -> DeliveryClass {
         match self {
-            Self::Locked { .. } | Self::Quote(_) => DeliveryClass::Admission,
-            Self::Terminal { .. } | Self::Disposition { .. } => DeliveryClass::Terminal,
+            Self::Quote(_) => DeliveryClass::Admission,
+            Self::Locked { .. } | Self::Terminal { .. } | Self::Disposition { .. } => {
+                DeliveryClass::Terminal
+            }
         }
     }
 }
@@ -392,12 +409,33 @@ enum DeliveryClass {
     Terminal,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeliveryKind {
+    Quote,
+    Locked,
+    Terminal,
+    Disposition,
+}
+
+impl ServiceDelivery {
+    fn kind(&self) -> DeliveryKind {
+        match self {
+            Self::Quote(_) => DeliveryKind::Quote,
+            Self::Locked { .. } => DeliveryKind::Locked,
+            Self::Terminal { .. } => DeliveryKind::Terminal,
+            Self::Disposition { .. } => DeliveryKind::Disposition,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PendingDelivery {
     peer_zone: u32,
     record: DeliveryRecord,
     class: DeliveryClass,
+    kind: DeliveryKind,
     next_attempt: Instant,
+    in_flight: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -406,15 +444,111 @@ struct RouteHealth {
     consecutive_failures: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct IncomingRetry {
+    attempts: u32,
+    next_attempt: Instant,
+}
+
 #[derive(Default)]
 struct ServiceState {
     pending: BTreeMap<(u32, u64, u64), PendingDelivery>,
     next_sequence: HashMap<u32, u64>,
     incoming_next: HashMap<(u32, u64), u64>,
+    incoming_in_flight: BTreeSet<(u32, u64, u64)>,
+    incoming_completed: BTreeSet<(u32, u64, u64)>,
+    incoming_retries: HashMap<(u32, u64, u64), IncomingRetry>,
     queue_zone_bytes: usize,
     queue_peer_bytes: HashMap<u32, usize>,
     health: HashMap<u32, RouteHealth>,
     cancellations: HashMap<B256, CancellationRequest>,
+}
+
+/// Admission authority derived only from closure state at committed imported L1 anchors.
+/// Endpoint configuration is deliberately absent: it is routing metadata, never authority.
+struct ImportedAnchorAdmission {
+    local_portal: Address,
+    local_closure: Option<B256>,
+    route_portals: BTreeMap<u32, Address>,
+    route_closures: BTreeMap<u32, B256>,
+}
+
+impl ImportedAnchorAdmission {
+    fn new(config: &FastServiceConfig) -> Result<Self, FastServiceError> {
+        let route_portals = config
+            .routes
+            .iter()
+            .map(|(zone, route)| (*zone, route.roster.domain.portal))
+            .collect::<BTreeMap<_, _>>();
+        let distinct = route_portals
+            .values()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if distinct.len() != route_portals.len()
+            || distinct.contains(&config.local_roster.domain.portal)
+        {
+            return Err(FastServiceError::InvalidConfiguration);
+        }
+        Ok(Self {
+            local_portal: config.local_roster.domain.portal,
+            local_closure: None,
+            route_portals,
+            route_closures: BTreeMap::new(),
+        })
+    }
+
+    fn apply(&mut self, observation: &DrainClosureObservation) -> Result<(), FastServiceError> {
+        if observation.local.is_some_and(|hash| hash.is_zero())
+            || observation.destinations.values().any(|hash| hash.is_zero())
+        {
+            return Err(FastServiceError::InvalidClosureObservation);
+        }
+        if let (Some(current), Some(observed)) = (self.local_closure, observation.local)
+            && current != observed
+        {
+            return Err(FastServiceError::InvalidClosureObservation);
+        }
+
+        let mut observed_routes = BTreeMap::new();
+        for (portal, closure_hash) in &observation.destinations {
+            if *portal == self.local_portal {
+                return Err(FastServiceError::InvalidClosureObservation);
+            }
+            let zone = self
+                .route_portals
+                .iter()
+                .find_map(|(zone, configured)| (*configured == *portal).then_some(*zone))
+                .ok_or(FastServiceError::InvalidClosureObservation)?;
+            if self
+                .route_closures
+                .get(&zone)
+                .is_some_and(|current| current != closure_hash)
+            {
+                return Err(FastServiceError::InvalidClosureObservation);
+            }
+            observed_routes.insert(zone, *closure_hash);
+        }
+
+        if let Some(closure_hash) = observation.local {
+            self.local_closure.get_or_insert(closure_hash);
+        }
+        self.route_closures.extend(observed_routes);
+        Ok(())
+    }
+
+    fn allows_new_lock(&self, destination_zone: u32) -> bool {
+        self.local_closure.is_none()
+            && self.route_portals.contains_key(&destination_zone)
+            && !self.route_closures.contains_key(&destination_zone)
+    }
+
+    fn allows_quote_publication(&self) -> bool {
+        self.local_closure.is_none()
+    }
+
+    fn allows_delivery(&self, kind: DeliveryKind) -> bool {
+        kind != DeliveryKind::Quote || self.allows_quote_publication()
+    }
 }
 
 /// Long-lived C4 delivery worker.
@@ -429,8 +563,12 @@ pub struct FastTransferService {
     cancellations: Arc<dyn CancellationStore>,
     incoming: Arc<dyn IncomingRecoverySource>,
     verification: BTreeMap<u32, Arc<Semaphore>>,
+    imported_anchor_admission: RwLock<ImportedAnchorAdmission>,
     admission: Mutex<AdmissionController>,
     state: Mutex<ServiceState>,
+    incoming_available: Notify,
+    outgoing_available: Notify,
+    exposure_recovery_backlog: AtomicBool,
 }
 
 impl FastTransferService {
@@ -462,6 +600,7 @@ impl FastTransferService {
         for (route, caps) in &config.value_caps {
             admission.set_value_caps(*route, *caps);
         }
+        let imported_anchor_admission = ImportedAnchorAdmission::new(&config)?;
         let service = Self {
             config,
             journal,
@@ -473,13 +612,27 @@ impl FastTransferService {
             cancellations,
             incoming,
             verification,
+            imported_anchor_admission: RwLock::new(imported_anchor_admission),
             admission: Mutex::new(admission),
             state: Mutex::new(ServiceState::default()),
+            incoming_available: Notify::new(),
+            outgoing_available: Notify::new(),
+            exposure_recovery_backlog: AtomicBool::new(false),
         };
         service.recover_delivery_queue()?;
         service.recover_cancellations()?;
         service.recover_admission()?;
         Ok(service)
+    }
+
+    pub(crate) fn route_domains(
+        &self,
+    ) -> BTreeMap<u32, zone_primitives::fast_transfer::ZoneDomain> {
+        self.config
+            .routes
+            .iter()
+            .map(|(zone, route)| (*zone, route.roster.domain))
+            .collect()
     }
 
     /// Gate a new source lock on exact route/quote identity, bounded queue headroom, and recent
@@ -488,10 +641,28 @@ impl FastTransferService {
         &self,
         intent: &TransferIntent,
     ) -> Result<QuoteCertificate, FastServiceError> {
+        let gate = self
+            .imported_anchor_admission
+            .try_read()
+            .map_err(|_| FastServiceError::AdmissionClosed)?;
+        self.quote_for_new_lock_with_gate(intent, &gate)
+    }
+
+    fn quote_for_new_lock_with_gate(
+        &self,
+        intent: &TransferIntent,
+        gate: &ImportedAnchorAdmission,
+    ) -> Result<QuoteCertificate, FastServiceError> {
+        if self.exposure_recovery_backlog.load(Ordering::Acquire) {
+            return Err(FastServiceError::AdmissionClosed);
+        }
         if intent.source != self.config.local_roster.domain {
             return Err(FastServiceError::InvalidIntent("wrong source domain"));
         }
         let route = self.route(intent.destination.zone_id)?;
+        if !gate.allows_new_lock(intent.destination.zone_id) {
+            return Err(FastServiceError::AdmissionClosed);
+        }
         let quote = &route.remote_quote.quote;
         if quote.source != intent.source
             || quote.destination != intent.destination
@@ -550,13 +721,18 @@ impl FastTransferService {
         if caller != intent.sender || intent.refund_account != intent.sender {
             return Err(FastServiceError::UnauthorizedPrincipal);
         }
-        let configured = self.quote_for_new_lock(&intent)?;
+        // Linearize the service admission decision under the imported-anchor read fence. Do not
+        // retain it while waiting for Raft commitment: an L1 import that closes admission must be
+        // able to finish while a transaction admitted at the preceding anchor is still pending.
+        let gate = self.imported_anchor_admission.read().await;
+        let configured = self.quote_for_new_lock_with_gate(&intent, &gate)?;
         if quote != configured {
             return Err(FastServiceError::InvalidIntent("unconfigured quote"));
         }
         self.native
             .validate_signed_lock(caller, &intent, &quote, signed_transaction)?;
         self.reserve_obligation(&intent, signed_transaction.len())?;
+        drop(gate);
         let transaction_hash = self
             .native
             .submit_signed_lock(caller, &intent, &quote, signed_transaction)
@@ -574,6 +750,24 @@ impl FastTransferService {
             transaction_hash,
             committed,
         })
+    }
+
+    /// Atomically apply closure state observed at the latest committed imported L1 anchor.
+    /// Closures are monotonic. Unknown Portals and changed closure hashes fail closed; configured
+    /// transport endpoints are never consulted as authority.
+    pub async fn apply_drain_closure_observation(
+        &self,
+        observation: DrainClosureObservation,
+    ) -> Result<(), FastServiceError> {
+        let mut gate = self.imported_anchor_admission.write().await;
+        gate.apply(&observation)?;
+        let mut state = self.state.lock().map_err(|_| FastServiceError::Poisoned)?;
+        if !gate.allows_quote_publication() {
+            state.health.clear();
+        } else {
+            state.health.retain(|zone, _| gate.allows_new_lock(*zone));
+        }
+        Ok(())
     }
 
     /// Authenticated private status. Unrelated principals receive `None`, indistinguishable from
@@ -678,59 +872,35 @@ impl FastTransferService {
         {
             return Err(FastServiceError::UnauthenticatedPeer);
         }
-        // Decode before persistence only to reject oversized/malformed traffic. The durable write
-        // still completes before the acknowledgment below is constructed.
-        let delivery = self.wire.decode(encoded)?;
-        self.journal
-            .persist_incoming(peer_zone, stream, sequence, encoded)
-            .map_err(|error| FastServiceError::Storage(error.to_string()))?;
-        let acknowledgment = ServiceAcknowledgment {
-            remote_member: session.remote_member(),
+        // Decode before persistence only to reject oversized/malformed traffic. Semantic work is
+        // deliberately not awaited here: the fsynced frame is the transport-ACK boundary, while
+        // the bounded recovery workers retry its idempotent native work until it commits.
+        self.wire.decode(encoded)?;
+        let acknowledgment = persist_transport_ack(
+            &self.journal,
+            peer_zone,
+            session.remote_member(),
             stream,
             sequence,
-        };
+            encoded,
+        )?;
         {
             let mut state = self.state.lock().map_err(|_| FastServiceError::Poisoned)?;
             let health = state.health.entry(peer_zone).or_default();
             health.last_success = Some(Instant::now());
             health.consecutive_failures = 0;
-            let next = state.incoming_next.entry((peer_zone, stream)).or_insert(1);
-            if sequence < *next {
-                return Ok(acknowledgment);
-            }
-            if sequence > *next {
-                return Err(FastServiceError::CursorGap {
-                    expected: *next,
-                    actual: sequence,
-                });
-            }
         }
-        self.process_durable(peer_zone, delivery).await?;
-        self.journal
-            .advance_contiguous_cursor(peer_zone, stream, sequence)
-            .map_err(|error| FastServiceError::Storage(error.to_string()))?;
-        self.state
-            .lock()
-            .map_err(|_| FastServiceError::Poisoned)?
-            .incoming_next
-            .insert((peer_zone, stream), sequence.saturating_add(1));
+        self.incoming_available.notify_one();
         Ok(acknowledgment)
     }
 
     /// Reconstruct semantic work from committed records and continuously retry unfinished frames.
-    pub async fn run(&self, stop: CancellationToken) -> Result<(), FastServiceError> {
-        self.recover_incoming().await?;
-        let mut interval = tokio::time::interval(RETRY_MIN);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                () = stop.cancelled() => return Ok(()),
-                _ = interval.tick() => {
-                    self.reconcile_committed().await?;
-                    self.send_ready().await;
-                }
-            }
-        }
+    pub async fn run(self: Arc<Self>, stop: CancellationToken) -> Result<(), FastServiceError> {
+        let incoming = self.clone().run_incoming_worker(stop.clone());
+        let committed = self.clone().run_committed_worker(stop.clone());
+        let outgoing = self.run_outgoing_worker(stop);
+        tokio::try_join!(incoming, committed, outgoing)?;
+        Ok(())
     }
 
     pub async fn reconcile_once(&self) -> Result<(), FastServiceError> {
@@ -738,6 +908,50 @@ impl FastTransferService {
         self.reconcile_committed().await?;
         self.send_ready().await;
         Ok(())
+    }
+
+    async fn run_incoming_worker(
+        self: Arc<Self>,
+        stop: CancellationToken,
+    ) -> Result<(), FastServiceError> {
+        let mut interval = tokio::time::interval(RETRY_MIN);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                _ = interval.tick() => self.recover_incoming().await?,
+                () = self.incoming_available.notified() => self.recover_incoming().await?,
+            }
+        }
+    }
+
+    async fn run_committed_worker(
+        self: Arc<Self>,
+        stop: CancellationToken,
+    ) -> Result<(), FastServiceError> {
+        let mut interval = tokio::time::interval(RETRY_MIN);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                _ = interval.tick() => self.reconcile_committed().await?,
+            }
+        }
+    }
+
+    async fn run_outgoing_worker(
+        self: Arc<Self>,
+        stop: CancellationToken,
+    ) -> Result<(), FastServiceError> {
+        let mut interval = tokio::time::interval(RETRY_MIN);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                _ = interval.tick() => self.send_ready().await,
+                () = self.outgoing_available.notified() => self.send_ready().await,
+            }
+        }
     }
 
     fn recover_delivery_queue(&self) -> Result<(), FastServiceError> {
@@ -750,6 +964,7 @@ impl FastTransferService {
             {
                 let delivery = self.wire.decode(&record.payload)?;
                 let class = delivery.class();
+                let kind = delivery.kind();
                 reserve_queue(
                     &self.config,
                     &mut state,
@@ -768,7 +983,9 @@ impl FastTransferService {
                         peer_zone,
                         record,
                         class,
+                        kind,
                         next_attempt: Instant::now(),
+                        in_flight: false,
                     },
                 );
             }
@@ -791,49 +1008,170 @@ impl FastTransferService {
 
     async fn recover_incoming(&self) -> Result<(), FastServiceError> {
         let mut records = self.incoming.load_unprocessed()?;
-        records.sort_by_key(|record| (record.peer_zone, record.stream, record.sequence));
+        records.sort_by_key(|record| {
+            let class = self
+                .wire
+                .decode(&record.payload)
+                .map(|delivery| delivery.class())
+                .unwrap_or(DeliveryClass::Terminal);
+            (
+                matches!(class, DeliveryClass::Admission),
+                record.peer_zone,
+                record.stream,
+                record.sequence,
+            )
+        });
+        let per_peer = self
+            .config
+            .routes
+            .keys()
+            .map(|peer| {
+                (
+                    *peer,
+                    (
+                        Arc::new(Semaphore::new(SEMANTIC_CONCURRENCY_PER_PEER)),
+                        Arc::new(Semaphore::new(SEMANTIC_ADMISSION_CONCURRENCY_PER_PEER)),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut work = FuturesUnordered::new();
         for record in records {
-            let expected = {
+            let key = (record.peer_zone, record.stream, record.sequence);
+            let delivery = self.wire.decode(&record.payload)?;
+            let class = delivery.class();
+            let retry_id = delivery
+                .transfer_id()
+                .unwrap_or_else(|| keccak256(&record.payload));
+            let should_process = {
                 let mut state = self.state.lock().map_err(|_| FastServiceError::Poisoned)?;
-                *state
+                state
                     .incoming_next
                     .entry((record.peer_zone, record.stream))
-                    .or_insert(record.expected_sequence)
+                    .or_insert(record.expected_sequence);
+                if state.incoming_completed.contains(&key)
+                    || state
+                        .incoming_retries
+                        .get(&key)
+                        .is_some_and(|retry| retry.next_attempt > Instant::now())
+                    || !state.incoming_in_flight.insert(key)
+                {
+                    false
+                } else {
+                    true
+                }
             };
-            if record.sequence < expected {
+            if !should_process {
                 continue;
             }
-            if record.sequence > expected {
-                return Err(FastServiceError::CursorGap {
-                    expected,
-                    actual: record.sequence,
-                });
-            }
-            let delivery = self.wire.decode(&record.payload)?;
-            self.process_durable(record.peer_zone, delivery).await?;
-            self.journal
-                .advance_contiguous_cursor(record.peer_zone, record.stream, record.sequence)
-                .map_err(|error| FastServiceError::Storage(error.to_string()))?;
-            self.state
-                .lock()
-                .map_err(|_| FastServiceError::Poisoned)?
-                .incoming_next
-                .insert(
-                    (record.peer_zone, record.stream),
-                    record.sequence.saturating_add(1),
-                );
+            let Some((all, admission)) = per_peer.get(&record.peer_zone).cloned() else {
+                self.clear_incoming_in_flight(key)?;
+                return Err(FastServiceError::UnknownRoute(record.peer_zone));
+            };
+            work.push(async move {
+                let _all = all
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| FastServiceError::InvalidConfiguration)?;
+                let _admission = if class == DeliveryClass::Admission {
+                    Some(
+                        admission
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| FastServiceError::InvalidConfiguration)?,
+                    )
+                } else {
+                    None
+                };
+                let result = self.process_durable(record.peer_zone, delivery).await;
+                Ok::<_, FastServiceError>((key, retry_id, result))
+            });
         }
+
+        while let Some(result) = work.next().await {
+            let (key, retry_id, result) = result?;
+            match result {
+                Ok(()) => self.complete_incoming(key)?,
+                Err(error) => {
+                    self.record_incoming_failure(key, retry_id)?;
+                    tracing::warn!(
+                        target: "zone::fast",
+                        peer_zone = key.0,
+                        stream = key.1,
+                        sequence = key.2,
+                        %error,
+                        "durable incoming semantic work remains queued"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_incoming_in_flight(&self, key: (u32, u64, u64)) -> Result<(), FastServiceError> {
+        self.state
+            .lock()
+            .map_err(|_| FastServiceError::Poisoned)?
+            .incoming_in_flight
+            .remove(&key);
+        Ok(())
+    }
+
+    fn record_incoming_failure(
+        &self,
+        key: (u32, u64, u64),
+        retry_id: B256,
+    ) -> Result<(), FastServiceError> {
+        let mut state = self.state.lock().map_err(|_| FastServiceError::Poisoned)?;
+        state.incoming_in_flight.remove(&key);
+        let retry = state.incoming_retries.entry(key).or_insert(IncomingRetry {
+            attempts: 0,
+            next_attempt: Instant::now(),
+        });
+        retry.attempts = retry.attempts.saturating_add(1);
+        retry.next_attempt = Instant::now() + retry_delay(retry.attempts, retry_id);
+        Ok(())
+    }
+
+    /// Persist only the actual contiguous done prefix. Out-of-order completions remain in memory;
+    /// after a crash they are safely replayed from their original fsynced frame.
+    fn complete_incoming(&self, key: (u32, u64, u64)) -> Result<(), FastServiceError> {
+        let (peer_zone, stream, sequence) = key;
+        let mut state = self.state.lock().map_err(|_| FastServiceError::Poisoned)?;
+        state.incoming_in_flight.remove(&key);
+        state.incoming_retries.remove(&key);
+        state.incoming_completed.insert(key);
+        let mut expected = state
+            .incoming_next
+            .get(&(peer_zone, stream))
+            .copied()
+            .unwrap_or(1);
+        expected = advance_completed_prefix(
+            &self.journal,
+            &mut state.incoming_completed,
+            peer_zone,
+            stream,
+            expected,
+        )?;
+        state.incoming_next.insert((peer_zone, stream), expected);
+        debug_assert!(sequence < expected || !state.incoming_completed.is_empty());
         Ok(())
     }
 
     fn recover_admission(&self) -> Result<(), FastServiceError> {
         for record in self.committed.committed_transfers()? {
-            if matches!(
-                &record.body.outcome,
-                TransferOutcome::Locked { .. }
-                    | TransferOutcome::Paid { .. }
-                    | TransferOutcome::Rejected { .. }
-            ) {
+            let unresolved = match &record.body.outcome {
+                TransferOutcome::Locked { .. } | TransferOutcome::Rejected { .. } => true,
+                TransferOutcome::Paid { .. } => !self
+                    .journal
+                    .economic_action_completed(
+                        record.body.transfer_id,
+                        EconomicActionKind::RetireExposure,
+                    )
+                    .map_err(|error| FastServiceError::Storage(error.to_string()))?,
+                TransferOutcome::Released { .. } | TransferOutcome::Refunded { .. } => false,
+            };
+            if unresolved {
                 self.reserve_obligation(&record.intent, record.intent.canonical_bytes().len())?;
             }
         }
@@ -865,21 +1203,163 @@ impl FastTransferService {
         }
     }
 
-    async fn reconcile_committed(&self) -> Result<(), FastServiceError> {
-        for (peer_zone, route) in &self.config.routes {
-            if let Err(error) = self.queue(
-                *peer_zone,
-                ServiceDelivery::Quote(route.local_quote.clone()),
-            ) && !matches!(&error, FastServiceError::QueueFull)
+    /// Recover paid destination claims that have an authenticated, durable source release but
+    /// still require canonical accepted-prefix evidence. Transport processing and the source
+    /// disposition certificate alone deliberately do not release destination capacity.
+    pub(crate) fn exposure_retirement_candidates(
+        &self,
+    ) -> Result<Vec<(TransferIntent, OutcomeCertificate)>, FastServiceError> {
+        let mut committed = HashMap::new();
+        for record in self.committed.committed_transfers()? {
+            if matches!(record.body.outcome, TransferOutcome::Paid { .. })
+                && !self
+                    .journal
+                    .economic_action_completed(
+                        record.body.transfer_id,
+                        EconomicActionKind::RetireExposure,
+                    )
+                    .map_err(|error| FastServiceError::Storage(error.to_string()))?
             {
-                return Err(error);
+                committed.insert(record.body.transfer_id, record.intent);
             }
         }
-        for record in self.committed.committed_transfers()? {
-            if let Err(error) = self.reconcile_record(record).await
-                && !matches!(&error, FastServiceError::QueueFull)
+        let mut candidates = BTreeMap::new();
+        for record in self
+            .journal
+            .all_incoming()
+            .map_err(|error| FastServiceError::Storage(error.to_string()))?
+        {
+            let ServiceDelivery::Disposition {
+                intent,
+                certificate,
+            } = self.wire.decode(&record.payload)?
+            else {
+                continue;
+            };
+            if !matches!(certificate.body.outcome, TransferOutcome::Released { .. }) {
+                continue;
+            }
+            let Some(paid_intent) = committed.get(&intent.transfer_id()) else {
+                continue;
+            };
+            if paid_intent != &intent || intent.source.zone_id != record.peer_zone {
+                return Err(FastServiceError::CommittedState(
+                    "source release does not bind the committed paid destination record".into(),
+                ));
+            }
+            let route = self.route(record.peer_zone)?;
+            QuorumVerifier::new(route.roster.clone())
+                .verify_outcome(&certificate, &intent)
+                .map_err(|error| FastServiceError::Verification(error.to_string()))?;
+            match candidates.get(&intent.transfer_id()) {
+                Some((old_intent, old_certificate))
+                    if old_intent == &intent && old_certificate == &certificate => {}
+                Some(_) => {
+                    return Err(FastServiceError::CommittedState(
+                        "conflicting durable source release certificates".into(),
+                    ));
+                }
+                None => {
+                    candidates.insert(intent.transfer_id(), (intent, certificate));
+                }
+            }
+        }
+        Ok(candidates.into_values().collect())
+    }
+
+    /// Release the C4 resource reservation only after the native retirement transaction and its
+    /// exact `ExposureRetired` effect are both present in the applied Raft prefix.
+    pub(crate) fn complete_exposure_retirement(
+        &self,
+        transfer_id: B256,
+    ) -> Result<(), FastServiceError> {
+        self.release_obligation(transfer_id)
+    }
+
+    pub(crate) fn set_exposure_recovery_backlog(&self, paused: bool) {
+        self.exposure_recovery_backlog
+            .store(paused, Ordering::Release);
+    }
+
+    async fn reconcile_committed(&self) -> Result<(), FastServiceError> {
+        {
+            let gate = self.imported_anchor_admission.read().await;
+            if gate.allows_quote_publication() {
+                for (peer_zone, route) in &self.config.routes {
+                    if let Err(error) = self.queue(
+                        *peer_zone,
+                        ServiceDelivery::Quote(route.local_quote.clone()),
+                    ) && !matches!(&error, FastServiceError::QueueFull)
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        let local = self.config.local_roster.domain;
+        let mut records = self.committed.committed_transfers()?;
+        records.sort_by_key(|record| {
+            reconcile_target(record, local)
+                .map(|(_, class)| matches!(class, DeliveryClass::Admission))
+                .unwrap_or(true)
+        });
+        let per_peer = self
+            .config
+            .routes
+            .keys()
+            .map(|peer| {
+                (
+                    *peer,
+                    (
+                        Arc::new(Semaphore::new(SEMANTIC_CONCURRENCY_PER_PEER)),
+                        Arc::new(Semaphore::new(SEMANTIC_ADMISSION_CONCURRENCY_PER_PEER)),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut work = FuturesUnordered::new();
+        for record in records {
+            let Some((peer_zone, class)) = reconcile_target(&record, local) else {
+                continue;
+            };
+            let Some((all, admission)) = per_peer.get(&peer_zone).cloned() else {
+                return Err(FastServiceError::UnknownRoute(peer_zone));
+            };
+            work.push(async move {
+                let _all = all
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| FastServiceError::InvalidConfiguration)?;
+                let _admission = if class == DeliveryClass::Admission {
+                    Some(
+                        admission
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| FastServiceError::InvalidConfiguration)?,
+                    )
+                } else {
+                    None
+                };
+                let transfer_id = record.body.transfer_id;
+                Ok::<_, FastServiceError>((
+                    peer_zone,
+                    transfer_id,
+                    self.reconcile_record(record).await,
+                ))
+            });
+        }
+        while let Some(result) = work.next().await {
+            let (peer_zone, transfer_id, result) = result?;
+            if let Err(error) = result
+                && !matches!(error, FastServiceError::QueueFull)
             {
-                return Err(error);
+                tracing::warn!(
+                    target: "zone::fast",
+                    peer_zone,
+                    %transfer_id,
+                    %error,
+                    "committed transfer certification/delivery remains queued"
+                );
             }
         }
         Ok(())
@@ -961,6 +1441,7 @@ impl FastTransferService {
             .transfer_id()
             .unwrap_or_else(|| keccak256(&payload));
         let class = delivery.class();
+        let kind = delivery.kind();
         let mut state = self.state.lock().map_err(|_| FastServiceError::Poisoned)?;
         if state.pending.values().any(|pending| {
             pending.peer_zone == peer_zone
@@ -985,46 +1466,122 @@ impl FastTransferService {
                 peer_zone,
                 record,
                 class,
+                kind,
                 next_attempt: Instant::now(),
+                in_flight: false,
             },
         );
+        self.outgoing_available.notify_one();
         Ok(())
     }
 
     async fn send_ready(&self) {
-        let ready = {
-            let Ok(state) = self.state.lock() else {
+        let mut sends: FuturesUnordered<
+            ServiceFuture<
+                '_,
+                (
+                    (u32, u64, u64),
+                    Result<ServiceAcknowledgment, FastServiceError>,
+                ),
+            >,
+        > = FuturesUnordered::new();
+        loop {
+            let Ok(ready) = self.take_ready_sends() else {
                 return;
             };
-            let now = Instant::now();
-            let mut ready = state
-                .pending
-                .iter()
-                .filter(|(_, pending)| pending.next_attempt <= now)
-                .map(|(key, pending)| (*key, pending.clone()))
-                .collect::<Vec<_>>();
-            // Recovery/terminal work always drains before new lock and quote publication.
-            ready.sort_by_key(|(_, pending)| match pending.class {
-                DeliveryClass::Terminal => 0,
-                DeliveryClass::Admission => 1,
-            });
-            ready
-        };
-        for (key, pending) in ready {
-            let Ok(route) = self.route(pending.peer_zone) else {
+            for (key, pending) in ready {
+                sends.push(self.send_pending(key, pending));
+            }
+            if sends.is_empty() {
+                return;
+            }
+            tokio::select! {
+                Some((key, result)) = sends.next() => self.record_send_result(key, result),
+                () = self.outgoing_available.notified() => {}
+            }
+        }
+    }
+
+    fn take_ready_sends(
+        &self,
+    ) -> Result<Vec<((u32, u64, u64), PendingDelivery)>, FastServiceError> {
+        let mut state = self.state.lock().map_err(|_| FastServiceError::Poisoned)?;
+        let mut active = HashMap::<u32, (usize, usize)>::new();
+        for pending in state.pending.values().filter(|pending| pending.in_flight) {
+            let counts = active.entry(pending.peer_zone).or_default();
+            counts.0 += 1;
+            if pending.class == DeliveryClass::Admission {
+                counts.1 += 1;
+            }
+        }
+        let now = Instant::now();
+        let mut keys = state
+            .pending
+            .iter()
+            .filter(|(_, pending)| !pending.in_flight && pending.next_attempt <= now)
+            .map(|(key, pending)| (*key, pending.class))
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|(_, class)| matches!(class, DeliveryClass::Admission));
+        let mut selected = Vec::new();
+        for (key, class) in keys {
+            let peer = key.0;
+            let counts = active.entry(peer).or_default();
+            if counts.0 >= SEND_CONCURRENCY_PER_PEER
+                || (class == DeliveryClass::Admission
+                    && counts.1 >= SEND_ADMISSION_CONCURRENCY_PER_PEER)
+            {
+                continue;
+            }
+            let Some(pending) = state.pending.get_mut(&key) else {
                 continue;
             };
-            let result = self
-                .transport
-                .send_authenticated_encrypted(
-                    route,
-                    pending.record.stream,
-                    pending.record.sequence,
-                    &pending.record.payload,
-                )
-                .await;
-            self.record_send_result(key, result);
+            pending.in_flight = true;
+            counts.0 += 1;
+            if class == DeliveryClass::Admission {
+                counts.1 += 1;
+            }
+            selected.push((key, pending.clone()));
         }
+        Ok(selected)
+    }
+
+    fn send_pending<'a>(
+        &'a self,
+        key: (u32, u64, u64),
+        pending: PendingDelivery,
+    ) -> ServiceFuture<
+        'a,
+        (
+            (u32, u64, u64),
+            Result<ServiceAcknowledgment, FastServiceError>,
+        ),
+    > {
+        Box::pin(async move {
+            let gate = if pending.kind == DeliveryKind::Quote {
+                let gate = self.imported_anchor_admission.read().await;
+                if !gate.allows_delivery(pending.kind) {
+                    return (key, Err(FastServiceError::AdmissionClosed));
+                }
+                Some(gate)
+            } else {
+                None
+            };
+            let result = match self.route(pending.peer_zone) {
+                Ok(route) => {
+                    self.transport
+                        .send_authenticated_encrypted(
+                            route,
+                            pending.record.stream,
+                            pending.record.sequence,
+                            &pending.record.payload,
+                        )
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            drop(gate);
+            (key, result)
+        })
     }
 
     fn record_send_result(
@@ -1038,6 +1595,7 @@ impl FastTransferService {
         let Some(mut pending) = state.pending.remove(&key) else {
             return;
         };
+        pending.in_flight = false;
         let health = state.health.entry(pending.peer_zone).or_default();
         match result {
             Ok(ack)
@@ -1174,7 +1732,12 @@ impl FastTransferService {
                     .verify_outcome(&certificate, &intent)
                     .map_err(|error| FastServiceError::Verification(error.to_string()))?;
                 self.complete_terminal_delivery(intent.transfer_id())?;
-                self.release_obligation(intent.transfer_id())?;
+                // A paid claim remains reserved until accepted source-receipt proof drives the
+                // native retireExposure operation. Rejected/refunded transfers created no native
+                // destination exposure and can release their reservation now.
+                if disposition_releases_reservation(&certificate.body.outcome) {
+                    self.release_obligation(intent.transfer_id())?;
+                }
             }
         }
         drop(permit);
@@ -1184,7 +1747,7 @@ impl FastTransferService {
     fn complete_terminal_delivery(&self, transfer_id: B256) -> Result<(), FastServiceError> {
         self.complete_matching(
             transfer_id,
-            Some(DeliveryClass::Terminal),
+            DeliveryKind::Terminal,
             DeliveryTransition::SourceDisposed,
         )
     }
@@ -1192,7 +1755,7 @@ impl FastTransferService {
     fn complete_source_lock(&self, transfer_id: B256) -> Result<(), FastServiceError> {
         self.complete_matching(
             transfer_id,
-            Some(DeliveryClass::Admission),
+            DeliveryKind::Locked,
             DeliveryTransition::SourceDisposed,
         )
     }
@@ -1200,7 +1763,7 @@ impl FastTransferService {
     fn mark_terminal_received(&self, transfer_id: B256) -> Result<(), FastServiceError> {
         self.complete_matching(
             transfer_id,
-            Some(DeliveryClass::Admission),
+            DeliveryKind::Locked,
             DeliveryTransition::TerminalReceived,
         )
     }
@@ -1208,7 +1771,7 @@ impl FastTransferService {
     fn complete_matching(
         &self,
         transfer_id: B256,
-        class: Option<DeliveryClass>,
+        kind: DeliveryKind,
         transition: DeliveryTransition,
     ) -> Result<(), FastServiceError> {
         let mut state = self.state.lock().map_err(|_| FastServiceError::Poisoned)?;
@@ -1216,8 +1779,7 @@ impl FastTransferService {
             .pending
             .iter()
             .filter(|(_, pending)| {
-                pending.record.transfer_id == transfer_id
-                    && class.is_none_or(|class| pending.class == class)
+                pending.record.transfer_id == transfer_id && pending.kind == kind
             })
             .map(|(key, _)| *key)
             .collect::<Vec<_>>();
@@ -1249,6 +1811,73 @@ impl FastTransferService {
             .get(&zone)
             .ok_or(FastServiceError::UnknownRoute(zone))
     }
+}
+
+fn advance_completed_prefix(
+    journal: &DurableJournal,
+    completed: &mut BTreeSet<(u32, u64, u64)>,
+    peer_zone: u32,
+    stream: u64,
+    mut expected: u64,
+) -> Result<u64, FastServiceError> {
+    while completed.contains(&(peer_zone, stream, expected)) {
+        journal
+            .advance_contiguous_cursor(peer_zone, stream, expected)
+            .map_err(|error| FastServiceError::Storage(error.to_string()))?;
+        completed.remove(&(peer_zone, stream, expected));
+        expected = expected.saturating_add(1);
+    }
+    Ok(expected)
+}
+
+fn persist_transport_ack(
+    journal: &DurableJournal,
+    peer_zone: u32,
+    remote_member: Address,
+    stream: u64,
+    sequence: u64,
+    encoded: &[u8],
+) -> Result<ServiceAcknowledgment, FastServiceError> {
+    journal
+        .persist_incoming(peer_zone, stream, sequence, encoded)
+        .map_err(|error| FastServiceError::Storage(error.to_string()))?;
+    Ok(ServiceAcknowledgment {
+        remote_member,
+        stream,
+        sequence,
+    })
+}
+
+fn disposition_releases_reservation(outcome: &TransferOutcome) -> bool {
+    matches!(outcome, TransferOutcome::Refunded { .. })
+}
+
+fn reconcile_target(
+    record: &CommittedTransferRecord,
+    local: zone_primitives::fast_transfer::ZoneDomain,
+) -> Option<(u32, DeliveryClass)> {
+    let peer = match &record.body.outcome {
+        TransferOutcome::Locked { .. } if record.body.zone == local => {
+            record.intent.destination.zone_id
+        }
+        TransferOutcome::Paid { .. }
+        | TransferOutcome::Rejected { .. }
+        | TransferOutcome::Released { .. }
+        | TransferOutcome::Refunded { .. }
+            if record.body.zone == local =>
+        {
+            if matches!(
+                &record.body.outcome,
+                TransferOutcome::Paid { .. } | TransferOutcome::Rejected { .. }
+            ) {
+                record.intent.source.zone_id
+            } else {
+                record.intent.destination.zone_id
+            }
+        }
+        _ => return None,
+    };
+    Some((peer, DeliveryClass::Terminal))
 }
 
 fn reserve_queue(
@@ -1374,6 +2003,10 @@ pub enum FastServiceError {
     QueueFull,
     #[error("fast-transfer admission failed: {0}")]
     Admission(String),
+    #[error("fast-transfer admission is closed at the imported L1 anchor")]
+    AdmissionClosed,
+    #[error("invalid imported-anchor drain closure observation")]
+    InvalidClosureObservation,
     #[error("incoming delivery cursor gap: expected {expected}, received {actual}")]
     CursorGap { expected: u64, actual: u64 },
     #[error("peer certificate verification capacity is exhausted")]
@@ -1398,4 +2031,297 @@ pub enum FastServiceError {
     CommittedState(String),
     #[error("service state lock poisoned")]
     Poisoned,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use tempfile::tempdir;
+    use tokio::sync::oneshot;
+    use zone_primitives::fast_transfer::{AssetId, ZoneDomain};
+
+    use super::*;
+
+    fn gate() -> ImportedAnchorAdmission {
+        ImportedAnchorAdmission {
+            local_portal: Address::repeat_byte(1),
+            local_closure: None,
+            route_portals: BTreeMap::from([
+                (2, Address::repeat_byte(2)),
+                (3, Address::repeat_byte(3)),
+            ]),
+            route_closures: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn remote_closure_disables_only_that_new_lock_route() {
+        let mut gate = gate();
+        gate.apply(&DrainClosureObservation {
+            local: None,
+            destinations: BTreeMap::from([(Address::repeat_byte(2), B256::repeat_byte(22))]),
+        })
+        .unwrap();
+
+        assert!(!gate.allows_new_lock(2));
+        assert!(gate.allows_new_lock(3));
+        assert!(gate.allows_quote_publication());
+        assert!(gate.allows_delivery(DeliveryKind::Locked));
+        assert!(gate.allows_delivery(DeliveryKind::Terminal));
+    }
+
+    #[test]
+    fn local_closure_stops_quotes_and_all_new_locks_but_not_recovery() {
+        let mut gate = gate();
+        gate.apply(&DrainClosureObservation {
+            local: Some(B256::repeat_byte(11)),
+            destinations: BTreeMap::new(),
+        })
+        .unwrap();
+
+        assert!(!gate.allows_new_lock(2));
+        assert!(!gate.allows_new_lock(3));
+        assert!(!gate.allows_quote_publication());
+        assert!(!gate.allows_delivery(DeliveryKind::Quote));
+        assert!(gate.allows_delivery(DeliveryKind::Locked));
+        assert!(gate.allows_delivery(DeliveryKind::Terminal));
+    }
+
+    #[test]
+    fn closure_authority_is_portal_bound_monotonic_and_atomic() {
+        let mut gate = gate();
+        let closed = DrainClosureObservation {
+            local: None,
+            destinations: BTreeMap::from([(Address::repeat_byte(2), B256::repeat_byte(22))]),
+        };
+        gate.apply(&closed).unwrap();
+
+        // An observation that omits an already finalized closure cannot reopen admission.
+        gate.apply(&DrainClosureObservation::default()).unwrap();
+        assert!(!gate.allows_new_lock(2));
+
+        let before = gate.route_closures.clone();
+        assert!(matches!(
+            gate.apply(&DrainClosureObservation {
+                local: None,
+                destinations: BTreeMap::from([
+                    (Address::repeat_byte(2), B256::repeat_byte(23)),
+                    (Address::repeat_byte(9), B256::repeat_byte(99)),
+                ]),
+            }),
+            Err(FastServiceError::InvalidClosureObservation)
+        ));
+        assert_eq!(gate.route_closures, before);
+        assert!(gate.allows_new_lock(3));
+    }
+
+    #[test]
+    fn source_release_certificate_alone_does_not_free_paid_reservation() {
+        let source = ZoneDomain {
+            l1_chain_id: 1,
+            zone_id: 1,
+            chain_id: 101,
+            portal: Address::repeat_byte(1),
+            authority_epoch: 1,
+            roster_hash: B256::repeat_byte(1),
+            protocol_version: 1,
+        };
+        let destination = ZoneDomain {
+            zone_id: 2,
+            chain_id: 102,
+            portal: Address::repeat_byte(2),
+            roster_hash: B256::repeat_byte(2),
+            ..source
+        };
+        let intent = TransferIntent {
+            source,
+            destination,
+            asset: AssetId {
+                l1_token: Address::repeat_byte(3),
+                source_token: Address::repeat_byte(4),
+                destination_token: Address::repeat_byte(5),
+                decimals: 6,
+            },
+            sender: Address::repeat_byte(6),
+            recipient: Address::repeat_byte(7),
+            refund_account: Address::repeat_byte(6),
+            destination_pool: Address::repeat_byte(8),
+            reimbursement_account: Address::repeat_byte(9),
+            principal: alloy_primitives::U256::from(10),
+            fee: alloy_primitives::U256::from(1),
+            quote_id: B256::repeat_byte(10),
+            destination_expiry_height: 100,
+            transfer_nonce: 1,
+        };
+        let route = RouteKey::from_intent(&intent);
+        let mut admission = AdmissionController::new(ProtocolLimits::default());
+        admission.set_value_caps(
+            route,
+            ValueCaps {
+                route: intent.principal,
+                sender: intent.principal,
+            },
+        );
+        admission.reserve(&intent, 1, 1).unwrap();
+        let released = TransferOutcome::Released {
+            beneficiary: intent.reimbursement_account,
+            amount: intent.principal + intent.fee,
+        };
+        if disposition_releases_reservation(&released) {
+            admission.release(intent.transfer_id()).unwrap();
+        }
+        assert_eq!(admission.unresolved(), 1);
+
+        let mut second = intent.clone();
+        second.transfer_nonce += 1;
+        assert!(matches!(
+            admission.reserve(&second, 1, 1),
+            Err(AdmissionError::Limit("route base-unit exposure"))
+        ));
+        assert!(disposition_releases_reservation(
+            &TransferOutcome::Refunded {
+                beneficiary: Address::repeat_byte(2),
+                amount: alloy_primitives::U256::from(11),
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stalled_peer_does_not_block_a_healthy_peer_completion() {
+        let peers = BTreeMap::from([
+            (2, Arc::new(Semaphore::new(SEND_CONCURRENCY_PER_PEER))),
+            (3, Arc::new(Semaphore::new(SEND_CONCURRENCY_PER_PEER))),
+        ]);
+        let (release, stalled) = oneshot::channel::<()>();
+        let mut sends: FuturesUnordered<ServiceFuture<'_, u32>> = FuturesUnordered::new();
+        let failed = peers.get(&2).unwrap().clone();
+        sends.push(Box::pin(async move {
+            let _permit = failed.acquire_owned().await.unwrap();
+            let _ = stalled.await;
+            2
+        }));
+        let healthy = peers.get(&3).unwrap().clone();
+        sends.push(Box::pin(async move {
+            let _permit = healthy.acquire_owned().await.unwrap();
+            3
+        }));
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), sends.next())
+                .await
+                .unwrap(),
+            Some(3)
+        );
+        let _ = release.send(());
+        assert_eq!(sends.next().await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn admission_saturation_leaves_real_terminal_permits() {
+        let all = Arc::new(Semaphore::new(SEMANTIC_CONCURRENCY_PER_PEER));
+        let admission = Arc::new(Semaphore::new(SEMANTIC_ADMISSION_CONCURRENCY_PER_PEER));
+        let mut admission_permits = Vec::new();
+        for _ in 0..SEMANTIC_ADMISSION_CONCURRENCY_PER_PEER {
+            admission_permits.push((
+                all.clone().try_acquire_owned().unwrap(),
+                admission.clone().try_acquire_owned().unwrap(),
+            ));
+        }
+        assert!(admission.clone().try_acquire_owned().is_err());
+        let terminal_one = all.clone().try_acquire_owned().unwrap();
+        let terminal_two = all.clone().try_acquire_owned().unwrap();
+        assert!(all.clone().try_acquire_owned().is_err());
+        drop(terminal_one);
+        assert!(all.try_acquire_owned().is_ok());
+        drop((terminal_two, admission_permits));
+    }
+
+    #[tokio::test]
+    async fn semantic_inflight_is_concurrent_and_bounded() {
+        let permits = Arc::new(Semaphore::new(SEMANTIC_CONCURRENCY_PER_PEER));
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let mut work = FuturesUnordered::new();
+        for _ in 0..64 {
+            let permits = permits.clone();
+            let active = active.clone();
+            let maximum = maximum.clone();
+            work.push(async move {
+                let _permit = permits.acquire_owned().await.unwrap();
+                let now = active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                maximum.fetch_max(now, AtomicOrdering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                active.fetch_sub(1, AtomicOrdering::SeqCst);
+            });
+        }
+        while work.next().await.is_some() {}
+        assert_eq!(
+            maximum.load(AtomicOrdering::SeqCst),
+            SEMANTIC_CONCURRENCY_PER_PEER
+        );
+        assert_eq!(active.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn reordered_completion_keeps_gap_across_restart_then_advances_prefix() {
+        let directory = tempdir().unwrap();
+        let journal = DurableJournal::open(directory.path()).unwrap();
+        for sequence in [2, 1, 3] {
+            journal
+                .persist_incoming(2, 9, sequence, &[sequence as u8])
+                .unwrap();
+        }
+        let mut completed = BTreeSet::from([(2, 9, 2), (2, 9, 3)]);
+        assert_eq!(
+            advance_completed_prefix(&journal, &mut completed, 2, 9, 1).unwrap(),
+            1
+        );
+        drop(journal);
+
+        let journal = DurableJournal::open(directory.path()).unwrap();
+        assert_eq!(journal.unprocessed_incoming().unwrap().len(), 3);
+        completed.insert((2, 9, 1));
+        assert_eq!(
+            advance_completed_prefix(&journal, &mut completed, 2, 9, 1).unwrap(),
+            4
+        );
+        drop(journal);
+        let journal = DurableJournal::open(directory.path()).unwrap();
+        assert!(journal.unprocessed_incoming().unwrap().is_empty());
+    }
+
+    #[test]
+    fn transport_ack_is_exactly_durable_receipt_and_never_paid() {
+        let directory = tempdir().unwrap();
+        let journal = DurableJournal::open(directory.path()).unwrap();
+        let transfer_id = B256::repeat_byte(41);
+        let ack = persist_transport_ack(
+            &journal,
+            2,
+            Address::repeat_byte(7),
+            11,
+            5,
+            transfer_id.as_slice(),
+        )
+        .unwrap();
+        assert_eq!(ack.stream, 11);
+        assert_eq!(ack.sequence, 5);
+        assert_eq!(journal.unprocessed_incoming().unwrap().len(), 1);
+        assert_eq!(journal.tombstone(transfer_id).unwrap(), None);
+        assert!(
+            !journal
+                .economic_action_completed(transfer_id, EconomicActionKind::Resolve)
+                .unwrap()
+        );
+        drop(journal);
+        assert_eq!(
+            DurableJournal::open(directory.path())
+                .unwrap()
+                .unprocessed_incoming()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 }

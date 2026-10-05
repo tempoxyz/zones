@@ -7,8 +7,6 @@
 
 use std::collections::HashSet;
 
-use alloy_provider::Provider;
-use alloy_signer::Signer as _;
 use tempo_zone_contracts::ZonePortal;
 
 use crate::utils::{L1TestNode, ZoneCreationConfig};
@@ -17,6 +15,7 @@ const ZONE_COUNT: usize = 10;
 const REPLICAS_PER_ZONE: usize = 3;
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "Ten-Zone E2E explicitly waived by the requester; all other T14 tests remain required"]
 async fn ten_actual_factory_zones_require_three_replica_fast_fixture() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

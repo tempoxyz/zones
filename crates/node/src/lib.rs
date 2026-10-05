@@ -15,6 +15,7 @@ pub mod fast_drain;
 pub mod fast_drain_adapters;
 pub mod fast_drain_state;
 pub mod fast_execution;
+pub mod fast_exposure;
 pub mod fast_network;
 pub mod fast_quorum;
 pub mod fast_raft_state_machine;

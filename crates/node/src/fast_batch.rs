@@ -375,7 +375,7 @@ fn decode_candidate(input: &ReplicatedBlockInput) -> Result<DecodedCandidate, Fa
     let finalization_calldata = match finalizations.as_slice() {
         [] => None,
         [(index, transaction)] if *index + 1 == block.body.transactions.len() => {
-            Some(transaction.input().clone())
+            Some(alloy_consensus::Transaction::input(*transaction).clone())
         }
         _ => return Err(FastBatchError::MalformedFinalization),
     };
@@ -486,7 +486,6 @@ mod tests {
     use super::*;
     use alloy_consensus::{Signed, TxLegacy};
     use alloy_eips::eip2718::Encodable2718 as _;
-    use alloy_rlp::Decodable as _;
     use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
     use openraft::{CommittedLeaderId, LogId};
     use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};

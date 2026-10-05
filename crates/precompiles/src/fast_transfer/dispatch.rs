@@ -47,6 +47,13 @@ impl FastTransfer {
                 replenishmentCredit(call) => typed_view(call, |call| {
                     self.replenishment_credits[call.jobId].read()
                 }),
+                importedBarrier(call) => typed_view(call, |call| {
+                    self.imported_barrier(
+                        call.destinationEpoch,
+                        call.sourcePortal,
+                        call.sourceEpoch,
+                    )
+                }),
                 exposure(call) => typed_view(call, |call| {
                     Ok::<_, crate::ZonePrecompileError>(IFastTransfer::exposureReturn {
                         unsettled: self.unsettled_exposure[call.token][call.sourceZone].read()?,
@@ -199,6 +206,13 @@ impl FastTransfer {
                         evidence.destination_token,
                         evidence.beneficiary,
                         Self::amount_u128(evidence.principal)?,
+                    )
+                }),
+                recordImportedBarrier(call) => mutate(call, caller, |_sender, call| {
+                    self.record_imported_barrier_verified(
+                        l1,
+                        &call.canonicalInventory,
+                        &call.sourceBarrierCertificate,
                     )
                 }),
                 configureReplenishmentRoute(call) => mutate(call, caller, |sender, call| {

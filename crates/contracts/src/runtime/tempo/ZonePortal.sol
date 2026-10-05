@@ -805,6 +805,9 @@ contract ZonePortal is IZonePortal {
                 || statement.finalBlockHash != config.finalSettlementBlockHash
                 || statement.finalWithdrawalBatchIndex != config.finalSettlementWithdrawalBatchIndex
                 || statement.finalSettlementHash != config.finalSettlementHash
+                || statement.checkpointLogIndex == 0
+                || statement.checkpointHeight != config.finalSettlementHeight
+                || statement.checkpointBlockHash != config.finalSettlementBlockHash
                 || statement.checkpointStateRoot == bytes32(0)
         ) revert InvalidFastCertificate();
         bytes32 checkpointHash = keccak256(abi.encode(FAST_CHECKPOINT_DOMAIN, block.chainid, statement));

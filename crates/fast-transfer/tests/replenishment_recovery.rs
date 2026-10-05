@@ -62,7 +62,7 @@ fn withdrawal() -> WithdrawalRecord {
     WithdrawalRecord {
         transaction_intent_hash: B256::repeat_byte(9),
         signer_nonce: 12,
-        fallback_nonce: Some(13),
+        fallback_nonce: None,
         withdrawal_index: None,
         sender_tag: None,
         submission_hashes: Vec::new(),
@@ -73,6 +73,53 @@ fn withdrawal() -> WithdrawalRecord {
         withdrawal_fee: None,
         l1_transaction_cost: None,
     }
+}
+
+fn bind_withdrawal(job: &mut ReplenishmentJob) {
+    job.bind_canonical_withdrawal(
+        B256::repeat_byte(10),
+        13,
+        4,
+        B256::repeat_byte(15),
+        TransactionCost {
+            transaction_hash: B256::repeat_byte(10),
+            payer: job.source_inventory,
+            token: Some(Address::repeat_byte(16)),
+            amount: U256::from(3),
+        },
+        TokenAmount {
+            token: Address::repeat_byte(17),
+            amount: U256::from(4),
+        },
+    )
+    .unwrap();
+    job.reconcile_withdrawal(None, Some(B256::repeat_byte(11)), Some(4))
+        .unwrap();
+    job.record_l1_withdrawal_cost(TransactionCost {
+        transaction_hash: B256::repeat_byte(18),
+        payer: job.treasury,
+        token: Some(Address::repeat_byte(19)),
+        amount: U256::from(5),
+    })
+    .unwrap();
+}
+
+fn bind_deposit(job: &mut ReplenishmentJob, transaction_hash: B256, queue_index: u64) {
+    job.bind_canonical_deposit(
+        transaction_hash,
+        TransactionCost {
+            transaction_hash,
+            payer: job.treasury,
+            token: Some(Address::repeat_byte(19)),
+            amount: U256::from(6),
+        },
+        TokenAmount {
+            token: Address::repeat_byte(17),
+            amount: U256::ONE,
+        },
+    )
+    .unwrap();
+    job.reconcile_deposit(None, Some(queue_index)).unwrap();
 }
 
 struct ScriptedBridge {
@@ -177,13 +224,7 @@ fn rpc_ambiguity_reuses_one_economic_action_after_restart() {
         recovered.request_withdrawal(replacement),
         Err(ReplenishmentError::ReplacementConflict)
     );
-    recovered
-        .reconcile_withdrawal(
-            Some(B256::repeat_byte(10)),
-            Some(B256::repeat_byte(11)),
-            Some(4),
-        )
-        .unwrap();
+    bind_withdrawal(&mut recovered);
     recovered.record_treasury_credit(U256::from(98)).unwrap();
     let deposit = DepositRecord {
         transaction_intent_hash: B256::repeat_byte(12),
@@ -196,17 +237,21 @@ fn rpc_ambiguity_reuses_one_economic_action_after_restart() {
     };
     recovered.submit_deposit(deposit.clone()).unwrap();
     assert_eq!(recovered.submit_deposit(deposit), Ok(false));
+    bind_deposit(&mut recovered, B256::repeat_byte(14), 7);
     recovered.record_pool_credit(U256::from(97)).unwrap();
     assert_eq!(recovered.stage, ReplenishmentStage::PoolCredited);
     assert_eq!(recovered.gross_amount, U256::from(100));
     assert_eq!(recovered.treasury_credit, Some(U256::from(98)));
     assert_eq!(recovered.pool_credit, Some(U256::from(97)));
+    assert_eq!(recovered.withdrawal_fee(), Some(U256::from(4)));
+    assert_eq!(recovered.deposit_fee(), Some(U256::ONE));
 }
 
 #[test]
 fn bounce_and_refund_branches_never_credit_the_pool_or_user() {
     let mut bounced = job();
     bounced.request_withdrawal(withdrawal()).unwrap();
+    bind_withdrawal(&mut bounced);
     assert_eq!(bounced.record_withdrawal_bounce(), Ok(true));
     assert_eq!(bounced.stage, ReplenishmentStage::WithdrawalBounced);
     assert_eq!(
@@ -217,18 +262,20 @@ fn bounce_and_refund_branches_never_credit_the_pool_or_user() {
 
     let mut refunded = job();
     refunded.request_withdrawal(withdrawal()).unwrap();
+    bind_withdrawal(&mut refunded);
     refunded.record_treasury_credit(U256::from(99)).unwrap();
     refunded
         .submit_deposit(DepositRecord {
             transaction_intent_hash: B256::repeat_byte(13),
             signer_nonce: 45,
-            queue_index: Some(7),
-            transaction_hash: Some(B256::repeat_byte(14)),
-            submission_hashes: vec![B256::repeat_byte(14)],
+            queue_index: None,
+            transaction_hash: None,
+            submission_hashes: Vec::new(),
             transaction_cost: None,
             deposit_fee: None,
         })
         .unwrap();
+    bind_deposit(&mut refunded, B256::repeat_byte(14), 7);
     assert_eq!(refunded.record_deposit_refund_pending(), Ok(true));
     assert_eq!(refunded.stage, ReplenishmentStage::DepositRefundPending);
     assert_eq!(

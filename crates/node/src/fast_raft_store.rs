@@ -50,6 +50,45 @@ pub struct DurableRaftLogStore {
 }
 
 impl DurableRaftLogStore {
+    /// Seed a successor's log metadata from an installed nonempty snapshot. No synthetic entry is
+    /// created: the exact accepted prefix is represented as purged and committed at the snapshot
+    /// coordinate, so the first new entry must extend it.
+    pub fn install_snapshot_prefix(
+        directory: impl AsRef<Path>,
+        last_applied: LogId<u64>,
+    ) -> io::Result<()> {
+        if last_applied.index == 0 {
+            return Err(invalid_data("successor snapshot prefix is empty"));
+        }
+        let directory = directory.as_ref();
+        let created = !directory.exists();
+        fs::create_dir_all(directory)?;
+        if created {
+            sync_directory(directory.parent().unwrap_or_else(|| Path::new(".")))?;
+        }
+        let expected = DiskState {
+            vote: None,
+            committed: Some(last_applied),
+            last_purged: Some(last_applied),
+            logs: BTreeMap::new(),
+        };
+        let path = directory.join(STORE_FILE);
+        if path.exists() {
+            let existing = decode_image(&fs::read(path)?)?;
+            if existing.vote.is_some()
+                || existing.committed != expected.committed
+                || existing.last_purged != expected.last_purged
+                || !existing.logs.is_empty()
+            {
+                return Err(invalid_data(
+                    "existing Raft log does not match installed successor snapshot prefix",
+                ));
+            }
+            return Ok(());
+        }
+        persist(directory, &expected)
+    }
+
     pub fn open(directory: impl AsRef<Path>) -> io::Result<Self> {
         let directory = directory.as_ref().to_path_buf();
         let created = !directory.exists();
@@ -300,6 +339,7 @@ fn storage_error(
 
 #[cfg(test)]
 mod tests {
+    use openraft::CommittedLeaderId;
     use tempfile::tempdir;
 
     use super::*;
@@ -331,6 +371,31 @@ mod tests {
         fs::write(path, bytes).unwrap();
         assert_eq!(
             DurableRaftLogStore::open(directory.path())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn successor_prefix_is_committed_purged_and_conflict_safe() {
+        let directory = tempdir().unwrap();
+        let prefix = LogId::new(CommittedLeaderId::new(7, 2), 41);
+        DurableRaftLogStore::install_snapshot_prefix(directory.path(), prefix).unwrap();
+        DurableRaftLogStore::install_snapshot_prefix(directory.path(), prefix).unwrap();
+
+        let mut reopened = DurableRaftLogStore::open(directory.path()).unwrap();
+        assert_eq!(
+            futures::executor::block_on(reopened.read_committed()).unwrap(),
+            Some(prefix)
+        );
+        let state = futures::executor::block_on(reopened.get_log_state()).unwrap();
+        assert_eq!(state.last_purged_log_id, Some(prefix));
+        assert_eq!(state.last_log_id, Some(prefix));
+
+        let conflict = LogId::new(CommittedLeaderId::new(7, 2), 42);
+        assert_eq!(
+            DurableRaftLogStore::install_snapshot_prefix(directory.path(), conflict)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidData

@@ -1,26 +1,28 @@
 //! Production C5 projection over the exact fsynced OpenRaft state image.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
-use alloy_consensus::BlockHeader as _;
+use alloy_consensus::{Transaction as _, transaction::TxHashRef as _};
+use alloy_eips::eip2718::Decodable2718 as _;
 use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_sol_types::SolCall as _;
 use openraft::LogId;
 use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, ReceiptProvider};
 use serde::{Deserialize, Serialize};
+use tempo_zone_contracts::{
+    FAST_TRANSFER_ADDRESS, IFastTransfer, ImportedBarrierCall, imported_barrier_call,
+};
 use tokio::sync::{mpsc, oneshot};
 use zone_fast_transfer::{
     EpochRoster,
     drain::{
         BarrierInventory, BarrierResolutionInventory, CheckpointImage, CommittedDisposition,
-        CommittedSourceLock, CommittedTerminal, DrainError, barriers_hash,
+        CommittedSourceLock, CommittedTerminal, DrainCertificate, barriers_hash,
     },
 };
 use zone_payload::{TempoImport, ZonePayloadAttributes};
 use zone_primitives::fast_transfer::{
-    CanonicalEncode as _, FastCheckpointStatement, OutcomeCertificate, TransferIntent,
+    ExposureRetirementEvidence, FastCheckpointStatement, OutcomeCertificate, TransferIntent,
     TransferOutcome,
 };
 
@@ -38,33 +40,40 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct NoNewLocksPayload {
-    epoch: u64,
-    closure_hash: B256,
-    imported_closures: Vec<(Address, u64, B256)>,
+pub struct NoNewLocksPayload {
+    pub source_epoch: u64,
+    pub destination_portal: Address,
+    pub destination_epoch: u64,
+    pub closure_hash: B256,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct ImportedBarrierPayload {
-    durable_inventory: Vec<u8>,
+pub struct LocalClosurePayload {
+    pub epoch: u64,
+    pub closure_hash: B256,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct DrainCheckpointResources {
+pub struct DrainCheckpointResources {
     /// Registry order, with canonical durable barrier/resolution encodings.
-    peers: Vec<(Address, Vec<u8>, Vec<u8>)>,
+    pub peers: Vec<(Address, Vec<u8>, Vec<u8>)>,
 }
 
-/// Request consumed by the runtime's actual same-anchor producer. The consumer must enqueue the
-/// protocol-native transaction through the ordinary fast transaction path and return only after
-/// `CommittedStateHandle` observes the successful receipt.
+/// Request consumed by the runtime's actual producer. `NoNewLocks` waits for the canonical L1
+/// import entry whose opening transaction imported the named closure; it must not invent a second
+/// native closure ABI. Other protocol mutations use the ordinary fast transaction path. Every
+/// response is returned only after `CommittedStateHandle` observes the successful receipt.
 pub enum FastDrainCommitRequest {
     NoNewLocks {
         canonical_payload: Vec<u8>,
         response: oneshot::Sender<Result<CommittedProtocolRecord, String>>,
     },
     ImportedBarrier {
-        canonical_payload: Vec<u8>,
+        call: ImportedBarrierCall,
+        certificate_digest: B256,
+        /// Exact `BarrierInventory::durable_bytes`, retained and fsynced separately from the
+        /// compact native calldata before this request is acknowledged.
+        canonical_inventory: Vec<u8>,
         response: oneshot::Sender<Result<CommittedProtocolRecord, String>>,
     },
     InstallCheckpoint {
@@ -95,13 +104,19 @@ impl FastDrainCommitHandle {
                 canonical_payload: payload.clone(),
                 response,
             },
-            CommittedProtocolKind::ImportedBarrier => FastDrainCommitRequest::ImportedBarrier {
-                canonical_payload: payload.clone(),
-                response,
-            },
+            CommittedProtocolKind::ImportedBarrier => {
+                return Err(FastDrainError::Consensus(
+                    "imported barriers require the exact prepared native call".to_owned(),
+                ));
+            }
             CommittedProtocolKind::InstalledCheckpoint => {
                 return Err(FastDrainError::Consensus(
                     "checkpoint installation uses the exact image request".to_owned(),
+                ));
+            }
+            CommittedProtocolKind::ObservedLocalClosure => {
+                return Err(FastDrainError::Consensus(
+                    "local closure is recorded by canonical L1 import".to_owned(),
                 ));
             }
         };
@@ -116,6 +131,36 @@ impl FastDrainCommitHandle {
         if record.kind != kind || record.canonical_payload != payload {
             return Err(FastDrainError::Consensus(
                 "producer returned a different committed protocol body".to_owned(),
+            ));
+        }
+        Ok(record)
+    }
+
+    async fn imported_barrier(
+        &self,
+        call: ImportedBarrierCall,
+        certificate_digest: B256,
+        canonical_inventory: Vec<u8>,
+    ) -> Result<CommittedProtocolRecord, FastDrainError> {
+        let (response, receive) = oneshot::channel();
+        self.sender
+            .send(FastDrainCommitRequest::ImportedBarrier {
+                call,
+                certificate_digest,
+                canonical_inventory: canonical_inventory.clone(),
+                response,
+            })
+            .await
+            .map_err(|_| FastDrainError::Consensus("fast drain producer stopped".to_owned()))?;
+        let record = receive
+            .await
+            .map_err(|_| FastDrainError::Consensus("fast drain producer dropped reply".to_owned()))?
+            .map_err(FastDrainError::Consensus)?;
+        if record.kind != CommittedProtocolKind::ImportedBarrier
+            || record.canonical_payload != canonical_inventory
+        {
+            return Err(FastDrainError::Consensus(
+                "producer returned a different imported-barrier inventory".to_owned(),
             ));
         }
         Ok(record)
@@ -139,6 +184,7 @@ pub struct ProductionFastDrainState<P> {
     committed: CommittedStateHandle<CanonicalFastExecution<P>>,
     producer: FastDrainCommitHandle,
     local_roster: EpochRoster,
+    next_roster: Option<EpochRoster>,
     peers: [DrainPeer; zone_fast_transfer::drain::DRAIN_PEER_COUNT],
 }
 
@@ -147,12 +193,14 @@ impl<P> ProductionFastDrainState<P> {
         committed: CommittedStateHandle<CanonicalFastExecution<P>>,
         producer: FastDrainCommitHandle,
         local_roster: EpochRoster,
+        next_roster: Option<EpochRoster>,
         peers: [DrainPeer; zone_fast_transfer::drain::DRAIN_PEER_COUNT],
     ) -> Self {
         Self {
             committed,
             producer,
             local_roster,
+            next_roster,
             peers,
         }
     }
@@ -266,17 +314,49 @@ where
         Ok(result)
     }
 
-    fn protocol_record(
-        image: &ExactStateImage,
-        kind: CommittedProtocolKind,
-        through: u64,
-    ) -> Result<&CommittedProtocolRecord, FastDrainError> {
-        image
-            .protocol_records
-            .iter()
-            .rev()
-            .find(|record| record.kind == kind && record.log_id.index <= through)
-            .ok_or(FastDrainError::IncompleteCommittedHistory)
+    fn no_new_locks_record<'a>(
+        image: &'a ExactStateImage,
+        log_index: u64,
+        destination: &EpochRoster,
+        closure_hash: Option<B256>,
+    ) -> Result<&'a CommittedProtocolRecord, FastDrainError> {
+        let mut matches = image.protocol_records.iter().filter(|record| {
+            record.kind == CommittedProtocolKind::NoNewLocks
+                && record.log_id.index == log_index
+                && bincode::deserialize::<NoNewLocksPayload>(&record.canonical_payload).is_ok_and(
+                    |payload| {
+                        payload.destination_portal == destination.domain.portal
+                            && payload.destination_epoch == destination.domain.authority_epoch
+                            && closure_hash.is_none_or(|expected| payload.closure_hash == expected)
+                    },
+                )
+        });
+        let record = matches
+            .next()
+            .ok_or(FastDrainError::IncompleteCommittedHistory)?;
+        if matches.next().is_some() {
+            return Err(FastDrainError::IncompleteCommittedHistory);
+        }
+        Ok(record)
+    }
+
+    fn required_next_roster(&self) -> Result<&EpochRoster, FastDrainError> {
+        self.next_roster
+            .as_ref()
+            .ok_or(FastDrainError::MissingNextRoster)
+    }
+
+    fn assert_successful_protocol_record(
+        &self,
+        record: &CommittedProtocolRecord,
+    ) -> Result<(), FastDrainError> {
+        (self
+            .committed
+            .committed_transaction_result(record.transaction_hash)
+            .map_err(state_error)?
+            == Some(true))
+        .then_some(())
+        .ok_or(FastDrainError::IncompleteCommittedHistory)
     }
 
     fn resources(image: &ExactStateImage) -> Result<&CheckpointResourceImage, FastDrainError> {
@@ -361,35 +441,59 @@ where
 {
     fn commit_no_new_locks<'a>(
         &'a self,
-        epoch: u64,
+        destination: &'a EpochRoster,
         closure_hash: B256,
     ) -> DrainFuture<'a, Result<CommittedDrainPoint, FastDrainError>> {
         Box::pin(async move {
+            if closure_hash.is_zero() {
+                return Err(FastDrainError::InvalidClosure);
+            }
+            let mut destinations = self.peers.iter().filter(|peer| peer.roster == *destination);
+            let configured = destinations.next().ok_or(FastDrainError::WrongBarrier)?;
+            if destinations.next().is_some() {
+                return Err(FastDrainError::WrongBarrier);
+            }
             let payload = bincode::serialize(&NoNewLocksPayload {
-                epoch,
+                source_epoch: self.local_roster.domain.authority_epoch,
+                destination_portal: configured.roster.domain.portal,
+                destination_epoch: configured.roster.domain.authority_epoch,
                 closure_hash,
-                imported_closures: self
-                    .peers
-                    .iter()
-                    .map(|peer| {
-                        (
-                            peer.roster.domain.portal,
-                            peer.roster.domain.authority_epoch,
-                            peer.closure_hash,
-                        )
-                    })
-                    .collect(),
             })
             .map_err(storage)?;
             let record = self
                 .producer
                 .protocol(CommittedProtocolKind::NoNewLocks, payload)
                 .await?;
+            self.assert_successful_protocol_record(&record)?;
+            let image = self.image()?;
+            assert_l1_import_entry(&image, record.log_id)?;
             self.committed
                 .persist_protocol_record(record.clone())
                 .map_err(state_error)?;
-            Self::point_at(&self.image()?, record.log_id)
+            Self::point_at(&image, record.log_id)
         })
+    }
+
+    fn local_destination_closure_point(
+        &self,
+        epoch: u64,
+        closure_hash: B256,
+    ) -> Result<CommittedDrainPoint, FastDrainError> {
+        let image = self.image()?;
+        let record = image
+            .protocol_records
+            .iter()
+            .find(|record| {
+                record.kind == CommittedProtocolKind::ObservedLocalClosure
+                    && bincode::deserialize::<LocalClosurePayload>(&record.canonical_payload)
+                        .is_ok_and(|payload| {
+                            payload.epoch == epoch && payload.closure_hash == closure_hash
+                        })
+            })
+            .ok_or(FastDrainError::IncompleteCommittedHistory)?;
+        assert_l1_import_entry(&image, record.log_id)?;
+        self.assert_successful_protocol_record(record)?;
+        Self::point_at(&image, record.log_id)
     }
 
     fn source_snapshot(
@@ -411,23 +515,14 @@ where
         let image = self.image()?;
         assert_point(&image, point)?;
         let record =
-            Self::protocol_record(&image, CommittedProtocolKind::NoNewLocks, point.log_index)?;
-        if record.log_id.index != point.log_index {
-            return Err(FastDrainError::WrongBarrier);
-        }
+            Self::no_new_locks_record(&image, point.log_index, destination, Some(closure_hash))?;
         let payload: NoNewLocksPayload =
             bincode::deserialize(&record.canonical_payload).map_err(storage)?;
-        payload
-            .imported_closures
-            .iter()
-            .any(|entry| {
-                *entry
-                    == (
-                        destination.domain.portal,
-                        destination.domain.authority_epoch,
-                        closure_hash,
-                    )
-            })
+        self.assert_successful_protocol_record(record)?;
+        ((payload.source_epoch == self.local_roster.domain.authority_epoch)
+            && payload.destination_portal == destination.domain.portal
+            && payload.destination_epoch == destination.domain.authority_epoch
+            && payload.closure_hash == closure_hash)
             .then_some(())
             .ok_or(FastDrainError::WrongBarrier)
     }
@@ -449,20 +544,21 @@ where
     fn commit_imported_barrier<'a>(
         &'a self,
         inventory: &'a BarrierInventory,
+        certificate: DrainCertificate,
     ) -> DrainFuture<'a, Result<CommittedDrainPoint, FastDrainError>> {
         Box::pin(async move {
             inventory.verify_complete()?;
-            let payload = bincode::serialize(&ImportedBarrierPayload {
-                durable_inventory: inventory.durable_bytes()?,
-            })
-            .map_err(storage)?;
+            let canonical_inventory = inventory.durable_bytes()?;
+            let call = imported_barrier_call(
+                &inventory.statement,
+                certificate.digest,
+                certificate.signatures,
+            );
             let record = self
                 .producer
-                .protocol(CommittedProtocolKind::ImportedBarrier, payload)
+                .imported_barrier(call, certificate.digest, canonical_inventory)
                 .await?;
-            self.committed
-                .persist_protocol_record(record.clone())
-                .map_err(state_error)?;
+            self.assert_successful_protocol_record(&record)?;
             Self::point_at(&self.image()?, record.log_id)
         })
     }
@@ -486,12 +582,12 @@ where
                     .iter()
                     .find(|peer| peer.roster.domain.portal == *destination)
                     .ok_or(FastDrainError::WrongBarrier)?;
-                let closure = Self::protocol_record(
-                    &image,
-                    CommittedProtocolKind::NoNewLocks,
-                    point.log_index,
-                )?;
-                if closure.log_id.index != point.log_index {
+                let closure =
+                    Self::no_new_locks_record(&image, point.log_index, &peer.roster, None)?;
+                self.assert_successful_protocol_record(closure)?;
+                let closure: NoNewLocksPayload =
+                    bincode::deserialize(&closure.canonical_payload).map_err(storage)?;
+                if closure.source_epoch != self.local_roster.domain.authority_epoch {
                     return Err(FastDrainError::ConflictingCertificate);
                 }
                 let snapshot = self.snapshot_at(&image, point.log_index, &peer.roster)?;
@@ -499,7 +595,7 @@ where
                     self.local_roster.domain.l1_chain_id,
                     *destination,
                     peer.roster.domain.authority_epoch,
-                    peer.closure_hash,
+                    closure.closure_hash,
                     self.local_roster.domain.portal,
                     *epoch,
                     point.imported_anchor_number,
@@ -566,19 +662,12 @@ where
                 let resources = Self::resources(&image)?;
                 let prefix = prefix_from(&image, resources)?;
                 let entries = drain_entries(resources)?;
-                let closure = Self::protocol_record(
-                    &image,
-                    CommittedProtocolKind::NoNewLocks,
-                    point.log_index,
-                )?;
-                let closure: NoNewLocksPayload =
-                    bincode::deserialize(&closure.canonical_payload).map_err(storage)?;
                 final_settlement_digest(
                     self.local_roster.domain.l1_chain_id,
                     self.local_roster.domain.portal,
                     *epoch,
                     self.local_roster.domain.roster_hash,
-                    closure.closure_hash,
+                    resources.local_closure_hash,
                     prefix,
                     barriers_hash(&entries)?,
                 )
@@ -593,20 +682,13 @@ where
                 if *old_epoch != self.local_roster.domain.authority_epoch {
                     return Err(FastDrainError::ConflictingCertificate);
                 }
-                let next = EpochRoster {
-                    domain: zone_primitives::fast_transfer::ZoneDomain {
-                        authority_epoch: *next_epoch,
-                        ..self.local_roster.domain
-                    },
-                    members: self.local_roster.members,
-                };
-                self.build_checkpoint(
-                    &image,
-                    Self::resources(&image)?.final_settlement_hash,
-                    &next,
-                )?
-                .statement
-                .registry_digest(self.local_roster.domain.l1_chain_id)
+                let next = self.required_next_roster()?;
+                if next.domain.authority_epoch != *next_epoch {
+                    return Err(FastDrainError::ConflictingCertificate);
+                }
+                self.build_checkpoint(&image, Self::resources(&image)?.final_settlement_hash, next)?
+                    .statement
+                    .registry_digest(self.local_roster.domain.l1_chain_id)
             }
             _ => return Err(FastDrainError::ConflictingCertificate),
         };
@@ -624,11 +706,160 @@ where
         Ok((prefix_from(&image, resources)?, point))
     }
 
+    fn record_final_settlement_hash(&self, settlement_hash: B256) -> Result<(), FastDrainError> {
+        self.committed
+            .finalize_checkpoint_resources(settlement_hash)
+            .map(|_| ())
+            .map_err(state_error)
+    }
+
+    fn assert_exposure_retirement_complete(&self, epoch: u64) -> Result<(), FastDrainError> {
+        if self.local_roster.domain.authority_epoch != epoch {
+            return Err(FastDrainError::IncompleteCommittedHistory);
+        }
+        let image = self.image()?;
+        let mut paid = BTreeMap::new();
+        for record in &image.certified_history {
+            let (intent, certificate) = decode_history(record)?;
+            if intent.destination != self.local_roster.domain
+                || certificate.body.zone != intent.destination
+                || !matches!(certificate.body.outcome, TransferOutcome::Paid { .. })
+            {
+                continue;
+            }
+            validate_paid(&intent, &certificate)?;
+            insert_history_exact(
+                &mut paid,
+                record.transfer_id,
+                (intent, certificate, record.log_id.index),
+            )?;
+        }
+        for native in self.committed.committed_transfers().map_err(state_error)? {
+            if native.intent.destination == self.local_roster.domain
+                && matches!(native.body.outcome, TransferOutcome::Paid { .. })
+                && !paid.contains_key(&native.intent.transfer_id())
+            {
+                return Err(FastDrainError::IncompleteCommittedHistory);
+            }
+        }
+
+        let mut retired = BTreeSet::new();
+        for block in &image.blocks {
+            for encoded in &block.input.transactions {
+                let mut bytes = encoded.as_ref();
+                let transaction =
+                    tempo_primitives::TempoTxEnvelope::decode_2718(&mut bytes).map_err(storage)?;
+                if !bytes.is_empty()
+                    || transaction.to() != Some(FAST_TRANSFER_ADDRESS)
+                    || !transaction
+                        .input()
+                        .starts_with(&IFastTransfer::retireExposureCall::SELECTOR)
+                {
+                    continue;
+                }
+                if self
+                    .committed
+                    .committed_transaction_result(*transaction.tx_hash())
+                    .map_err(state_error)?
+                    != Some(true)
+                {
+                    continue;
+                }
+                let call = IFastTransfer::retireExposureCall::abi_decode(transaction.input())
+                    .map_err(storage)?;
+                let evidence =
+                    ExposureRetirementEvidence::decode(&call.canonicalEvidence).map_err(storage)?;
+                let Some((intent, _, paid_index)) = paid.get(&evidence.transfer_id) else {
+                    continue;
+                };
+                if block.log_id.index < *paid_index
+                    || evidence.intent_hash != intent.intent_hash()
+                    || evidence.destination_token != intent.asset.destination_token
+                    || evidence.beneficiary != intent.reimbursement_account
+                    || evidence.principal != intent.principal
+                    || evidence.accepted_source_block_hash.is_zero()
+                    || evidence.release_receipt_hash.is_zero()
+                    || evidence.receipt_proof.is_empty()
+                    || evidence.header_chain.is_empty()
+                {
+                    return Err(FastDrainError::IncompleteCommittedHistory);
+                }
+                retired.insert(evidence.transfer_id);
+            }
+        }
+        paid.keys()
+            .all(|transfer_id| retired.contains(transfer_id))
+            .then_some(())
+            .ok_or(FastDrainError::IncompleteCommittedHistory)
+    }
+
+    fn assert_source_dispositions_complete(&self, epoch: u64) -> Result<(), FastDrainError> {
+        if self.local_roster.domain.authority_epoch != epoch {
+            return Err(FastDrainError::IncompleteCommittedHistory);
+        }
+        let image = self.image()?;
+        let mut locks = BTreeMap::new();
+        let mut terminals = BTreeMap::new();
+        let mut dispositions = BTreeMap::new();
+        for record in &image.certified_history {
+            let (intent, certificate) = decode_history(record)?;
+            if intent.source != self.local_roster.domain {
+                continue;
+            }
+            match &certificate.body.outcome {
+                TransferOutcome::Locked { .. } if certificate.body.zone == intent.source => {
+                    validate_lock(&intent, &certificate)?;
+                    insert_history_exact(&mut locks, record.transfer_id, (intent, certificate))?;
+                }
+                TransferOutcome::Paid { .. } | TransferOutcome::Rejected { .. }
+                    if certificate.body.zone == intent.destination =>
+                {
+                    insert_history_exact(&mut terminals, record.transfer_id, certificate)?;
+                }
+                TransferOutcome::Released { .. } | TransferOutcome::Refunded { .. }
+                    if certificate.body.zone == intent.source =>
+                {
+                    insert_history_exact(&mut dispositions, record.transfer_id, certificate)?;
+                }
+                _ => return Err(FastDrainError::IncompleteCommittedHistory),
+            }
+        }
+        if terminals
+            .keys()
+            .any(|transfer_id| !locks.contains_key(transfer_id))
+            || dispositions
+                .keys()
+                .any(|transfer_id| !locks.contains_key(transfer_id))
+        {
+            return Err(FastDrainError::IncompleteCommittedHistory);
+        }
+        for native in self.committed.committed_transfers().map_err(state_error)? {
+            if native.intent.source == self.local_roster.domain
+                && !locks.contains_key(&native.intent.transfer_id())
+            {
+                return Err(FastDrainError::IncompleteCommittedHistory);
+            }
+        }
+        for (transfer_id, (intent, _lock)) in locks {
+            let terminal = terminals
+                .get(&transfer_id)
+                .ok_or(FastDrainError::IncompleteCommittedHistory)?;
+            let disposition = dispositions
+                .get(&transfer_id)
+                .ok_or(FastDrainError::IncompleteCommittedHistory)?;
+            validate_terminal_disposition(&intent, terminal, disposition)?;
+        }
+        Ok(())
+    }
+
     fn checkpoint_image(
         &self,
         settlement_hash: B256,
         next: &EpochRoster,
     ) -> Result<CheckpointImage, FastDrainError> {
+        if self.required_next_roster()? != next {
+            return Err(FastDrainError::MissingNextRoster);
+        }
         self.build_checkpoint(&self.image()?, settlement_hash, next)
     }
 
@@ -638,6 +869,13 @@ where
     ) -> DrainFuture<'a, Result<CommittedDrainPoint, FastDrainError>> {
         Box::pin(async move {
             image.validate()?;
+            let next = self.required_next_roster()?;
+            if image.statement.next_epoch != next.domain.authority_epoch
+                || image.statement.next_roster_hash != next.domain.roster_hash
+            {
+                return Err(FastDrainError::CheckpointInstallationMismatch);
+            }
+            let point = self.producer.install(image.clone()).await?;
             let local = self.image()?;
             if image.consensus_snapshot != local.bytes
                 || image.canonical_head_hash
@@ -650,8 +888,7 @@ where
             {
                 return Err(FastDrainError::CheckpointInstallationMismatch);
             }
-            let point = self.producer.install(image.clone()).await?;
-            assert_point(&self.image()?, point)?;
+            assert_point(&local, point)?;
             self.committed
                 .persist_installed_checkpoint_hash(image.image_hash()?)
                 .map_err(state_error)?;
@@ -693,6 +930,108 @@ fn insert_exact<T: Eq>(
     Ok(())
 }
 
+fn insert_history_exact<T: Eq>(
+    map: &mut BTreeMap<B256, T>,
+    key: B256,
+    value: T,
+) -> Result<(), FastDrainError> {
+    if let Some(existing) = map.get(&key) {
+        return (existing == &value)
+            .then_some(())
+            .ok_or(FastDrainError::IncompleteCommittedHistory);
+    }
+    map.insert(key, value);
+    Ok(())
+}
+
+fn validate_paid(
+    intent: &TransferIntent,
+    certificate: &OutcomeCertificate,
+) -> Result<(), FastDrainError> {
+    match certificate.body.outcome {
+        TransferOutcome::Paid {
+            pool,
+            recipient,
+            principal,
+        } if certificate.body.zone == intent.destination
+            && pool == intent.destination_pool
+            && recipient == intent.recipient
+            && principal == intent.principal =>
+        {
+            Ok(())
+        }
+        _ => Err(FastDrainError::IncompleteCommittedHistory),
+    }
+}
+
+fn validate_lock(
+    intent: &TransferIntent,
+    certificate: &OutcomeCertificate,
+) -> Result<(), FastDrainError> {
+    let total = intent
+        .principal
+        .checked_add(intent.fee)
+        .ok_or(FastDrainError::IncompleteCommittedHistory)?;
+    match certificate.body.outcome {
+        TransferOutcome::Locked { escrow, amount }
+            if certificate.body.zone == intent.source
+                && escrow == FAST_TRANSFER_ADDRESS
+                && amount == total =>
+        {
+            Ok(())
+        }
+        _ => Err(FastDrainError::IncompleteCommittedHistory),
+    }
+}
+
+fn validate_terminal_disposition(
+    intent: &TransferIntent,
+    terminal: &OutcomeCertificate,
+    disposition: &OutcomeCertificate,
+) -> Result<(), FastDrainError> {
+    let total = intent
+        .principal
+        .checked_add(intent.fee)
+        .ok_or(FastDrainError::IncompleteCommittedHistory)?;
+    if disposition.body.zone != intent.source {
+        return Err(FastDrainError::IncompleteCommittedHistory);
+    }
+    match (&terminal.body.outcome, &disposition.body.outcome) {
+        (
+            TransferOutcome::Paid {
+                pool,
+                recipient,
+                principal,
+            },
+            TransferOutcome::Released {
+                beneficiary,
+                amount,
+            },
+        ) if terminal.body.zone == intent.destination
+            && *pool == intent.destination_pool
+            && *recipient == intent.recipient
+            && *principal == intent.principal
+            && *beneficiary == intent.reimbursement_account
+            && *amount == total =>
+        {
+            Ok(())
+        }
+        (
+            TransferOutcome::Rejected { .. },
+            TransferOutcome::Refunded {
+                beneficiary,
+                amount,
+            },
+        ) if terminal.body.zone == intent.destination
+            && *beneficiary == intent.refund_account
+            && *amount == total =>
+        {
+            Ok(())
+        }
+        _ => Err(FastDrainError::IncompleteCommittedHistory),
+    }
+}
+
 fn anchor_through(blocks: &[AppliedBlock], through: u64) -> Result<(u64, B256), FastDrainError> {
     let mut anchor = None;
     for block in blocks.iter().filter(|block| block.log_id.index <= through) {
@@ -700,15 +1039,17 @@ fn anchor_through(blocks: &[AppliedBlock], through: u64) -> Result<(u64, B256), 
             bincode::deserialize(&block.input.l1_inputs).map_err(storage)?;
         match attributes.tempo_import {
             TempoImport::Full(prepared) => {
-                anchor = Some((prepared.header.number(), prepared.header.hash_slow()))
+                let imported = prepared.header.num_hash();
+                anchor = Some((imported.number, imported.hash));
             }
             TempoImport::CheckpointOnly(headers) => {
                 if let Some(header) = headers.last() {
-                    anchor = Some((header.number(), header.hash_slow()));
+                    let imported = header.num_hash();
+                    anchor = Some((imported.number, imported.hash));
                 }
             }
             TempoImport::SameAnchor(opening) => {
-                let expected = (opening.anchor_number, opening.anchor_hash);
+                let expected = (opening.tempo_block_number, opening.tempo_block_hash);
                 if anchor != Some(expected) {
                     return Err(FastDrainError::IncompleteCommittedHistory);
                 }
@@ -716,6 +1057,20 @@ fn anchor_through(blocks: &[AppliedBlock], through: u64) -> Result<(u64, B256), 
         }
     }
     anchor.ok_or(FastDrainError::IncompleteCommittedHistory)
+}
+
+fn assert_l1_import_entry(image: &ExactStateImage, id: LogId<u64>) -> Result<(), FastDrainError> {
+    let applied = image
+        .blocks
+        .iter()
+        .find(|block| block.log_id == id)
+        .ok_or(FastDrainError::InvalidCommittedPoint)?;
+    let attributes: ZonePayloadAttributes =
+        bincode::deserialize(&applied.input.l1_inputs).map_err(storage)?;
+    if !matches!(attributes.tempo_import, TempoImport::Full(_)) {
+        return Err(FastDrainError::WrongBarrier);
+    }
+    Ok(())
 }
 
 fn assert_point(image: &ExactStateImage, point: CommittedDrainPoint) -> Result<(), FastDrainError> {

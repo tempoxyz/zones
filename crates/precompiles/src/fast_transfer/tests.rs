@@ -8,7 +8,7 @@ use revm::precompile::Precompiles;
 use std::rc::Rc;
 use tempo_precompiles::{
     RECEIVE_POLICY_GUARD_ADDRESS,
-    storage::{Handler, StorageCtx, StorageKey, actions::StorageActions},
+    storage::{Handler, StorageCtx, actions::StorageActions},
     storage_credits::NonCreditableSlots,
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
@@ -95,8 +95,7 @@ fn intent_rejects_cross_asset_mapping_before_any_token_effect() {
     assert!(FastTransfer::validate_intent(&mismatched).is_err());
 }
 
-#[test]
-fn remembered_outcome_is_immutable_and_idempotent() -> eyre::Result<()> {
+fn remembered_outcome_is_immutable_and_idempotent_impl() -> eyre::Result<()> {
     let mut ctx = test_context();
     let intent = intent(10);
     let hash = intent.intent_hash();
@@ -125,8 +124,7 @@ fn remembered_outcome_is_immutable_and_idempotent() -> eyre::Result<()> {
     })
 }
 
-#[test]
-fn exposure_retirement_is_body_bound_and_exactly_once() -> eyre::Result<()> {
+fn exposure_retirement_is_body_bound_and_exactly_once_impl() -> eyre::Result<()> {
     let mut ctx = test_context();
     let intent = intent(11);
     let hash = intent.intent_hash();
@@ -173,9 +171,8 @@ fn reserved_address_stays_registered_before_t14_for_explicit_revert() {
     assert!(precompiles.get(&FAST_TRANSFER_ADDRESS).is_some());
 }
 
-#[test]
-fn asset_validation_binds_local_decimals_and_both_finalized_portal_enablements() -> eyre::Result<()>
-{
+fn asset_validation_binds_local_decimals_and_both_finalized_portal_enablements_impl()
+-> eyre::Result<()> {
     const ANCHOR: u64 = 9;
 
     let mut ctx = test_context_with_hardfork(TempoHardfork::T14);
@@ -183,8 +180,8 @@ fn asset_validation_binds_local_decimals_and_both_finalized_portal_enablements()
     let transfer = intent(13);
     let source = ZonePortalStorage::new(transfer.source.portal);
     let destination = ZonePortalStorage::new(transfer.destination.portal);
-    let source_token_config = source.token_configs[TOKEN].enabled.base_slot();
-    let destination_token_config = destination.token_configs[TOKEN].enabled.base_slot();
+    let source_token_config = source.token_configs[TOKEN].enabled.slot();
+    let destination_token_config = destination.token_configs[TOKEN].enabled.slot();
     for (portal, slot) in [
         (transfer.source.portal, source_token_config),
         (transfer.destination.portal, destination_token_config),
@@ -232,8 +229,8 @@ fn asset_validation_binds_local_decimals_and_both_finalized_portal_enablements()
     Ok(())
 }
 
-#[test]
-fn destination_height_expiry_commits_precise_rejection_without_pool_movement() -> eyre::Result<()> {
+fn destination_height_expiry_commits_precise_rejection_without_pool_movement_impl()
+-> eyre::Result<()> {
     const ANCHOR: u64 = 9;
 
     let mut ctx = test_context_with_hardfork(TempoHardfork::T14);
@@ -244,7 +241,7 @@ fn destination_height_expiry_commits_precise_rejection_without_pool_movement() -
         let portal = ZonePortalStorage::new(portal_address);
         l1.insert(
             portal_address,
-            portal.token_configs[TOKEN].enabled.base_slot(),
+            portal.token_configs[TOKEN].enabled.slot(),
             ANCHOR,
             U256::ONE,
         );
@@ -285,8 +282,7 @@ fn destination_height_expiry_commits_precise_rejection_without_pool_movement() -
     })
 }
 
-#[test]
-fn redirected_destination_credit_is_rolled_back_before_policy_tombstone() -> eyre::Result<()> {
+fn redirected_destination_credit_is_rolled_back_before_policy_tombstone_impl() -> eyre::Result<()> {
     const ANCHOR: u64 = 9;
 
     let mut ctx = test_context_with_hardfork(TempoHardfork::T14);
@@ -297,7 +293,7 @@ fn redirected_destination_credit_is_rolled_back_before_policy_tombstone() -> eyr
         let portal = ZonePortalStorage::new(portal_address);
         l1.insert(
             portal_address,
-            portal.token_configs[TOKEN].enabled.base_slot(),
+            portal.token_configs[TOKEN].enabled.slot(),
             ANCHOR,
             U256::ONE,
         );
@@ -361,4 +357,37 @@ fn redirected_destination_credit_is_rolled_back_before_policy_tombstone() -> eyr
         );
         Ok(())
     })
+}
+
+fn run_native_test(test: fn() -> eyre::Result<()>) -> eyre::Result<()> {
+    std::thread::Builder::new()
+        .name("t14-native-unit".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(test)?
+        .join()
+        .map_err(|_| eyre::eyre!("T14 native unit worker panicked"))?
+}
+
+macro_rules! native_tests {
+    ($($name:ident => $implementation:ident),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() -> eyre::Result<()> {
+                run_native_test($implementation)
+            }
+        )+
+    };
+}
+
+native_tests! {
+    remembered_outcome_is_immutable_and_idempotent =>
+        remembered_outcome_is_immutable_and_idempotent_impl,
+    exposure_retirement_is_body_bound_and_exactly_once =>
+        exposure_retirement_is_body_bound_and_exactly_once_impl,
+    asset_validation_binds_local_decimals_and_both_finalized_portal_enablements =>
+        asset_validation_binds_local_decimals_and_both_finalized_portal_enablements_impl,
+    destination_height_expiry_commits_precise_rejection_without_pool_movement =>
+        destination_height_expiry_commits_precise_rejection_without_pool_movement_impl,
+    redirected_destination_credit_is_rolled_back_before_policy_tombstone =>
+        redirected_destination_credit_is_rolled_back_before_policy_tombstone_impl,
 }

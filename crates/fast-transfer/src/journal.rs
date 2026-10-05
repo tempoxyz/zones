@@ -98,6 +98,10 @@ pub enum EconomicActionKind {
     Resolve,
     RecordOutcome,
     DisposeEscrow,
+    /// Persist one bounded accepted-source ancestry checkpoint.
+    RecordAncestryCheckpoint,
+    /// Retire one paid destination exposure from canonical accepted-release evidence.
+    RetireExposure,
 }
 
 /// One durable signer-nonce attempt for a stable native economic action.
@@ -405,6 +409,31 @@ impl DurableJournal {
             .collect())
     }
 
+    /// Return every retained incoming frame, including frames below the processed cursor.
+    /// Exposure retirement deliberately consumes the already-authenticated, durable source
+    /// disposition after C4 has acknowledged it; it must survive cursor advancement and restart.
+    pub fn all_incoming(&self) -> Result<Vec<JournalIncomingRecord>, JournalError> {
+        let inner = self.inner.lock().map_err(|_| JournalError::Poisoned)?;
+        Ok(inner
+            .state
+            .incoming
+            .iter()
+            .map(|(key, payload)| JournalIncomingRecord {
+                peer_zone: key.peer_zone,
+                stream: key.stream,
+                sequence: key.sequence,
+                expected_sequence: inner
+                    .state
+                    .cursors
+                    .get(&(key.peer_zone, key.stream))
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1),
+                payload: payload.clone(),
+            })
+            .collect())
+    }
+
     /// Persist the first nonce attempt before provider/pool submission.
     pub fn persist_economic_action(
         &self,
@@ -448,6 +477,26 @@ impl DurableJournal {
             .get(&action_id)
             .and_then(|state| state.attempts.last())
             .map(|attempt| attempt.record.clone()))
+    }
+
+    /// Return whether any durable action for this transfer/kind completed canonically. This is a
+    /// permanent recovery marker; submission hashes or transport acknowledgments do not satisfy
+    /// it.
+    pub fn economic_action_completed(
+        &self,
+        transfer_id: B256,
+        kind: EconomicActionKind,
+    ) -> Result<bool, JournalError> {
+        let inner = self.inner.lock().map_err(|_| JournalError::Poisoned)?;
+        Ok(inner.state.economic_actions.values().any(|state| {
+            state.attempts.iter().any(|attempt| {
+                attempt.record.transfer_id == transfer_id
+                    && attempt.record.kind == kind
+                    && attempt.completion.is_some_and(|completion| {
+                        completion.outcome == EconomicAttemptOutcome::Succeeded
+                    })
+            })
+        }))
     }
 
     /// Append one replacement transaction hash for the exact current nonce/calldata.
@@ -509,7 +558,8 @@ impl DurableJournal {
         )
     }
 
-    /// Atomically close a canonically reverted `disposeEscrow` nonce and allocate its next nonce.
+    /// Atomically close a canonically reverted retryable native-action nonce and allocate its next
+    /// nonce.
     /// A timeout or ambiguous submission cannot call this transition: at least one submitted hash
     /// is required, and all economic identity/calldata fields are copied from durable state.
     pub fn next_economic_attempt(
@@ -530,8 +580,12 @@ impl DurableJournal {
                 if current.record.nonce == next_nonce && has_prior_attempt {
                     return Ok(current.record.clone());
                 }
-                if current.record.kind != EconomicActionKind::DisposeEscrow
-                    || current.completion.is_some()
+                if !matches!(
+                    current.record.kind,
+                    EconomicActionKind::DisposeEscrow
+                        | EconomicActionKind::RecordAncestryCheckpoint
+                        | EconomicActionKind::RetireExposure
+                ) || current.completion.is_some()
                     || current.record.submission_hashes.is_empty()
                     || next_nonce <= current.record.nonce
                 {
@@ -652,6 +706,17 @@ impl DurableJournal {
         inner.journal.set_len(0)?;
         inner.journal.sync_all()?;
         Ok(())
+    }
+
+    /// Canonical complete snapshot frames for an authenticated roster handoff. The returned bytes
+    /// are independently replayable as `snapshot.bin`; no journal mutation occurs.
+    pub fn checkpoint_snapshot_bytes(&self) -> Result<Vec<u8>, JournalError> {
+        let inner = self.inner.lock().map_err(|_| JournalError::Poisoned)?;
+        let mut bytes = Vec::new();
+        for operation in snapshot_operations(&inner.state) {
+            write_frame(&mut bytes, &operation)?;
+        }
+        Ok(bytes)
     }
 
     fn mutate<T>(
@@ -893,7 +958,7 @@ fn snapshot_operations(state: &JournalState) -> Vec<Operation> {
     operations
 }
 
-fn write_frame(file: &mut File, operation: &Operation) -> Result<(), JournalError> {
+fn write_frame(file: &mut impl Write, operation: &Operation) -> Result<(), JournalError> {
     let body = encode_operation(operation);
     if body.len() > MAX_RECORD_BYTES {
         return Err(JournalError::Corrupt("record exceeds maximum"));
@@ -1100,8 +1165,12 @@ fn apply_replay(state: &mut JournalState, operation: Operation) -> Result<(), Jo
             if current.record.nonce == next_nonce && has_prior_attempt {
                 return Ok(());
             }
-            if current.record.kind != EconomicActionKind::DisposeEscrow
-                || current.completion.is_some()
+            if !matches!(
+                current.record.kind,
+                EconomicActionKind::DisposeEscrow
+                    | EconomicActionKind::RecordAncestryCheckpoint
+                    | EconomicActionKind::RetireExposure
+            ) || current.completion.is_some()
                 || current.record.submission_hashes.is_empty()
                 || next_nonce <= current.record.nonce
             {
@@ -1525,6 +1594,8 @@ fn put_economic_action(out: &mut Vec<u8>, record: &EconomicActionRecord) {
         EconomicActionKind::Resolve => 0,
         EconomicActionKind::RecordOutcome => 1,
         EconomicActionKind::DisposeEscrow => 2,
+        EconomicActionKind::RecordAncestryCheckpoint => 3,
+        EconomicActionKind::RetireExposure => 4,
     });
     out.extend_from_slice(record.signer.as_slice());
     out.extend_from_slice(&record.nonce.to_be_bytes());
@@ -1805,6 +1876,8 @@ impl<'a> BinaryReader<'a> {
             0 => EconomicActionKind::Resolve,
             1 => EconomicActionKind::RecordOutcome,
             2 => EconomicActionKind::DisposeEscrow,
+            3 => EconomicActionKind::RecordAncestryCheckpoint,
+            4 => EconomicActionKind::RetireExposure,
             _ => return Err(JournalError::Corrupt("invalid economic action kind")),
         };
         Ok(EconomicActionRecord {
@@ -2021,6 +2094,7 @@ mod tests {
         );
         assert!(records.iter().all(|record| record.expected_sequence == 1));
         store.advance_contiguous_cursor(2, 9, 1).unwrap();
+        assert_eq!(store.all_incoming().unwrap().len(), 2);
         assert_eq!(
             store.unprocessed_incoming().unwrap(),
             vec![JournalIncomingRecord {
@@ -2030,6 +2104,74 @@ mod tests {
                 expected_sequence: 2,
                 payload: vec![2],
             }]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn exposure_action_kinds_are_codec_stable_and_reuse_the_persisted_nonce() {
+        let directory = temporary_directory("exposure-economic-actions");
+        {
+            let store = DurableJournal::open(&directory).unwrap();
+            for (offset, kind) in [
+                EconomicActionKind::RecordAncestryCheckpoint,
+                EconomicActionKind::RetireExposure,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut action = economic_action(kind);
+                action.action_id = B256::repeat_byte(40 + offset as u8);
+                action.transfer_id = B256::repeat_byte(50 + offset as u8);
+                store.persist_economic_action(action.clone()).unwrap();
+                store
+                    .record_economic_submission(
+                        action.action_id,
+                        B256::repeat_byte(60 + offset as u8),
+                    )
+                    .unwrap();
+            }
+            store.snapshot().unwrap();
+        }
+        let store = DurableJournal::open(&directory).unwrap();
+        for (offset, kind) in [
+            EconomicActionKind::RecordAncestryCheckpoint,
+            EconomicActionKind::RetireExposure,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = B256::repeat_byte(40 + offset as u8);
+            let recovered = store.economic_action(id).unwrap().unwrap();
+            assert_eq!(recovered.kind, kind);
+            assert_eq!(recovered.nonce, 7);
+            let next = store.next_economic_attempt(id, 8).unwrap();
+            assert_eq!(next.nonce, 8);
+            assert_eq!(next.calldata, recovered.calldata);
+            assert!(
+                !store
+                    .economic_action_completed(next.transfer_id, kind)
+                    .unwrap()
+            );
+            let success = B256::repeat_byte(70 + offset as u8);
+            store.record_economic_submission(id, success).unwrap();
+            store.complete_economic_action(id, success).unwrap();
+            assert!(!store.complete_economic_action(id, success).unwrap());
+            assert!(
+                store
+                    .economic_action_completed(next.transfer_id, kind)
+                    .unwrap()
+            );
+        }
+        drop(store);
+        let store = DurableJournal::open(&directory).unwrap();
+        assert!(
+            store
+                .economic_action_completed(
+                    B256::repeat_byte(51),
+                    EconomicActionKind::RetireExposure,
+                )
+                .unwrap()
         );
         fs::remove_dir_all(directory).unwrap();
     }

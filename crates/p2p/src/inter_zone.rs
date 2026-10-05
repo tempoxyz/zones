@@ -38,6 +38,7 @@ const INTER_ZONE_REQUEST_CHANNEL: u64 = 0;
 const INTER_ZONE_RESPONSE_CHANNEL: u64 = 1;
 const INTER_ZONE_NAMESPACE: &[u8] = b"TEMPO_ZONE_PRIVATE_INTER_ZONE_T14_V1";
 const ROUTING_PEERS: usize = 30;
+const ROUTING_PEERS_WITH_HANDOFF: usize = ROUTING_PEERS + PEERS_PER_ZONE;
 const ROUTING_ZONES: usize = 10;
 const PEERS_PER_ZONE: usize = 3;
 const PORT_BACKLOG: usize = 128;
@@ -50,6 +51,11 @@ const DELIVERY_TAG: u8 = 2;
 const CHALLENGE_RESPONSE_TAG: u8 = 3;
 const ACK_TAG: u8 = 4;
 const ERROR_TAG: u8 = 5;
+/// Reserved stream class for the old-roster to finalized-next-roster checkpoint signature
+/// handoff. No other same-Zone request is admitted by the carrier.
+pub const NEXT_ROSTER_CHECKPOINT_STREAM_PREFIX: u64 = 0xd5a2_0000_0000_0000;
+const STREAM_CLASS_MASK: u64 = 0xffff_0000_0000_0000;
+const MAX_ACK_PAYLOAD_BYTES: usize = 4 * 1024;
 
 /// Maximum application frame accepted by the dedicated Commonware network.
 pub const MAX_INTER_ZONE_MESSAGE_SIZE: u32 = 16 * 1024;
@@ -76,15 +82,25 @@ pub struct InterZoneRoutingConfig {
     pub peers: Vec<InterZoneRoutingPeer>,
 }
 
-impl InterZoneRoutingConfig {
-    pub fn validate(&self, local: &PublicKey, intra_zone_listen: SocketAddr) -> eyre::Result<()> {
+/// Standalone pre-activation carrier configuration used by a next-roster member after it installs
+/// the old accepted-prefix checkpoint. It contains only the three old requesters and three next
+/// signers for one Zone and does not require membership in the still-active old Raft manifest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NextRosterHandoffRoutingConfig {
+    pub l1_chain_id: u64,
+    pub local_zone_id: u32,
+    pub listen: SocketAddr,
+    pub bypass_ip_check: bool,
+    pub peers: Vec<InterZoneRoutingPeer>,
+}
+
+impl NextRosterHandoffRoutingConfig {
+    pub fn validate(&self, local: &PublicKey) -> eyre::Result<()> {
         eyre::ensure!(
-            self.listen != intra_zone_listen,
-            "inter-Zone Commonware requires a dedicated listen address"
-        );
-        eyre::ensure!(
-            self.peers.len() == ROUTING_PEERS,
-            "inter-Zone routing must contain exactly {ROUTING_PEERS} replicas"
+            self.l1_chain_id != 0
+                && self.local_zone_id != 0
+                && self.peers.len() == PEERS_PER_ZONE * 2,
+            "next-roster handoff routing requires exactly six old/next peers"
         );
         let identities = self
             .peers
@@ -92,7 +108,51 @@ impl InterZoneRoutingConfig {
             .map(|peer| peer.ed25519.clone())
             .collect::<BTreeSet<_>>();
         eyre::ensure!(
-            identities.len() == ROUTING_PEERS,
+            identities.len() == PEERS_PER_ZONE * 2
+                && self
+                    .peers
+                    .iter()
+                    .all(|peer| peer.zone_id == self.local_zone_id)
+                && identities.contains(local),
+            "next-roster handoff routing identities do not exactly cover the local old/next peers"
+        );
+        if self.peers.iter().any(|peer| peer.endpoint.is_dns()) {
+            eyre::ensure!(
+                self.bypass_ip_check,
+                "DNS handoff endpoints require explicit source-IP filtering bypass"
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn carrier(&self) -> InterZoneRoutingConfig {
+        InterZoneRoutingConfig {
+            l1_chain_id: self.l1_chain_id,
+            local_zone_id: self.local_zone_id,
+            listen: self.listen,
+            bypass_ip_check: self.bypass_ip_check,
+            peers: self.peers.clone(),
+        }
+    }
+}
+
+impl InterZoneRoutingConfig {
+    pub fn validate(&self, local: &PublicKey, intra_zone_listen: SocketAddr) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.listen != intra_zone_listen,
+            "inter-Zone Commonware requires a dedicated listen address"
+        );
+        eyre::ensure!(
+            matches!(self.peers.len(), ROUTING_PEERS | ROUTING_PEERS_WITH_HANDOFF),
+            "inter-Zone routing must contain 30 replicas, or 33 with a disjoint next-roster handoff"
+        );
+        let identities = self
+            .peers
+            .iter()
+            .map(|peer| peer.ed25519.clone())
+            .collect::<BTreeSet<_>>();
+        eyre::ensure!(
+            identities.len() == self.peers.len(),
             "inter-Zone routing contains duplicate Ed25519 identities"
         );
         let mut zones = BTreeMap::<u32, usize>::new();
@@ -100,8 +160,14 @@ impl InterZoneRoutingConfig {
             *zones.entry(peer.zone_id).or_default() += 1;
         }
         eyre::ensure!(
-            zones.len() == ROUTING_ZONES && zones.values().all(|count| *count == PEERS_PER_ZONE),
-            "inter-Zone routing must contain exactly three replicas for each of ten Zones"
+            zones.len() == ROUTING_ZONES
+                && zones.iter().all(|(zone, count)| {
+                    *count == PEERS_PER_ZONE
+                        || (*zone == self.local_zone_id
+                            && self.peers.len() == ROUTING_PEERS_WITH_HANDOFF
+                            && *count == PEERS_PER_ZONE * 2)
+                }),
+            "inter-Zone routing must contain three replicas per Zone and, when configured, three additional local next-roster replicas"
         );
         eyre::ensure!(
             self.peers
@@ -135,7 +201,7 @@ pub struct InterZoneAuthoritySet {
 }
 
 impl InterZoneAuthoritySet {
-    fn validate(
+    pub(crate) fn validate(
         &self,
         routing: &InterZoneRoutingConfig,
         local_ed25519: &PublicKey,
@@ -145,13 +211,14 @@ impl InterZoneAuthoritySet {
             self.rosters.len() == ROUTING_ZONES && self.peers.len() == ROUTING_PEERS,
             "inter-Zone authority must contain ten rosters and thirty peer bindings"
         );
-        for route in &routing.peers {
-            let authority = self.peers.get(&route.ed25519).ok_or_else(|| {
-                eyre::eyre!(
-                    "routing identity {} has no finalized authority",
-                    route.ed25519
-                )
-            })?;
+        for (identity, authority) in &self.peers {
+            let route = routing
+                .peers
+                .iter()
+                .find(|route| &route.ed25519 == identity)
+                .ok_or_else(|| {
+                    eyre::eyre!("finalized authority identity {identity} is absent from routing")
+                })?;
             eyre::ensure!(
                 authority.domain.zone_id == route.zone_id,
                 "routing Zone does not match installed authority domain"
@@ -177,13 +244,96 @@ impl InterZoneAuthoritySet {
                 "installed peer bindings do not exactly cover finalized roster {zone_id}"
             );
         }
-        let local = self.peers.get(local_ed25519).ok_or_else(|| {
-            eyre::eyre!("local Commonware identity has no installed ECDSA authority")
-        })?;
+        if let Some(local) = self.peers.get(local_ed25519) {
+            eyre::ensure!(
+                local.domain.zone_id == routing.local_zone_id
+                    && local.certificate_member == local_ecdsa,
+                "local inter-Zone identity does not match the finalized local roster member"
+            );
+        } else {
+            eyre::ensure!(
+                routing.peers.len() == ROUTING_PEERS_WITH_HANDOFF
+                    && routing.peers.iter().any(|peer| {
+                        peer.zone_id == routing.local_zone_id && &peer.ed25519 == local_ed25519
+                    }),
+                "local Commonware identity has no installed service or configured handoff authority"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Finalized authority for the only permitted same-Zone cross-roster operation. Endpoint and
+/// Ed25519 bindings come from the explicit 33-peer routing config; this update supplies the exact
+/// old and next Tempo rosters and must cover both of them one-for-one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NextRosterHandoffAuthoritySet {
+    pub old_roster: EpochRoster,
+    pub next_roster: EpochRoster,
+    pub peers: BTreeMap<PublicKey, InterZonePeerAuthority>,
+}
+
+impl NextRosterHandoffAuthoritySet {
+    pub(crate) fn validate(
+        &self,
+        routing: &InterZoneRoutingConfig,
+        local_ed25519: &PublicKey,
+        local_ecdsa: Address,
+    ) -> eyre::Result<()> {
+        let old = &self.old_roster;
+        let next = &self.next_roster;
         eyre::ensure!(
-            local.domain.zone_id == routing.local_zone_id
-                && local.certificate_member == local_ecdsa,
-            "local inter-Zone identity does not match the finalized local roster member"
+            matches!(routing.peers.len(), ROUTING_PEERS_WITH_HANDOFF | 6)
+                && self.peers.len() == PEERS_PER_ZONE * 2
+                && old.domain.zone_id == routing.local_zone_id
+                && next.domain.zone_id == routing.local_zone_id
+                && old.domain.portal == next.domain.portal
+                && old.domain.l1_chain_id == next.domain.l1_chain_id
+                && old.domain.chain_id == next.domain.chain_id
+                && old.domain.protocol_version == next.domain.protocol_version
+                && next.domain.authority_epoch > old.domain.authority_epoch,
+            "invalid finalized next-roster handoff authority"
+        );
+        for (identity, authority) in &self.peers {
+            eyre::ensure!(
+                routing.peers.iter().any(|route| {
+                    route.zone_id == routing.local_zone_id && &route.ed25519 == identity
+                }),
+                "handoff authority identity is absent from explicit local routing"
+            );
+            let roster = if authority.domain == old.domain {
+                old
+            } else if authority.domain == next.domain {
+                next
+            } else {
+                return Err(eyre::eyre!(
+                    "handoff peer has neither the old nor next finalized domain"
+                ));
+            };
+            eyre::ensure!(
+                roster.members.contains(&authority.certificate_member),
+                "handoff peer is outside its finalized roster"
+            );
+        }
+        for roster in [old, next] {
+            let members = self
+                .peers
+                .values()
+                .filter(|peer| peer.domain == roster.domain)
+                .map(|peer| peer.certificate_member)
+                .collect::<BTreeSet<_>>();
+            eyre::ensure!(
+                members == roster.members.into_iter().collect(),
+                "handoff bindings do not exactly cover finalized roster"
+            );
+        }
+        let local = self
+            .peers
+            .get(local_ed25519)
+            .ok_or_else(|| eyre::eyre!("local handoff identity has no finalized authority"))?;
+        eyre::ensure!(
+            local.certificate_member == local_ecdsa,
+            "local handoff identity/member mismatch"
         );
         Ok(())
     }
@@ -208,6 +358,9 @@ pub struct InterZoneAcknowledgment {
     pub remote_domain: ZoneDomain,
     pub stream: u64,
     pub sequence: u64,
+    /// Bounded authenticated response bytes. Ordinary service/drain deliveries require this to be
+    /// empty; the reserved checkpoint handoff carries exactly one canonical signature response.
+    pub response_payload: Vec<u8>,
 }
 
 /// Verified inbound delivery. The response must be completed only after durable service ingestion;
@@ -219,34 +372,39 @@ pub struct AuthenticatedInterZoneRequest {
     pub stream: u64,
     pub sequence: u64,
     pub payload: Vec<u8>,
-    pub response: oneshot::Sender<Result<(), String>>,
+    pub response: oneshot::Sender<Result<Vec<u8>, String>>,
 }
 
 /// Bounded runtime ports exported independently from intra-Zone Raft ports.
 pub struct InterZoneServicePorts {
     pub authority: mpsc::Sender<InterZoneAuthoritySet>,
+    pub next_roster_handoff_authority: mpsc::Sender<NextRosterHandoffAuthoritySet>,
     pub requests: mpsc::Sender<InterZoneServiceRequest>,
     pub incoming: mpsc::Receiver<AuthenticatedInterZoneRequest>,
 }
 
 pub(crate) struct InterZoneNodeChannels {
     pub authority: mpsc::Receiver<InterZoneAuthoritySet>,
+    pub next_roster_handoff_authority: mpsc::Receiver<NextRosterHandoffAuthoritySet>,
     pub requests: mpsc::Receiver<InterZoneServiceRequest>,
     pub incoming: mpsc::Sender<AuthenticatedInterZoneRequest>,
 }
 
 pub(crate) fn channels() -> (InterZoneServicePorts, InterZoneNodeChannels) {
     let (authority_tx, authority) = mpsc::channel(1);
+    let (handoff_authority_tx, next_roster_handoff_authority) = mpsc::channel(1);
     let (requests_tx, requests) = mpsc::channel(PORT_BACKLOG);
     let (incoming, incoming_rx) = mpsc::channel(PORT_BACKLOG);
     (
         InterZoneServicePorts {
             authority: authority_tx,
+            next_roster_handoff_authority: handoff_authority_tx,
             requests: requests_tx,
             incoming: incoming_rx,
         },
         InterZoneNodeChannels {
             authority,
+            next_roster_handoff_authority,
             requests,
             incoming,
         },
@@ -325,6 +483,75 @@ struct InboundChallenge {
     expires: Instant,
 }
 
+#[derive(Default)]
+struct InstalledAuthority {
+    service: Option<InterZoneAuthoritySet>,
+    handoff: Option<NextRosterHandoffAuthoritySet>,
+}
+
+impl InstalledAuthority {
+    fn peer(&self, identity: &PublicKey) -> Option<&InterZonePeerAuthority> {
+        self.handoff
+            .as_ref()
+            .and_then(|authority| authority.peers.get(identity))
+            .or_else(|| {
+                self.service
+                    .as_ref()
+                    .and_then(|authority| authority.peers.get(identity))
+            })
+    }
+
+    fn roster(&self, domain: &ZoneDomain) -> Option<&EpochRoster> {
+        if let Some(handoff) = &self.handoff {
+            if handoff.old_roster.domain == *domain {
+                return Some(&handoff.old_roster);
+            }
+            if handoff.next_roster.domain == *domain {
+                return Some(&handoff.next_roster);
+            }
+        }
+        self.service
+            .as_ref()
+            .and_then(|authority| authority.rosters.get(&domain.zone_id))
+            .filter(|roster| roster.domain == *domain)
+    }
+
+    fn authorizes_transcript(&self, transcript: &Transcript) -> bool {
+        let identities_match = self
+            .peer(&transcript.initiator_ed25519)
+            .is_some_and(|peer| {
+                peer.domain == transcript.initiator_domain
+                    && peer.certificate_member == transcript.initiator_member
+            })
+            && self
+                .peer(&transcript.responder_ed25519)
+                .is_some_and(|peer| {
+                    peer.domain == transcript.responder_domain
+                        && peer.certificate_member == transcript.responder_member
+                });
+        if !identities_match {
+            return false;
+        }
+        if transcript.initiator_domain.zone_id != transcript.responder_domain.zone_id {
+            return self.roster(&transcript.initiator_domain).is_some()
+                && self.roster(&transcript.responder_domain).is_some();
+        }
+        self.handoff.as_ref().is_some_and(|handoff| {
+            transcript.stream & STREAM_CLASS_MASK == NEXT_ROSTER_CHECKPOINT_STREAM_PREFIX
+                && transcript.initiator_domain == handoff.old_roster.domain
+                && transcript.responder_domain == handoff.next_roster.domain
+                && handoff
+                    .old_roster
+                    .members
+                    .contains(&transcript.initiator_member)
+                && handoff
+                    .next_roster
+                    .members
+                    .contains(&transcript.responder_member)
+        })
+    }
+}
+
 pub(crate) async fn run(
     context: commonware_runtime::tokio::Context,
     routing: InterZoneRoutingConfig,
@@ -364,6 +591,7 @@ pub(crate) async fn run(
         ecdsa_signer,
         routing,
         channels.authority,
+        channels.next_roster_handoff_authority,
         channels.requests,
         channels.incoming,
         request_sender,
@@ -387,6 +615,7 @@ async fn run_service(
     ecdsa_signer: PrivateKeySigner,
     routing: InterZoneRoutingConfig,
     mut authority_updates: mpsc::Receiver<InterZoneAuthoritySet>,
+    mut handoff_authority_updates: mpsc::Receiver<NextRosterHandoffAuthoritySet>,
     mut outbound_requests: mpsc::Receiver<InterZoneServiceRequest>,
     incoming: mpsc::Sender<AuthenticatedInterZoneRequest>,
     mut request_sender: CommonwareSender,
@@ -394,7 +623,7 @@ async fn run_service(
     response_sender: CommonwareSender,
     mut response_receiver: CommonwareReceiver,
 ) -> eyre::Result<()> {
-    let mut authority: Option<InterZoneAuthoritySet> = None;
+    let mut authority = InstalledAuthority::default();
     let mut outbound = HashMap::<B256, OutboundPending>::new();
     let mut challenges = HashMap::<B256, InboundChallenge>::new();
     let mut used_initiator_nonces = HashMap::<(PublicKey, B256), Instant>::new();
@@ -404,19 +633,27 @@ async fn run_service(
             update = authority_updates.recv() => {
                 let update = update.ok_or_else(|| eyre::eyre!("inter-Zone authority port closed"))?;
                 update.validate(&routing, &local_ed25519, ecdsa_signer.address())?;
-                match &authority {
+                match &authority.service {
                     Some(installed) if installed != &update => {
                         return Err(eyre::eyre!("conflicting inter-Zone authority replacement"));
                     }
                     Some(_) => {}
-                    None => authority = Some(update),
+                    None => authority.service = Some(update),
+                }
+            }
+            update = handoff_authority_updates.recv() => {
+                let update = update.ok_or_else(|| eyre::eyre!("next-roster handoff authority port closed"))?;
+                update.validate(&routing, &local_ed25519, ecdsa_signer.address())?;
+                match &authority.handoff {
+                    Some(installed) if installed != &update => return Err(eyre::eyre!("conflicting next-roster handoff authority replacement")),
+                    Some(_) => {}
+                    None => authority.handoff = Some(update),
                 }
             }
             request = outbound_requests.recv() => {
                 let request = request.ok_or_else(|| eyre::eyre!("inter-Zone request port closed"))?;
                 let result = begin_outbound(
-                    authority.as_ref(),
-                    &routing,
+                    &authority,
                     &local_ed25519,
                     request,
                     &mut request_sender,
@@ -429,7 +666,7 @@ async fn run_service(
             received = request_receiver.recv() => {
                 let (peer, bytes) = received.map_err(|error| eyre::eyre!("inter-Zone request receiver failed: {error}"))?;
                 handle_request(
-                    authority.as_ref(),
+                    &authority,
                     &local_ed25519,
                     &ecdsa_signer,
                     peer,
@@ -443,7 +680,7 @@ async fn run_service(
             received = response_receiver.recv() => {
                 let (peer, bytes) = received.map_err(|error| eyre::eyre!("inter-Zone response receiver failed: {error}"))?;
                 handle_response(
-                    authority.as_ref(),
+                    &authority,
                     &local_ed25519,
                     &ecdsa_signer,
                     peer,
@@ -473,8 +710,7 @@ async fn run_service(
 }
 
 fn begin_outbound(
-    authority: Option<&InterZoneAuthoritySet>,
-    routing: &InterZoneRoutingConfig,
+    authority: &InstalledAuthority,
     local_ed25519: &PublicKey,
     request: InterZoneServiceRequest,
     sender: &mut CommonwareSender,
@@ -488,22 +724,16 @@ fn begin_outbound(
 > {
     let mut response = Some(request.response);
     let result = (|| {
-        let authority = authority.ok_or("finalized inter-Zone authority is not installed")?;
         if request.payload.len() > MAX_SERVICE_ENVELOPE_BYTES {
             return Err("inter-Zone service payload exceeds its canonical bound");
         }
         let local = authority
-            .peers
-            .get(local_ed25519)
+            .peer(local_ed25519)
             .ok_or("local inter-Zone authority is missing")?;
         let remote = authority
-            .peers
-            .get(&request.target)
+            .peer(&request.target)
             .ok_or("target Ed25519 identity has no finalized authority")?;
-        if remote.domain.zone_id != request.remote_zone_id
-            || remote.domain.zone_id == routing.local_zone_id
-            || request.stream == 0
-        {
+        if remote.domain.zone_id != request.remote_zone_id || request.stream == 0 {
             return Err("inter-Zone request target/domain/stream mismatch");
         }
         let mut random = [0u8; 64];
@@ -526,6 +756,9 @@ fn begin_outbound(
             stream: request.stream,
             sequence: request.sequence,
         };
+        if !authority.authorizes_transcript(&transcript) {
+            return Err("request is outside finalized service/handoff authority");
+        }
         let frame = encode_challenge(&transcript);
         let admitted = sender.send(Recipients::One(request.target), frame, true);
         if admitted.len() != 1 {
@@ -551,7 +784,7 @@ fn begin_outbound(
 }
 
 async fn handle_request(
-    authority: Option<&InterZoneAuthoritySet>,
+    authority: &InstalledAuthority,
     local_ed25519: &PublicKey,
     signer: &PrivateKeySigner,
     peer: PublicKey,
@@ -562,9 +795,9 @@ async fn handle_request(
     used_initiator_nonces: &mut HashMap<(PublicKey, B256), Instant>,
 ) {
     let bytes: Vec<u8> = bytes.into();
-    let Some(authority) = authority else {
+    if authority.service.is_none() && authority.handoff.is_none() {
         return;
-    };
+    }
     let Some(tag) = bytes.get(1).copied() else {
         return;
     };
@@ -577,7 +810,7 @@ async fn handle_request(
                 || transcript.responder_ed25519 != *local_ed25519
                 || transcript.initiator_nonce.is_zero()
                 || transcript.stream == 0
-                || !authority_matches(authority, &transcript)
+                || !authority.authorizes_transcript(&transcript)
                 || challenges.contains_key(&transcript.request_id)
                 || used_initiator_nonces.contains_key(&(peer.clone(), transcript.initiator_nonce))
             {
@@ -623,16 +856,14 @@ async fn handle_request(
                 || transcript.initiator_ed25519 != peer
                 || !transcript.validate_proof_fields(&initiator_proof, false)
                 || !transcript.validate_proof_fields(&responder_proof, true)
-                || !authority_matches(authority, &transcript)
+                || !authority.authorizes_transcript(&transcript)
             {
                 return;
             }
-            let Some(local_roster) = authority.rosters.get(&transcript.responder_domain.zone_id)
-            else {
+            let Some(local_roster) = authority.roster(&transcript.responder_domain) else {
                 return;
             };
-            let Some(remote_roster) = authority.rosters.get(&transcript.initiator_domain.zone_id)
-            else {
+            let Some(remote_roster) = authority.roster(&transcript.initiator_domain) else {
                 return;
             };
             let Ok(session) = AuthenticatedPeerSession::establish(
@@ -658,10 +889,15 @@ async fn handle_request(
             let sender = response_sender.clone();
             contextless_spawn(async move {
                 match ack_rx.await {
-                    Ok(Ok(())) => send_response(
+                    Ok(Ok(payload)) if payload.len() <= MAX_ACK_PAYLOAD_BYTES => send_response(
                         &sender,
                         peer,
-                        encode_ack(&transcript, transcript.responder_member),
+                        encode_ack(&transcript, transcript.responder_member, &payload),
+                    ),
+                    Ok(Ok(_)) => send_response(
+                        &sender,
+                        peer,
+                        encode_error(transcript.request_id, "oversized authenticated response"),
                     ),
                     Ok(Err(error)) => {
                         send_response(&sender, peer, encode_error(transcript.request_id, &error))
@@ -675,7 +911,7 @@ async fn handle_request(
 }
 
 fn handle_response(
-    authority: Option<&InterZoneAuthoritySet>,
+    authority: &InstalledAuthority,
     local_ed25519: &PublicKey,
     signer: &PrivateKeySigner,
     peer: PublicKey,
@@ -701,19 +937,16 @@ fn handle_response(
                     != transcript_without_responder_nonce(&transcript)
                 || transcript.responder_nonce.is_zero()
                 || !transcript.validate_proof_fields(&responder_proof, true)
-                || authority.is_none_or(|authority| !authority_matches(authority, &transcript))
+                || !authority.authorizes_transcript(&transcript)
             {
                 return;
             }
             let Ok(initiator_proof) = transcript.proof(signer, false) else {
                 return;
             };
-            let Some(authority) = authority else {
-                return;
-            };
             let (Some(local_roster), Some(remote_roster)) = (
-                authority.rosters.get(&transcript.initiator_domain.zone_id),
-                authority.rosters.get(&transcript.responder_domain.zone_id),
+                authority.roster(&transcript.initiator_domain),
+                authority.roster(&transcript.responder_domain),
             ) else {
                 return;
             };
@@ -746,7 +979,8 @@ fn handle_response(
             }
         }
         ACK_TAG => {
-            let Ok((request_id, stream, sequence, member)) = decode_ack(&bytes) else {
+            let Ok((request_id, stream, sequence, member, response_payload)) = decode_ack(&bytes)
+            else {
                 return;
             };
             let Some(pending) = outbound.remove(&request_id) else {
@@ -770,6 +1004,7 @@ fn handle_response(
                 remote_domain: transcript.responder_domain,
                 stream,
                 sequence,
+                response_payload,
             }));
         }
         ERROR_TAG => {
@@ -784,24 +1019,6 @@ fn handle_response(
         }
         _ => {}
     }
-}
-
-fn authority_matches(authority: &InterZoneAuthoritySet, transcript: &Transcript) -> bool {
-    authority
-        .peers
-        .get(&transcript.initiator_ed25519)
-        .is_some_and(|peer| {
-            peer.domain == transcript.initiator_domain
-                && peer.certificate_member == transcript.initiator_member
-        })
-        && authority
-            .peers
-            .get(&transcript.responder_ed25519)
-            .is_some_and(|peer| {
-                peer.domain == transcript.responder_domain
-                    && peer.certificate_member == transcript.responder_member
-            })
-        && transcript.initiator_domain.zone_id != transcript.responder_domain.zone_id
 }
 
 fn transcript_without_responder_nonce(transcript: &Transcript) -> Vec<u8> {
@@ -898,22 +1115,24 @@ fn decode_delivery(
     Ok((transcript, initiator, responder, payload))
 }
 
-fn encode_ack(transcript: &Transcript, member: Address) -> Vec<u8> {
+fn encode_ack(transcript: &Transcript, member: Address, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![WIRE_VERSION, ACK_TAG];
     out.extend_from_slice(transcript.request_id.as_slice());
     out.extend_from_slice(&transcript.stream.to_be_bytes());
     out.extend_from_slice(&transcript.sequence.to_be_bytes());
     out.extend_from_slice(member.as_slice());
+    put_bytes(&mut out, payload);
     out
 }
 
-fn decode_ack(bytes: &[u8]) -> Result<(B256, u64, u64, Address), ()> {
+fn decode_ack(bytes: &[u8]) -> Result<(B256, u64, u64, Address, Vec<u8>), ()> {
     let mut reader = WireReader::new(bytes, ACK_TAG)?;
     let value = (
         reader.b256()?,
         reader.u64()?,
         reader.u64()?,
         reader.address()?,
+        reader.bytes(MAX_ACK_PAYLOAD_BYTES)?.to_vec(),
     );
     reader.finish()?;
     Ok(value)
@@ -1073,7 +1292,6 @@ fn decode_public_key(bytes: &[u8]) -> Result<PublicKey, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::Signer as _;
 
     fn domain(zone_id: u32) -> ZoneDomain {
         ZoneDomain {
@@ -1138,6 +1356,26 @@ mod tests {
         let mut trailing = encoded;
         trailing.push(0);
         assert!(decode_delivery(&trailing).is_err());
+    }
+
+    #[test]
+    fn acknowledgment_response_is_bounded_and_exact() {
+        let transcript = transcript();
+        let member = transcript.responder_member;
+        let payload = vec![0xabu8; 65];
+        let encoded = encode_ack(&transcript, member, &payload);
+        assert_eq!(
+            decode_ack(&encoded).unwrap(),
+            (
+                transcript.request_id,
+                transcript.stream,
+                transcript.sequence,
+                member,
+                payload,
+            )
+        );
+        let oversized = vec![0u8; MAX_ACK_PAYLOAD_BYTES + 1];
+        assert!(decode_ack(&encode_ack(&transcript, member, &oversized)).is_err());
     }
 
     #[test]

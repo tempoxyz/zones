@@ -6,18 +6,28 @@
 use crate::{
     ZoneEngine,
     fast_batch::FastBatchScheduler,
+    fast_drain_adapters::{
+        ProductionFastDrainConfig, assemble_production_fast_drain, complete_successor_catchup,
+        drive_successor_membership_transition, load_successor_bootstrap,
+        load_successor_checkpoint_anchor, pending_successor_catchup_target,
+        persist_successor_catchup_target,
+    },
+    fast_drain_state::{FastDrainCommitHandle, ProductionFastDrainState},
     fast_execution::CanonicalFastExecution,
-    fast_network::serve_fast_raft,
+    fast_exposure::{FastExposureRetirementResources, SourceExposureProofProvider},
+    fast_network::{serve_drain_signature_requests, serve_fast_raft},
     fast_quorum::CanonicalFastSettlementBoundary,
     fast_runtime::{
         ExactAnchorActivationRefresh, FastRuntimeConfig, ProductionCommittedTransferSource,
-        ProductionOutcomeCertification, ProductionPeerHandler, assemble_production_fast_runtime,
-        initialize_production_fast_runtime, load_fast_activation, load_fast_service_config,
-        run_replenishment_route,
+        ProductionDrainPhaseSigner, ProductionOutcomeCertification, ProductionPeerHandler,
+        assemble_production_fast_runtime, initialize_production_fast_runtime, load_fast_activation,
+        load_fast_service_config, load_finalized_next_roster, reconcile_fast_drain_closure_records,
+        resolve_fast_drain_topology, run_replenishment_route, serve_fast_drain_commit_requests,
+        verify_finalized_successor_checkpoint,
     },
     fast_service_adapters::{
         FastServiceCommonwarePort, FastServiceHandle, ZoneNativeTransactionConfig,
-        assemble_fast_service,
+        assemble_fast_service, next_roster_handoff_authority,
     },
     follower::PeerTipRegistry,
     replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
@@ -37,7 +47,8 @@ use crate::{
 };
 use alloy_chains::Chain;
 use alloy_consensus::{BlockHeader as _, TxReceipt as _};
-use alloy_eips::{BlockHashOrNumber, BlockNumberOrTag};
+use alloy_eips::{BlockHashOrNumber, BlockNumberOrTag, NumHash};
+use alloy_network::primitives::HeaderResponse as _;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
@@ -76,13 +87,14 @@ use reth_transaction_pool::{
 };
 use std::{
     num::NonZeroU32,
+    path::PathBuf,
     sync::{
         Arc, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tempo_alloy::TempoNetwork;
+use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt as _};
 use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
@@ -700,9 +712,57 @@ where
             "no Zone chain advancement mechanism configured: enable a sequencer, configure P2P, or register an external deposit consumer"
         );
 
-        let imported_tempo_anchor = ctx.node.provider().latest()?.tempo_num_hash()?;
+        let canonical_tempo_anchor = ctx.node.provider().latest()?.tempo_num_hash()?;
+        let staged_successor = self
+            .fast_runtime_config
+            .as_ref()
+            .filter(|config| config.storage.join("successor-bootstrap.bin").is_file())
+            .map(|config| {
+                let artifact = load_successor_bootstrap(&config.storage).map_err(|error| {
+                    eyre::eyre!("invalid installed successor bootstrap: {error}")
+                })?;
+                let (number, hash, last_operational) =
+                    load_successor_checkpoint_anchor(&config.storage).map_err(|error| {
+                        eyre::eyre!("invalid installed successor anchor: {error}")
+                    })?;
+                let mut pending_target = pending_successor_catchup_target(&config.storage)
+                    .map_err(|error| eyre::eyre!("invalid successor catch-up target: {error}"))?;
+                if let Some((target_number, target_hash)) = pending_target {
+                    if canonical_tempo_anchor == NumHash::new(target_number, target_hash) {
+                        complete_successor_catchup(&config.storage, target_number, target_hash)
+                            .map_err(|error| {
+                                eyre::eyre!("failed to seal successor catch-up: {error}")
+                            })?;
+                        pending_target = None;
+                    } else {
+                        eyre::ensure!(
+                            canonical_tempo_anchor.number < target_number,
+                            "successor canonical anchor advanced past an incomplete catch-up target"
+                        );
+                    }
+                }
+                Ok::<_, eyre::Report>((
+                    artifact,
+                    NumHash::new(number, hash),
+                    last_operational,
+                    pending_target,
+                ))
+            })
+            .transpose()?;
+        let imported_tempo_anchor = staged_successor
+            .as_ref()
+            .map(|(_, anchor, _, _)| *anchor)
+            .filter(|anchor| anchor.number > canonical_tempo_anchor.number)
+            .unwrap_or(canonical_tempo_anchor);
         let tempo_block_number = imported_tempo_anchor.number;
-        let last_operational_tempo_block = latest_operational_tempo_block(ctx.node.provider())?;
+        let last_operational_tempo_block = if imported_tempo_anchor != canonical_tempo_anchor {
+            staged_successor
+                .as_ref()
+                .map(|(_, _, last_operational, _)| *last_operational)
+                .expect("staged successor supplied the imported anchor")
+        } else {
+            latest_operational_tempo_block(ctx.node.provider())?
+        };
         if last_operational_tempo_block < tempo_block_number {
             self.l1_config.deferred_work_start =
                 Some(last_operational_tempo_block.saturating_add(1));
@@ -718,7 +778,9 @@ where
         let chain_spec = ctx.node.provider().chain_spec();
         let chain_id = chain_spec.genesis().config.chain_id;
         let genesis_zone_id = chain_spec.zone_id();
-        let fast_activation = if self.portal_address.is_zero() {
+        let mut successor_catchup = false;
+        let mut activation_registry_anchor = imported_tempo_anchor;
+        let mut fast_activation = if self.portal_address.is_zero() {
             None
         } else {
             load_fast_activation(
@@ -731,6 +793,67 @@ where
             )
             .await?
         };
+        if let Some((artifact, _, _, pending_target)) = staged_successor.as_ref()
+            && (pending_target.is_some()
+                || fast_activation.as_ref().is_none_or(|loaded| {
+                    loaded.activation.epoch().epoch != artifact.next_epoch
+                        || loaded.activation.epoch().roster_hash != artifact.next_roster_hash
+                }))
+        {
+            let predecessor_closure = fast_activation
+                .as_ref()
+                .filter(|loaded| {
+                    loaded.activation.epoch().epoch == artifact.old_epoch
+                        && loaded.activation.epoch().roster_hash == artifact.old_roster_hash
+                        && loaded.drain.closed
+                })
+                .map(|loaded| loaded.drain.closure_hash);
+            if pending_target.is_none() {
+                eyre::ensure!(
+                    predecessor_closure.is_some(),
+                    "installed successor prefix is not anchored in the exact closed predecessor"
+                );
+            }
+            activation_registry_anchor = match pending_target {
+                Some((number, hash)) => NumHash::new(*number, *hash),
+                None => {
+                    let finalized = l1_provider
+                        .get_header_by_number(BlockNumberOrTag::Finalized)
+                        .await?
+                        .ok_or_else(|| {
+                            eyre::eyre!("finalized Tempo header unavailable for successor catch-up")
+                        })?;
+                    let target = finalized.num_hash();
+                    let storage = &self
+                        .fast_runtime_config
+                        .as_ref()
+                        .expect("staged successor has runtime resources")
+                        .storage;
+                    persist_successor_catchup_target(storage, target.number, target.hash).map_err(
+                        |error| eyre::eyre!("failed to persist successor catch-up target: {error}"),
+                    )?;
+                    target
+                }
+            };
+            fast_activation = load_fast_activation(
+                &l1_provider,
+                self.portal_address,
+                &chain_spec,
+                activation_registry_anchor,
+                genesis_zone_id,
+                chain_id,
+            )
+            .await?;
+            let loaded = fast_activation.as_ref().ok_or_else(|| {
+                eyre::eyre!("installed successor is not activated at the finalized Tempo head")
+            })?;
+            eyre::ensure!(
+                loaded.activation.epoch().epoch == artifact.next_epoch
+                    && loaded.activation.epoch().roster_hash == artifact.next_roster_hash,
+                "finalized activated roster differs from the installed successor checkpoint"
+            );
+            successor_catchup = true;
+        }
         if fast_activation.is_some() && self.fast_runtime_config.is_none() {
             return Err(eyre::eyre!(
                 "Zone is enrolled in a finalized T14 fast epoch but local member endpoints, key, and durable storage are not configured"
@@ -1037,9 +1160,11 @@ where
             config.validate()?;
             let replenishment_routes = std::mem::take(&mut config.replenishment_routes);
             let service_resources = config.service.clone();
+            let drain_member_signer = config.signer.clone();
             let allow_initialize = loaded_activation.allow_initialize;
             let admission_open = loaded_activation.admission_open;
             let proof_policy = loaded_activation.proof_policy;
+            let initial_drain_capability = loaded_activation.drain;
             let enrolled_proof_mode = match proof_policy.mode {
                 1 => SettlementProofMode::OperatorAttested,
                 2 => SettlementProofMode::ProofRequired,
@@ -1066,9 +1191,42 @@ where
                     || settlement_prover.is_some(),
                 "proof-required fast enrollment requires an active settlement prover"
             );
-            let anchor_timestamp = loaded_activation.anchor_timestamp;
-            let anchor_timestamp_millis_part = loaded_activation.anchor_timestamp_millis_part;
+            let (anchor_timestamp, anchor_timestamp_millis_part) = if successor_catchup {
+                let checkpoint_anchor = l1_provider
+                    .get_header_by_hash(imported_tempo_anchor.hash)
+                    .await?
+                    .ok_or_else(|| {
+                        eyre::eyre!("installed checkpoint Tempo anchor is unavailable")
+                    })?;
+                eyre::ensure!(
+                    checkpoint_anchor.number() == imported_tempo_anchor.number,
+                    "installed checkpoint Tempo anchor number/hash mismatch"
+                );
+                (
+                    checkpoint_anchor.timestamp(),
+                    (checkpoint_anchor.timestamp_millis % 1_000) as u16,
+                )
+            } else {
+                (
+                    loaded_activation.anchor_timestamp,
+                    loaded_activation.anchor_timestamp_millis_part,
+                )
+            };
             let activation = loaded_activation.activation;
+            let successor_bootstrap = if verify_finalized_successor_checkpoint(
+                &l1_provider,
+                activation_registry_anchor,
+                &activation,
+                &config.storage,
+            )
+            .await?
+            {
+                Some(load_successor_bootstrap(&config.storage).map_err(|error| {
+                    eyre::eyre!("invalid installed successor bootstrap: {error}")
+                })?)
+            } else {
+                None
+            };
             eyre::ensure!(
                 proof_collector.is_some(),
                 "finalized T14 enrollment requires durable witness/prover configuration"
@@ -1093,6 +1251,82 @@ where
                 }
             };
             let commands = p2p.commands.clone();
+            let outcome_activation = activation.clone();
+            let outcome_signer = config.signer.clone();
+            let resolved_service = match service_resources.as_ref() {
+                Some(service) => Some(
+                    load_fast_service_config(
+                        &l1_provider,
+                        activation_registry_anchor,
+                        &activation,
+                        outcome_signer.address(),
+                        service,
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
+            let mut drain_rosters = Vec::with_capacity(10);
+            if let Some(service) = resolved_service.as_ref() {
+                drain_rosters.push(service.local_roster.clone());
+                drain_rosters.extend(service.routes.values().map(|route| route.roster.clone()));
+            }
+            eyre::ensure!(
+                drain_rosters.len() == 10,
+                "T14 runtime requires all ten finalized rosters for closure refresh"
+            );
+            let initial_closures = crate::fast_runtime::load_fast_drain_closures(
+                &l1_provider,
+                activation_registry_anchor,
+                &drain_rosters,
+            )
+            .await?;
+            eyre::ensure!(
+                initial_closures.local
+                    == initial_drain_capability
+                        .closed
+                        .then_some(initial_drain_capability.closure_hash),
+                "local drain closure observation does not match finalized activation"
+            );
+            let drain_service_authority = resolved_service
+                .as_ref()
+                .ok_or_else(|| eyre::eyre!("T14 drain requires the resolved C4 authority"))?;
+            let drain_routing_resources = service_resources
+                .as_ref()
+                .ok_or_else(|| eyre::eyre!("T14 drain requires explicit routing resources"))?;
+            if let Some(candidate) = drain_routing_resources.expected_candidate_roster.as_ref() {
+                let candidate_peers = candidate
+                    .peer_portals
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let enrolled_peers = drain_service_authority
+                    .routes
+                    .values()
+                    .map(|route| route.roster.domain.portal)
+                    .collect::<std::collections::BTreeSet<_>>();
+                eyre::ensure!(
+                    candidate_peers == enrolled_peers,
+                    "candidate successor peer graph differs from the finalized ten-Zone graph"
+                );
+            }
+            let next_roster = load_finalized_next_roster(
+                &drain_service_authority.local_roster,
+                initial_drain_capability,
+                drain_routing_resources.expected_candidate_roster.as_ref(),
+            )?;
+            let drain_topology = resolve_fast_drain_topology(
+                drain_service_authority,
+                &initial_closures,
+                next_roster,
+                &drain_routing_resources.next_roster_peers,
+            )?;
+            let closure_record_rosters = drain_rosters.clone();
+            let (drain_observer, drain_closures) =
+                tokio::sync::watch::channel(initial_closures.clone());
+            let (imported_anchor_observer, exposure_imported_anchor) =
+                tokio::sync::watch::channel(Some(imported_tempo_anchor));
+            let fast_service_slot = Arc::new(OnceLock::new());
             // Bind production to the same locally imported TempoState used to validate the
             // finalized registry capability above. A later local head must not splice evidence.
             let anchor = imported_tempo_anchor;
@@ -1107,7 +1341,12 @@ where
             let authority_admission = crate::fast_quorum::FastAdmissionClock::default();
             authority_admission.observe_finalized(anchor.number, anchor.hash)?;
             let authority_active = Arc::new(AtomicBool::new(true));
-            let authority_admission_open = Arc::new(AtomicBool::new(admission_open));
+            let authority_admission_open =
+                Arc::new(AtomicBool::new(admission_open && !successor_catchup));
+            let successor_predecessor = successor_bootstrap
+                .as_ref()
+                .map(|bootstrap| (bootstrap.old_epoch, bootstrap.old_roster_hash));
+            let successor_catchup_target = successor_catchup.then_some(activation_registry_anchor);
             let activation_refresh = Arc::new(ExactAnchorActivationRefresh::new(
                 l1_provider.clone(),
                 self.portal_address,
@@ -1115,7 +1354,13 @@ where
                 genesis_zone_id,
                 chain_id,
                 activation.clone(),
+                successor_predecessor,
+                successor_catchup_target,
                 proof_policy,
+                drain_rosters,
+                drain_observer,
+                imported_anchor_observer,
+                fast_service_slot.clone(),
             ));
             let execution = Arc::new(CanonicalFastExecution::open(
                 tokio::runtime::Handle::current(),
@@ -1132,25 +1377,11 @@ where
                 activation_refresh,
                 config.storage.join("execution"),
             )?);
-            let outcome_activation = activation.clone();
-            let outcome_signer = config.signer.clone();
-            let resolved_service = match service_resources.as_ref() {
-                Some(service) => Some(
-                    load_fast_service_config(
-                        &l1_provider,
-                        imported_tempo_anchor,
-                        &activation,
-                        outcome_signer.address(),
-                        service,
-                    )
-                    .await?,
-                ),
-                None => None,
-            };
             let assembled = assemble_production_fast_runtime(
                 activation,
                 proof_policy,
                 allow_initialize,
+                successor_bootstrap,
                 config,
                 &provider,
                 execution.clone(),
@@ -1158,17 +1389,94 @@ where
                 raft_ports,
             )
             .await?;
+            let closure_record_l1 = l1_provider.clone();
+            let closure_record_execution = execution.clone();
+            let closure_record_committed = assembled.runtime.committed_handle().clone();
+            let mut closure_records = drain_closures.clone();
+            task_executor.spawn_critical_task("fast-drain-closure-records", async move {
+                loop {
+                    let observation = closure_records.borrow().clone();
+                    if let Err(error) = reconcile_fast_drain_closure_records(
+                        &closure_record_l1,
+                        &closure_record_rosters,
+                        &observation,
+                        closure_record_execution.as_ref(),
+                        &closure_record_committed,
+                    )
+                    .await
+                    {
+                        warn!(target: "zone::fast", %error, "retrying canonical drain closure record projection");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    if closure_records.changed().await.is_err() {
+                        panic!("canonical drain closure observer stopped");
+                    }
+                }
+            });
+            let (drain_commit, drain_commit_requests) = FastDrainCommitHandle::channel(64);
+            let drain_state = Arc::new(ProductionFastDrainState::new(
+                assembled.runtime.committed_handle().clone(),
+                drain_commit,
+                drain_topology.drain.local_roster.clone(),
+                drain_topology.drain.next_roster.clone(),
+                drain_topology.drain.peers.clone(),
+            ));
+            let drain_signer: Arc<OnceLock<Arc<dyn crate::fast_network::DrainPhaseSigner>>> =
+                Arc::new(OnceLock::new());
+            drain_signer
+                .set(Arc::new(ProductionDrainPhaseSigner::new(
+                    drain_topology.drain.local_roster.clone(),
+                    drain_member_signer.clone(),
+                    execution.protocol_journal(),
+                    drain_state.clone(),
+                )))
+                .map_err(|_| eyre::eyre!("C5 phase signer was installed more than once"))?;
+            let commit_service = fast_service_slot.clone();
+            let commit_state = assembled.runtime.committed_handle().clone();
+            task_executor.spawn_critical_task("fast-drain-commit-producer", async move {
+                if let Err(error) = serve_fast_drain_commit_requests(
+                    drain_commit_requests,
+                    commit_service,
+                    commit_state,
+                )
+                .await
+                {
+                    panic!("fast drain commit producer stopped: {error}");
+                }
+            });
+            let (drain_signature_requests, drain_signature_receiver) =
+                tokio::sync::mpsc::channel(64);
+            let drain_signature_transport = assembled.transport.clone();
+            task_executor.spawn_critical_task("fast-drain-signatures", async move {
+                if let Err(error) = serve_drain_signature_requests(
+                    drain_signature_transport,
+                    drain_signature_receiver,
+                )
+                .await
+                {
+                    panic!("authenticated fast drain signature service stopped: {error}");
+                }
+            });
             let certification = Arc::new(ProductionOutcomeCertification::new(
                 execution.clone(),
+                assembled.runtime.committed_handle().clone(),
                 outcome_activation,
                 outcome_signer,
                 assembled.transport.clone(),
                 assembled.local_node_id,
             ));
-            let pending_service = match (resolved_service, service_resources, inter_zone_ports) {
-                (Some(config), Some(resources), Some(ports)) => Some((config, resources, ports)),
-                (None, None, None) => None,
-                _ => return Err(eyre::eyre!("incomplete C4 runtime resources")),
+            let pending_service = if successor_catchup {
+                warn!(target: "zone::fast", "successor is replaying its installed old prefix and ordered L1 catch-up; C4/C5 authority remains install-only until restart at the activated anchor");
+                None
+            } else {
+                match (resolved_service, service_resources, inter_zone_ports) {
+                    (Some(config), Some(resources), Some(ports)) => {
+                        Some((config, resources, ports))
+                    }
+                    (None, None, None) => None,
+                    _ => return Err(eyre::eyre!("incomplete C4 runtime resources")),
+                }
             };
             let batch_committed = assembled.runtime.committed_handle().clone();
             let applied_prefix = batch_committed
@@ -1277,9 +1585,11 @@ where
             let initial_membership = assembled.initial_membership;
             let needs_initialize = assembled.needs_initialize;
             let local_node_id = assembled.local_node_id;
+            let successor_storage = assembled.successor_storage.clone();
             let peer_handler = Arc::new(ProductionPeerHandler::new(
                 runtime.clone(),
                 certification.clone(),
+                drain_signer,
             ));
             task_executor.spawn_critical_task("fast-raft-network", async move {
                 if let Err(error) = serve_fast_raft(
@@ -1293,14 +1603,54 @@ where
                     panic!("authenticated fast Raft network stopped: {error}");
                 }
             });
-            initialize_production_fast_runtime(
-                runtime.as_ref(),
-                local_node_id,
-                needs_initialize,
-                initial_membership,
-            )
-            .await?;
+            if let Some(storage) = successor_storage {
+                eyre::ensure!(
+                    !needs_initialize,
+                    "installed successor checkpoint unexpectedly requires empty initialization"
+                );
+                drive_successor_membership_transition(
+                    runtime.raft.inner(),
+                    storage,
+                    local_node_id,
+                    Duration::from_secs(30),
+                )
+                .await
+                .map_err(|error| eyre::eyre!("successor membership transition failed: {error}"))?;
+            } else {
+                initialize_production_fast_runtime(
+                    runtime.as_ref(),
+                    local_node_id,
+                    needs_initialize,
+                    initial_membership,
+                )
+                .await?;
+            }
             if let Some((service_config, service_resources, inter_zone_ports)) = pending_service {
+                let drain_resources = service_resources.drain.clone();
+                let exposure_resources = service_resources.exposure.clone();
+                let drain_l1_chain_id = service_config.local_roster.domain.l1_chain_id;
+                let handoff_authority = match (
+                    drain_topology.drain.next_roster.as_ref(),
+                    drain_topology.next_roster_route.as_ref(),
+                ) {
+                    (Some(next_roster), Some(next_route)) => Some(
+                        next_roster_handoff_authority(
+                            &service_config.local_roster,
+                            &service_config.local_endpoints,
+                            next_roster,
+                            next_route,
+                        )
+                        .map_err(|error| {
+                            eyre::eyre!("invalid finalized next-roster handoff authority: {error}")
+                        })?,
+                    ),
+                    (None, None) => None,
+                    _ => {
+                        return Err(eyre::eyre!(
+                            "incomplete finalized next-roster handoff topology"
+                        ));
+                    }
+                };
                 let committed = Arc::new(ProductionCommittedTransferSource::new(
                     runtime.committed_handle().clone(),
                     certification.clone(),
@@ -1317,7 +1667,7 @@ where
                     inter_zone_ports,
                     service_resources.response_timeout,
                 )?;
-                fast_service = Some(Arc::new(
+                let service = Arc::new(
                     assemble_fast_service(
                         service_config,
                         execution.protocol_journal(),
@@ -1327,7 +1677,100 @@ where
                         pool.clone(),
                     )
                     .await?,
-                ));
+                );
+                service
+                    .apply_drain_closure_observation(initial_closures.clone())
+                    .await?;
+                if let Some(authority) = handoff_authority {
+                    service
+                        .install_next_roster_handoff_authority(authority)
+                        .await?;
+                }
+                fast_service_slot
+                    .set(service.clone())
+                    .map_err(|_| eyre::eyre!("C4 service was installed more than once"))?;
+                let drain_provider =
+                    alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                        .with_nonce_key_filler()
+                        .wallet(drain_member_signer.clone())
+                        .connect(&drain_resources.tempo_l1_rpc_endpoint)
+                        .await?
+                        .erased();
+                let assembled_drain = assemble_production_fast_drain(
+                    ProductionFastDrainConfig {
+                        drain: drain_topology.drain,
+                        journal_directory: drain_resources.journal_directory,
+                        factory: drain_resources.factory,
+                        fee_token: drain_resources.fee_token,
+                        l1_chain_id: drain_l1_chain_id,
+                        routes: drain_topology.routes,
+                        next_roster_route: drain_topology.next_roster_route,
+                        response_timeout: drain_resources.response_timeout,
+                    },
+                    drain_member_signer.clone(),
+                    drain_provider,
+                    service.drain_commonware_requests(),
+                    execution.protocol_journal(),
+                    drain_state,
+                    service.drain_native(),
+                    drain_signature_requests,
+                )
+                .await?;
+                service.install_fast_drain_incoming(assembled_drain.incoming.clone())?;
+                let (drain_shutdown, drain_shutdown_receiver) = tokio::sync::watch::channel(false);
+                let drain_driver = assembled_drain.spawn_recovery_driver(
+                    drain_resources.retry_interval,
+                    drain_closures,
+                    drain_shutdown_receiver,
+                );
+                task_executor.spawn_critical_task("fast-drain-recovery", async move {
+                    let _drain_shutdown = drain_shutdown;
+                    match drain_driver.await {
+                        Ok(Ok(())) => panic!("fast drain recovery stopped without node shutdown"),
+                        Ok(Err(error)) => panic!("fast drain recovery stopped: {error}"),
+                        Err(error) => panic!("fast drain recovery task failed: {error}"),
+                    }
+                });
+                let exposure_tempo_l1 =
+                    alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                        .connect(&exposure_resources.tempo_l1_rpc_endpoint)
+                        .await?
+                        .erased();
+                let mut exposure_sources = std::collections::BTreeMap::new();
+                for source in exposure_resources.sources {
+                    let provider = SourceExposureProofProvider::connect(
+                        source.zone_id,
+                        source.chain_id,
+                        source.portal,
+                        &source.rpc_endpoint,
+                    )
+                    .await?;
+                    eyre::ensure!(
+                        exposure_sources.insert(source.zone_id, provider).is_none(),
+                        "duplicate exposure-retirement source Zone"
+                    );
+                }
+                let exposure_service = service.clone();
+                let exposure_committed = runtime.committed_handle().clone();
+                task_executor.spawn_critical_task("fast-exposure-retirement", async move {
+                    if let Err(error) = exposure_service
+                        .run_exposure_retirement(
+                            exposure_committed,
+                            FastExposureRetirementResources {
+                                source_providers: exposure_sources,
+                                tempo_l1: exposure_tempo_l1,
+                                imported_anchor: exposure_imported_anchor,
+                                poll_interval: exposure_resources.poll_interval,
+                                rpc_timeout: exposure_resources.rpc_timeout,
+                                shutdown: tokio_util::sync::CancellationToken::new(),
+                            },
+                        )
+                        .await
+                    {
+                        panic!("fast exposure retirement stopped: {error}");
+                    }
+                });
+                fast_service = Some(service);
             }
             let replenishment_journal = execution.protocol_journal();
             let replenishment_committed = runtime.committed_handle().clone();

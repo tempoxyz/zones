@@ -3,13 +3,16 @@
 #![allow(clippy::result_large_err)] // Startup errors preserve complete OpenRaft diagnostics.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::OpenOptions,
     future::Future,
     io::Write as _,
     path::PathBuf,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -19,12 +22,12 @@ use alloy_eips::{BlockNumberOrTag, NumHash};
 use alloy_primitives::{Address, B256, b256, keccak256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::SolValue as _;
+use alloy_sol_types::{SolCall as _, SolValue as _};
 use openraft::{BasicNode, Config};
 use rand::{RngCore as _, rngs::OsRng};
-use reth_storage_api::{BlockNumReader, BlockReader};
+use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, ReceiptProvider};
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::ZonePortal;
+use tempo_zone_contracts::{ZonePortal, imported_barrier_call};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
@@ -32,29 +35,42 @@ use zone_p2p::{P2pCommand, P2pPeerId, RaftPorts, RaftRequestFrame};
 
 use crate::{
     engine::{FastActivationRefresh, FastActivationRefreshFuture, FastAuthorityRefresh},
-    fast_execution::CanonicalFastExecution,
+    fast_drain::{
+        CommittedDrainPoint, DrainClosureObservation, DrainObjectKey, DrainPeer,
+        DrainSigningPurpose, FastDrainCommittedState, FastDrainConfig,
+    },
+    fast_drain_adapters::{
+        DrainCommonwareEndpoint, DrainCommonwareRoute, SuccessorBootstrapArtifact,
+        sign_authenticated_drain_phase_handoff,
+    },
+    fast_drain_state::{FastDrainCommitRequest, LocalClosurePayload, NoNewLocksPayload},
+    fast_execution::{CanonicalFastExecution, validate_outcome_in_applied_prefix},
     fast_network::{
-        AuthenticatedRaftTransport, FastNetworkConfig, FastRaftPeerHandler, FinalizedPeerIdentity,
-        HandlerFuture, SignedOutcome,
+        AuthenticatedRaftTransport, DrainPhaseSigner, FastNetworkConfig, FastRaftPeerHandler,
+        FinalizedPeerIdentity, HandlerFuture, OutcomeSigningRequest, SignedOutcome,
     },
     fast_quorum::{
         AuthenticatedRaftPeer, FastActivation, FastRaftRuntime, FinalizedFastEpoch,
         FinalizedT14Capability, RaftCommit, assemble_fast_raft, verify_committed_certificate,
     },
     fast_raft_state_machine::{
-        CommittedStateHandle, CommittedTransferRecord, DurableStateMachineExecution,
+        CommittedProtocolKind, CommittedStateHandle, CommittedTransferRecord,
+        DurableStateMachineExecution, inspect_exact_state_image,
     },
     fast_service::{
         CommittedTransferSource, FastServiceConfig, FastServiceError, FastServiceRoute,
         PeerEndpoint, ServiceFuture,
     },
+    fast_service_adapters::FastServiceHandle,
 };
 use zone_evm::same_anchor::SameAnchorOpening;
 use zone_fast_transfer::{
     DurableJournal, EpochRoster, InventoryContribution, ProtocolLimits, QuorumVerifier,
     ReplenishmentJob, ReplenishmentWorker,
     admission::{RouteKey, ValueCaps},
+    drain::{BarrierInventory, CheckpointImage},
 };
+use zone_payload::{TempoImport, ZonePayloadAttributes};
 use zone_primitives::fast_transfer::{
     CanonicalEncode as _, CertificateBody, MAX_CERTIFICATE_BYTES, OutcomeCertificate,
     SignatureBytes, ZoneDomain, decode_exact,
@@ -79,6 +95,7 @@ pub struct LoadedFastActivation {
     pub activation: FastActivation,
     pub admission_open: bool,
     pub proof_policy: FinalizedFastProofPolicy,
+    pub drain: FinalizedFastDrainCapability,
     /// Initialization is authorized only at the exact finalized L1 block that activates the
     /// epoch. A later restart with missing Raft state is recovery and must fail closed.
     pub allow_initialize: bool,
@@ -91,6 +108,37 @@ pub struct FinalizedFastProofPolicy {
     pub mode: u8,
     pub expected_verifier_code_hash: B256,
     pub expected_verifier_config_hash: B256,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinalizedFastDrainCapability {
+    pub closed: bool,
+    pub retired: bool,
+    pub closure_hash: B256,
+    pub final_settlement_height: alloy_primitives::U256,
+    pub final_settlement_block_hash: B256,
+    pub final_settlement_withdrawal_batch_index: u64,
+    pub barriers_hash: B256,
+    pub final_settlement_hash: B256,
+    pub next_epoch: u64,
+    pub next_roster_hash: B256,
+    pub checkpoint_log_term: u64,
+    pub checkpoint_log_index: u64,
+    pub checkpoint_height: alloy_primitives::U256,
+    pub checkpoint_block_hash: B256,
+    pub checkpoint_state_root: B256,
+    pub checkpoint_hash: B256,
+}
+
+/// Explicit install-only successor authority. This is committed by the old roster's checkpoint
+/// statement before the successor exists as a native voting/token authority. Endpoint manifests
+/// are deliberately not part of this value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedCandidateRoster {
+    pub roster: EpochRoster,
+    pub threshold: u8,
+    pub proof_policy: FinalizedFastProofPolicy,
+    pub peer_portals: [Address; 9],
 }
 
 const FAST_EPOCH_CONFIG_WORDS: usize = 27;
@@ -111,6 +159,20 @@ struct FinalizedPortalEpochConfig {
     peers_hash: B256,
     expected_verifier_code_hash: B256,
     expected_verifier_config_hash: B256,
+    closure_hash: B256,
+    final_settlement_height: alloy_primitives::U256,
+    final_settlement_block_hash: B256,
+    final_settlement_withdrawal_batch_index: u64,
+    barriers_hash: B256,
+    final_settlement_hash: B256,
+    next_epoch: u64,
+    next_roster_hash: B256,
+    checkpoint_log_term: u64,
+    checkpoint_log_index: u64,
+    checkpoint_height: alloy_primitives::U256,
+    checkpoint_block_hash: B256,
+    checkpoint_state_root: B256,
+    checkpoint_hash: B256,
 }
 
 /// Exact-anchor lifecycle validator installed into the production engine. A changed roster/epoch
@@ -122,7 +184,13 @@ pub struct ExactAnchorActivationRefresh {
     zone_id: u32,
     zone_chain_id: u64,
     expected: FastActivation,
+    successor_predecessor: Option<(u64, B256)>,
+    successor_catchup_target: Option<NumHash>,
     expected_proof_policy: FinalizedFastProofPolicy,
+    drain_rosters: Vec<EpochRoster>,
+    drain_observer: tokio::sync::watch::Sender<DrainClosureObservation>,
+    imported_anchor_observer: tokio::sync::watch::Sender<Option<NumHash>>,
+    fast_service: Arc<OnceLock<Arc<FastServiceHandle>>>,
 }
 
 impl ExactAnchorActivationRefresh {
@@ -133,7 +201,13 @@ impl ExactAnchorActivationRefresh {
         zone_id: u32,
         zone_chain_id: u64,
         expected: FastActivation,
+        successor_predecessor: Option<(u64, B256)>,
+        successor_catchup_target: Option<NumHash>,
         expected_proof_policy: FinalizedFastProofPolicy,
+        drain_rosters: Vec<EpochRoster>,
+        drain_observer: tokio::sync::watch::Sender<DrainClosureObservation>,
+        imported_anchor_observer: tokio::sync::watch::Sender<Option<NumHash>>,
+        fast_service: Arc<OnceLock<Arc<FastServiceHandle>>>,
     ) -> Self {
         Self {
             l1,
@@ -142,7 +216,13 @@ impl ExactAnchorActivationRefresh {
             zone_id,
             zone_chain_id,
             expected,
+            successor_predecessor,
+            successor_catchup_target,
             expected_proof_policy,
+            drain_rosters,
+            drain_observer,
+            imported_anchor_observer,
+            fast_service,
         }
     }
 }
@@ -150,7 +230,7 @@ impl ExactAnchorActivationRefresh {
 impl FastActivationRefresh for ExactAnchorActivationRefresh {
     fn refresh(&self, anchor: NumHash) -> FastActivationRefreshFuture<'_> {
         Box::pin(async move {
-            let loaded = load_fast_activation(
+            let loaded = match load_fast_activation(
                 &self.l1,
                 self.portal_address,
                 &self.chain_spec,
@@ -159,9 +239,54 @@ impl FastActivationRefresh for ExactAnchorActivationRefresh {
                 self.zone_chain_id,
             )
             .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "T14 fast capability is inactive at the imported anchor".to_owned())?;
+            {
+                Ok(Some(loaded)) => loaded,
+                _result
+                    if self
+                        .successor_catchup_target
+                        .is_some_and(|target| anchor.number < target.number) =>
+                {
+                    let header = self
+                        .l1
+                        .get_header_by_hash(anchor.hash)
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| {
+                            "successor catch-up anchor is unavailable from Tempo".to_owned()
+                        })?;
+                    if header.number() != anchor.number || header.hash_slow() != anchor.hash {
+                        return Err("successor catch-up anchor number/hash mismatch".to_owned());
+                    }
+                    self.imported_anchor_observer.send_replace(Some(anchor));
+                    return Ok(FastAuthorityRefresh::Drain(SameAnchorOpening::v1(
+                        anchor.number,
+                        anchor.hash,
+                        header.timestamp(),
+                        (header.timestamp_millis % 1_000) as u16,
+                        self.expected.epoch().epoch,
+                    )));
+                }
+                Ok(None) => {
+                    return Err("T14 fast capability is inactive at the imported anchor".to_owned());
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             if loaded.activation.epoch() != self.expected.epoch() {
+                if self.successor_predecessor
+                    == Some((
+                        loaded.activation.epoch().epoch,
+                        loaded.activation.epoch().roster_hash,
+                    ))
+                {
+                    self.imported_anchor_observer.send_replace(Some(anchor));
+                    return Ok(FastAuthorityRefresh::Drain(SameAnchorOpening::v1(
+                        anchor.number,
+                        anchor.hash,
+                        loaded.anchor_timestamp,
+                        loaded.anchor_timestamp_millis_part,
+                        self.expected.epoch().epoch,
+                    )));
+                }
                 return Err(
                     "finalized fast epoch or roster changed; restart is required".to_owned(),
                 );
@@ -169,6 +294,32 @@ impl FastActivationRefresh for ExactAnchorActivationRefresh {
             if loaded.proof_policy != self.expected_proof_policy {
                 return Err("finalized fast proof policy changed; restart is required".to_owned());
             }
+            if let Some(target) = self.successor_catchup_target {
+                if anchor.number < target.number {
+                    self.imported_anchor_observer.send_replace(Some(anchor));
+                    return Ok(FastAuthorityRefresh::Drain(SameAnchorOpening::v1(
+                        anchor.number,
+                        anchor.hash,
+                        loaded.anchor_timestamp,
+                        loaded.anchor_timestamp_millis_part,
+                        self.expected.epoch().epoch,
+                    )));
+                }
+                if anchor.number != target.number || anchor.hash != target.hash {
+                    return Err("successor catch-up diverged from its finalized target".to_owned());
+                }
+            }
+            let closures = load_fast_drain_closures(&self.l1, anchor, &self.drain_rosters)
+                .await
+                .map_err(|error| error.to_string())?;
+            if let Some(service) = self.fast_service.get() {
+                service
+                    .apply_drain_closure_observation(closures.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            self.imported_anchor_observer.send_replace(Some(anchor));
+            self.drain_observer.send_replace(closures);
             let opening = SameAnchorOpening::v1(
                 anchor.number,
                 anchor.hash,
@@ -183,6 +334,514 @@ impl FastActivationRefresh for ExactAnchorActivationRefresh {
             })
         })
     }
+}
+
+/// Resolve local and remote closure hashes only at the exact imported anchor. The supplied
+/// rosters are finalized authority, not routing metadata; any epoch/roster mismatch fails closed.
+pub async fn load_fast_drain_closures(
+    l1: &DynProvider<TempoNetwork>,
+    imported_anchor: NumHash,
+    rosters: &[EpochRoster],
+) -> Result<DrainClosureObservation, FastRuntimeError> {
+    if rosters.len() != 10 {
+        return Err(FastRuntimeError::InvalidFinalizedPeers);
+    }
+    let block = alloy_rpc_types_eth::BlockId::hash_canonical(imported_anchor.hash);
+    let local = rosters
+        .first()
+        .ok_or(FastRuntimeError::InvalidFinalizedRoster)?;
+    let mut observation = DrainClosureObservation::default();
+    let mut portals = std::collections::BTreeSet::new();
+    for roster in rosters {
+        if roster.domain.l1_chain_id != local.domain.l1_chain_id
+            || roster.domain.protocol_version != local.domain.protocol_version
+            || !portals.insert(roster.domain.portal)
+        {
+            return Err(FastRuntimeError::InvalidFinalizedPeers);
+        }
+        let config = read_fast_epoch_config(
+            l1,
+            roster.domain.portal,
+            roster.domain.authority_epoch,
+            block,
+        )
+        .await?;
+        if config.roster_hash != roster.domain.roster_hash
+            || config.protocol_version != u32::from(roster.domain.protocol_version)
+        {
+            return Err(FastRuntimeError::InvalidFinalizedRoster);
+        }
+        if config.closed {
+            if roster.domain.portal == local.domain.portal {
+                observation.local = Some(config.closure_hash);
+            } else {
+                observation
+                    .destinations
+                    .insert(roster.domain.portal, config.closure_hash);
+            }
+        }
+    }
+    Ok(observation)
+}
+
+/// Validate the explicitly expected install-only successor against the old finalized lifecycle.
+/// The commitment is derived locally because native successor configuration does not exist until
+/// two successor members acknowledge this checkpoint. Routing endpoints are never authority.
+pub fn load_finalized_next_roster(
+    current: &EpochRoster,
+    capability: FinalizedFastDrainCapability,
+    candidate: Option<&ExpectedCandidateRoster>,
+) -> Result<Option<EpochRoster>, FastRuntimeError> {
+    let Some(candidate) = candidate else {
+        if capability.next_epoch != 0 || !capability.next_roster_hash.is_zero() {
+            return Err(FastRuntimeError::InvalidFinalizedDrainCapability);
+        }
+        return Ok(None);
+    };
+    let next = &candidate.roster;
+    if !capability.closed
+        || capability.retired
+        || candidate.threshold != 2
+        || !matches!(
+            candidate.proof_policy.mode,
+            PROOF_MODE_OPERATOR_ATTESTED | PROOF_MODE_REQUIRED
+        )
+        || candidate.proof_policy.expected_verifier_code_hash.is_zero()
+        || candidate
+            .proof_policy
+            .expected_verifier_config_hash
+            .is_zero()
+        || next.domain.l1_chain_id != current.domain.l1_chain_id
+        || next.domain.zone_id != current.domain.zone_id
+        || next.domain.chain_id != current.domain.chain_id
+        || next.domain.portal != current.domain.portal
+        || next.domain.protocol_version != current.domain.protocol_version
+        || next.domain.authority_epoch <= current.domain.authority_epoch
+        || candidate.peer_portals.iter().any(|portal| portal.is_zero())
+        || candidate
+            .peer_portals
+            .contains(&candidate.roster.domain.portal)
+        || candidate
+            .peer_portals
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != 9
+        || candidate
+            .roster
+            .members
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != 3
+    {
+        return Err(FastRuntimeError::InvalidFinalizedRoster);
+    }
+    if candidate.proof_policy.mode == PROOF_MODE_REQUIRED {
+        let prototype = keccak256(&tempo_contracts::zones::T13_ZONE_VERIFIER_RUNTIME);
+        if candidate.proof_policy.expected_verifier_code_hash == prototype
+            || candidate.proof_policy.expected_verifier_code_hash
+                == DEVELOPMENT_PROTOTYPE_VERIFIER_CODE_HASH
+        {
+            return Err(FastRuntimeError::InvalidFinalizedProofPolicy);
+        }
+    }
+    let expected = candidate_roster_hash(candidate);
+    if expected != next.domain.roster_hash {
+        return Err(FastRuntimeError::InvalidFinalizedRoster);
+    }
+    // Before installFastCheckpoint, native nextEpoch/nextRosterHash are intentionally unset. Once
+    // present, they must agree exactly; they are never required to bootstrap INSTALL-only mode.
+    if (capability.next_epoch != 0 || !capability.next_roster_hash.is_zero())
+        && (capability.next_epoch != next.domain.authority_epoch
+            || capability.next_roster_hash != next.domain.roster_hash)
+    {
+        return Err(FastRuntimeError::InvalidFinalizedDrainCapability);
+    }
+    Ok(Some(next.clone()))
+}
+
+fn candidate_roster_hash(candidate: &ExpectedCandidateRoster) -> B256 {
+    keccak256(
+        (
+            keccak256("TEMPO_ZONE_FAST_ROSTER_T14_V1"),
+            candidate.roster.domain.portal,
+            candidate.roster.domain.authority_epoch,
+            u32::from(candidate.roster.domain.protocol_version),
+            alloy_primitives::U256::from(candidate.threshold),
+            alloy_primitives::U256::from(candidate.proof_policy.mode),
+            candidate.proof_policy.expected_verifier_code_hash,
+            candidate.proof_policy.expected_verifier_config_hash,
+            candidate.roster.members.to_vec(),
+            candidate.peer_portals.to_vec(),
+        )
+            .abi_encode(),
+    )
+}
+
+pub struct ResolvedFastDrainTopology {
+    pub drain: FastDrainConfig,
+    pub routes: Vec<DrainCommonwareRoute>,
+    pub next_roster_route: Option<DrainCommonwareRoute>,
+}
+
+/// Convert the already authenticated C4 authority into C5 routing. ECDSA rosters come from the
+/// imported registry; Ed25519 values remain transport endpoints paired to those exact members.
+pub fn resolve_fast_drain_topology(
+    service: &FastServiceConfig,
+    closures: &DrainClosureObservation,
+    next_roster: Option<EpochRoster>,
+    next_peers: &[FastServicePeerConfig],
+) -> Result<ResolvedFastDrainTopology, FastRuntimeError> {
+    let mut peers = Vec::with_capacity(9);
+    let mut routes = Vec::with_capacity(9);
+    for (zone_id, route) in &service.routes {
+        peers.push(DrainPeer {
+            zone_id: *zone_id,
+            closure_hash: closures
+                .destinations
+                .get(&route.roster.domain.portal)
+                .copied()
+                .unwrap_or_default(),
+            roster: route.roster.clone(),
+        });
+        routes.push(DrainCommonwareRoute {
+            zone_id: *zone_id,
+            portal: route.roster.domain.portal,
+            endpoints: route
+                .endpoints
+                .clone()
+                .map(|endpoint| DrainCommonwareEndpoint {
+                    member: endpoint.member,
+                    identity: endpoint.ed25519,
+                }),
+        });
+    }
+    let peers: [DrainPeer; 9] = peers
+        .try_into()
+        .map_err(|_| FastRuntimeError::InvalidFinalizedPeers)?;
+    let next_roster_route = match next_roster.as_ref() {
+        Some(next)
+            if next_peers
+                .iter()
+                .all(|peer| peer.zone_id == next.domain.zone_id) =>
+        {
+            Some(DrainCommonwareRoute {
+                zone_id: next.domain.zone_id,
+                portal: next.domain.portal,
+                endpoints: service_endpoints(next_peers.to_vec(), next)?.map(|endpoint| {
+                    DrainCommonwareEndpoint {
+                        member: endpoint.member,
+                        identity: endpoint.ed25519,
+                    }
+                }),
+            })
+        }
+        Some(_) => return Err(FastRuntimeError::InvalidConfiguration),
+        None if next_peers.is_empty() => None,
+        None => return Err(FastRuntimeError::InvalidConfiguration),
+    };
+    let drain = FastDrainConfig {
+        local_roster: service.local_roster.clone(),
+        local_member: service.local_member,
+        peers,
+        next_roster,
+    };
+    drain
+        .validate()
+        .map_err(|_| FastRuntimeError::InvalidConfiguration)?;
+    Ok(ResolvedFastDrainTopology {
+        drain,
+        routes,
+        next_roster_route,
+    })
+}
+
+/// Materialize closure protocol records on every replica from the same committed full-import
+/// entry. This makes remote phase signing independent of which replica first requested a barrier.
+pub async fn reconcile_fast_drain_closure_records<P>(
+    l1: &DynProvider<TempoNetwork>,
+    rosters: &[EpochRoster],
+    observation: &DrainClosureObservation,
+    execution: &CanonicalFastExecution<P>,
+    committed: &CommittedStateHandle<CanonicalFastExecution<P>>,
+) -> Result<(), FastRuntimeError>
+where
+    P: BlockNumReader
+        + BlockReader<Block = tempo_primitives::Block>
+        + HeaderProvider<Header = tempo_primitives::TempoHeader>
+        + ReceiptProvider<Receipt = tempo_primitives::TempoReceipt>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    let local = rosters
+        .first()
+        .ok_or(FastRuntimeError::InvalidFinalizedRoster)?;
+    let identity = |kind: CommittedProtocolKind, payload: &[u8]| {
+        let mut encoded = Vec::with_capacity(payload.len() + 1);
+        encoded.push(kind as u8);
+        encoded.extend_from_slice(payload);
+        keccak256(encoded)
+    };
+    let mut required = BTreeMap::<B256, (CommittedProtocolKind, Vec<u8>)>::new();
+    if let Some(closure_hash) = observation.local {
+        let payload = bincode::serialize(&LocalClosurePayload {
+            epoch: local.domain.authority_epoch,
+            closure_hash,
+        })
+        .map_err(|error| FastRuntimeError::Provider(error.to_string()))?;
+        required.insert(
+            identity(CommittedProtocolKind::ObservedLocalClosure, &payload),
+            (CommittedProtocolKind::ObservedLocalClosure, payload),
+        );
+    }
+    for (portal, closure_hash) in &observation.destinations {
+        let destination = rosters
+            .iter()
+            .find(|roster| roster.domain.portal == *portal)
+            .ok_or(FastRuntimeError::InvalidFinalizedRoster)?;
+        let payload = bincode::serialize(&NoNewLocksPayload {
+            source_epoch: local.domain.authority_epoch,
+            destination_portal: *portal,
+            destination_epoch: destination.domain.authority_epoch,
+            closure_hash: *closure_hash,
+        })
+        .map_err(|error| FastRuntimeError::Provider(error.to_string()))?;
+        required.insert(
+            identity(CommittedProtocolKind::NoNewLocks, &payload),
+            (CommittedProtocolKind::NoNewLocks, payload),
+        );
+    }
+    for existing in committed
+        .protocol_records()
+        .map_err(|error| FastRuntimeError::Provider(error.to_string()))?
+    {
+        required.remove(&identity(existing.kind, &existing.canonical_payload));
+    }
+    if required.is_empty() {
+        return Ok(());
+    }
+    for applied in committed
+        .applied_blocks()
+        .map_err(|error| FastRuntimeError::Provider(error.to_string()))?
+    {
+        let attributes: ZonePayloadAttributes = bincode::deserialize(&applied.input.l1_inputs)
+            .map_err(|error| FastRuntimeError::Provider(error.to_string()))?;
+        let TempoImport::Full(prepared) = attributes.tempo_import else {
+            continue;
+        };
+        let at = load_fast_drain_closures(l1, prepared.header.num_hash(), rosters).await?;
+        let mut admitted = Vec::new();
+        for (payload_hash, (kind, payload)) in &required {
+            let observed = match kind {
+                CommittedProtocolKind::ObservedLocalClosure => {
+                    let decoded: LocalClosurePayload = bincode::deserialize(payload)
+                        .map_err(|error| FastRuntimeError::Provider(error.to_string()))?;
+                    at.local == Some(decoded.closure_hash)
+                }
+                CommittedProtocolKind::NoNewLocks => {
+                    let decoded: NoNewLocksPayload = bincode::deserialize(payload)
+                        .map_err(|error| FastRuntimeError::Provider(error.to_string()))?;
+                    at.destinations.get(&decoded.destination_portal) == Some(&decoded.closure_hash)
+                }
+                _ => false,
+            };
+            if observed {
+                let record = execution
+                    .imported_protocol_record(&applied, *kind, payload.clone())
+                    .map_err(|error| FastRuntimeError::Provider(error.to_string()))?;
+                committed
+                    .persist_protocol_record(record)
+                    .map_err(|error| FastRuntimeError::Provider(error.to_string()))?;
+                admitted.push(*payload_hash);
+            }
+        }
+        for identity in admitted {
+            required.remove(&identity);
+        }
+        if required.is_empty() {
+            return Ok(());
+        }
+    }
+    Err(FastRuntimeError::InvalidFinalizedDrainCapability)
+}
+
+/// Consume C5 protocol requests through the actual native submitter and exact committed image.
+pub async fn serve_fast_drain_commit_requests<P>(
+    mut requests: mpsc::Receiver<FastDrainCommitRequest>,
+    service: Arc<OnceLock<Arc<FastServiceHandle>>>,
+    committed: CommittedStateHandle<CanonicalFastExecution<P>>,
+) -> Result<(), FastRuntimeError>
+where
+    P: BlockNumReader
+        + BlockReader<Block = tempo_primitives::Block>
+        + HeaderProvider<Header = tempo_primitives::TempoHeader>
+        + ReceiptProvider<Receipt = tempo_primitives::TempoReceipt>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    while let Some(request) = requests.recv().await {
+        match request {
+            FastDrainCommitRequest::NoNewLocks {
+                canonical_payload,
+                response,
+            } => {
+                let result = loop {
+                    let records = match committed.protocol_records() {
+                        Ok(records) => records,
+                        Err(error) => break Err(error.to_string()),
+                    };
+                    let matches = records
+                        .into_iter()
+                        .filter(|record| {
+                            record.kind == CommittedProtocolKind::NoNewLocks
+                                && record.canonical_payload == canonical_payload
+                        })
+                        .collect::<Vec<_>>();
+                    match matches.as_slice() {
+                        [record] => break Ok(record.clone()),
+                        [] => tokio::time::sleep(Duration::from_millis(25)).await,
+                        _ => break Err("duplicate canonical no-new-lock records".to_owned()),
+                    }
+                };
+                let _ = response.send(result);
+            }
+            FastDrainCommitRequest::ImportedBarrier {
+                call,
+                certificate_digest,
+                canonical_inventory,
+                response,
+            } => {
+                let result = async {
+                    let inventory = BarrierInventory::decode_durable(&canonical_inventory)
+                        .map_err(|error| error.to_string())?;
+                    inventory
+                        .verify_complete()
+                        .map_err(|error| error.to_string())?;
+                    let expected_digest =
+                        inventory.statement.registry_digest(inventory.l1_chain_id);
+                    if certificate_digest != expected_digest
+                        || call.barrier_digest != expected_digest
+                        || call.complete_lock_root != inventory.statement.complete_lock_root
+                    {
+                        return Err(
+                            "full imported-barrier inventory differs from signed statement"
+                                .to_owned(),
+                        );
+                    }
+                    let decoded =
+                        tempo_zone_contracts::IFastTransfer::recordImportedBarrierCall::abi_decode(
+                            &call.calldata,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    if decoded.sourceBarrierCertificate.len()
+                        != tempo_zone_contracts::IMPORTED_BARRIER_CERTIFICATE_BYTES
+                    {
+                        return Err("invalid compact imported-barrier certificate".to_owned());
+                    }
+                    let mut signatures = [[0u8; 65]; 2];
+                    signatures[0].copy_from_slice(&decoded.sourceBarrierCertificate[33..98]);
+                    signatures[1].copy_from_slice(&decoded.sourceBarrierCertificate[98..163]);
+                    let expected_call = imported_barrier_call(
+                        &inventory.statement,
+                        certificate_digest,
+                        [SignatureBytes(signatures[0]), SignatureBytes(signatures[1])],
+                    );
+                    if call != expected_call {
+                        return Err(
+                            "compact imported-barrier call differs from retained inventory"
+                                .to_owned(),
+                        );
+                    }
+                    let service = service
+                        .get()
+                        .ok_or_else(|| "C4 native submitter is not installed".to_owned())?;
+                    let compact_calldata = call.calldata.to_vec();
+                    let mut record = service
+                        .submit_imported_barrier(
+                            &committed,
+                            call,
+                            certificate_digest,
+                            compact_calldata,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    // The native transaction is compact, while the protocol record retains the
+                    // complete validated object at that exact applied Raft coordinate. Persisting
+                    // happens in this consumer before the mpsc response is sent.
+                    record.canonical_payload = canonical_inventory;
+                    committed
+                        .persist_protocol_record(record.clone())
+                        .map_err(|error| error.to_string())?;
+                    Ok(record)
+                };
+                let result = result.await;
+                let _ = response.send(result);
+            }
+            FastDrainCommitRequest::InstallCheckpoint { image, response } => {
+                let result = (|| {
+                    image.validate().map_err(|error| error.to_string())?;
+                    let exact = committed
+                        .exact_state_image()
+                        .map_err(|error| error.to_string())?;
+                    let head = exact
+                        .blocks
+                        .last()
+                        .ok_or_else(|| "checkpoint has no committed head".to_owned())?;
+                    if image.consensus_snapshot != exact.bytes
+                        || image.statement.checkpoint_log_term != exact.last_applied.leader_id.term
+                        || image.statement.checkpoint_log_index != exact.last_applied.index
+                        || image.statement.checkpoint_height
+                            != alloy_primitives::U256::from(head.output.block_height)
+                        || image.statement.checkpoint_block_hash != head.output.block_hash
+                        || image.statement.checkpoint_state_root != head.output.state_root
+                    {
+                        return Err("checkpoint differs from exact local OpenRaft image".to_owned());
+                    }
+                    let mut imported_anchor = None;
+                    for applied in exact.blocks.iter().rev() {
+                        let attributes: ZonePayloadAttributes =
+                            bincode::deserialize(&applied.input.l1_inputs)
+                                .map_err(|error| error.to_string())?;
+                        match attributes.tempo_import {
+                            TempoImport::Full(prepared) => {
+                                imported_anchor = Some(prepared.header.num_hash());
+                                break;
+                            }
+                            TempoImport::CheckpointOnly(headers) => {
+                                if let Some(header) = headers.last() {
+                                    imported_anchor = Some(header.num_hash());
+                                    break;
+                                }
+                            }
+                            TempoImport::SameAnchor(_) => {}
+                        }
+                    }
+                    let anchor = imported_anchor
+                        .ok_or_else(|| "checkpoint has no imported L1 anchor".to_owned())?;
+                    Ok(CommittedDrainPoint {
+                        log_term: exact.last_applied.leader_id.term,
+                        log_index: exact.last_applied.index,
+                        block_height: head.output.block_height,
+                        block_hash: head.output.block_hash,
+                        state_root: head.output.state_root,
+                        imported_anchor_number: anchor.number,
+                        imported_anchor_hash: anchor.hash,
+                    })
+                })();
+                let _ = response.send(result);
+            }
+        }
+    }
+    Err(FastRuntimeError::Provider(
+        "fast drain commit request channel closed".to_owned(),
+    ))
 }
 
 /// Operator routing and local durable resources. None of these fields activates the protocol;
@@ -232,6 +891,8 @@ impl FastRuntimeConfig {
 pub struct FastServiceRuntimeConfig {
     pub l1_chain_id: u64,
     pub peers: Vec<FastServicePeerConfig>,
+    pub expected_candidate_roster: Option<ExpectedCandidateRoster>,
+    pub next_roster_peers: Vec<FastServicePeerConfig>,
     pub routes: Vec<FastServiceRouteConfig>,
     pub limits: ProtocolLimits,
     pub reserved_terminal_bytes: usize,
@@ -242,12 +903,44 @@ pub struct FastServiceRuntimeConfig {
     pub native_chain_id: u64,
     pub fee_token: Address,
     pub commit_timeout: Duration,
+    pub drain: FastDrainRuntimeConfig,
+    pub exposure: FastExposureRuntimeConfig,
+}
+
+/// Explicit provider, asset, durable-storage, and retry resources for the C5 retirement driver.
+/// Finalized Portal state remains the authority for both old and successor rosters.
+#[derive(Clone, Debug)]
+pub struct FastDrainRuntimeConfig {
+    pub tempo_l1_rpc_endpoint: String,
+    pub factory: Address,
+    pub fee_token: Address,
+    pub journal_directory: PathBuf,
+    pub response_timeout: Duration,
+    pub retry_interval: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct FastExposureRuntimeConfig {
+    pub tempo_l1_rpc_endpoint: String,
+    pub sources: Vec<FastExposureSourceRuntimeConfig>,
+    pub poll_interval: Duration,
+    pub rpc_timeout: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct FastExposureSourceRuntimeConfig {
+    pub zone_id: u32,
+    pub chain_id: u64,
+    pub portal: Address,
+    pub rpc_endpoint: String,
 }
 
 impl FastServiceRuntimeConfig {
     fn is_valid(&self) -> bool {
         self.l1_chain_id != 0
             && self.peers.len() == 30
+            && self.expected_candidate_roster.is_some() == (self.next_roster_peers.len() == 3)
+            && matches!(self.next_roster_peers.len(), 0 | 3)
             && self.routes.len() == 9
             && !self.native_rpc_endpoint.is_empty()
             && self.native_chain_id != 0
@@ -256,6 +949,22 @@ impl FastServiceRuntimeConfig {
             && !self.health_max_age.is_zero()
             && !self.response_timeout.is_zero()
             && !self.commit_timeout.is_zero()
+            && !self.drain.tempo_l1_rpc_endpoint.is_empty()
+            && self.drain.factory != Address::ZERO
+            && self.drain.fee_token != Address::ZERO
+            && !self.drain.journal_directory.as_os_str().is_empty()
+            && !self.drain.response_timeout.is_zero()
+            && !self.drain.retry_interval.is_zero()
+            && !self.exposure.tempo_l1_rpc_endpoint.is_empty()
+            && self.exposure.sources.len() == 9
+            && !self.exposure.poll_interval.is_zero()
+            && !self.exposure.rpc_timeout.is_zero()
+            && self.exposure.sources.iter().all(|source| {
+                source.zone_id != 0
+                    && source.chain_id != 0
+                    && source.portal != Address::ZERO
+                    && !source.rpc_endpoint.is_empty()
+            })
     }
 }
 
@@ -340,6 +1049,20 @@ async fn read_fast_epoch_config(
         peers_hash: B256::from_slice(word(10)),
         expected_verifier_code_hash: B256::from_slice(word(11)),
         expected_verifier_config_hash: B256::from_slice(word(12)),
+        closure_hash: B256::from_slice(word(13)),
+        final_settlement_height: alloy_primitives::U256::from_be_slice(word(14)),
+        final_settlement_block_hash: B256::from_slice(word(15)),
+        final_settlement_withdrawal_batch_index: u64_word(16)?,
+        barriers_hash: B256::from_slice(word(17)),
+        final_settlement_hash: B256::from_slice(word(18)),
+        next_epoch: u64_word(19)?,
+        next_roster_hash: B256::from_slice(word(20)),
+        checkpoint_log_term: u64_word(21)?,
+        checkpoint_log_index: u64_word(22)?,
+        checkpoint_height: alloy_primitives::U256::from_be_slice(word(23)),
+        checkpoint_block_hash: B256::from_slice(word(24)),
+        checkpoint_state_root: B256::from_slice(word(25)),
+        checkpoint_hash: B256::from_slice(word(26)),
     };
     validate_fast_epoch_policy(&config)?;
     Ok(config)
@@ -384,6 +1107,26 @@ fn validate_fast_epoch_policy(config: &FinalizedPortalEpochConfig) -> Result<(),
         {
             return Err(FastRuntimeError::InvalidFinalizedProofPolicy);
         }
+    }
+    let has_final_settlement = !config.final_settlement_hash.is_zero();
+    let has_checkpoint = !config.checkpoint_hash.is_zero();
+    if (!config.closed && !config.closure_hash.is_zero())
+        || (config.closed && config.closure_hash.is_zero())
+        || config.retired && (!config.closed || !has_final_settlement || !has_checkpoint)
+        || has_final_settlement
+            != (!config.final_settlement_height.is_zero()
+                && !config.final_settlement_block_hash.is_zero()
+                && !config.barriers_hash.is_zero())
+        || has_checkpoint
+            != (config.next_epoch != 0
+                && !config.next_roster_hash.is_zero()
+                && config.checkpoint_log_term != 0
+                && config.checkpoint_log_index != 0
+                && !config.checkpoint_height.is_zero()
+                && !config.checkpoint_block_hash.is_zero()
+                && !config.checkpoint_state_root.is_zero())
+    {
+        return Err(FastRuntimeError::InvalidFinalizedDrainCapability);
     }
     Ok(())
 }
@@ -612,6 +1355,9 @@ async fn load_remote_roster(
         return Err(FastRuntimeError::InvalidFinalizedRoster);
     }
     let config = read_fast_epoch_config(l1, portal_address, epoch, block).await?;
+    if config.next_epoch != 0 && config.next_epoch <= epoch {
+        return Err(FastRuntimeError::InvalidFinalizedDrainCapability);
+    }
     validate_enrolled_verifier(l1, portal_address, block, &config).await?;
     if config.retired
         || config.protocol_version != u32::from(protocol_version)
@@ -661,7 +1407,10 @@ async fn load_remote_roster(
     let peer_portals: [Address; 9] = peer_portals
         .try_into()
         .map_err(|_| FastRuntimeError::InvalidFinalizedPeers)?;
-    let peers = peer_portals.iter().copied().collect();
+    let peers = peer_portals
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
     let expected_peers = network_portals
         .iter()
         .copied()
@@ -797,6 +1546,9 @@ pub async fn load_fast_activation(
         .await
         .map_err(l1_error)?;
     let config = read_fast_epoch_config(l1, portal_address, epoch, block).await?;
+    if config.next_epoch != 0 && config.next_epoch <= epoch {
+        return Err(FastRuntimeError::InvalidFinalizedDrainCapability);
+    }
     validate_enrolled_verifier(l1, portal_address, block, &config).await?;
     let member_count = portal
         .fastEpochMemberCount(epoch)
@@ -875,6 +1627,24 @@ pub async fn load_fast_activation(
             expected_verifier_code_hash: config.expected_verifier_code_hash,
             expected_verifier_config_hash: config.expected_verifier_config_hash,
         },
+        drain: FinalizedFastDrainCapability {
+            closed: config.closed,
+            retired: config.retired,
+            closure_hash: config.closure_hash,
+            final_settlement_height: config.final_settlement_height,
+            final_settlement_block_hash: config.final_settlement_block_hash,
+            final_settlement_withdrawal_batch_index: config.final_settlement_withdrawal_batch_index,
+            barriers_hash: config.barriers_hash,
+            final_settlement_hash: config.final_settlement_hash,
+            next_epoch: config.next_epoch,
+            next_roster_hash: config.next_roster_hash,
+            checkpoint_log_term: config.checkpoint_log_term,
+            checkpoint_log_index: config.checkpoint_log_index,
+            checkpoint_height: config.checkpoint_height,
+            checkpoint_block_hash: config.checkpoint_block_hash,
+            checkpoint_state_root: config.checkpoint_state_root,
+            checkpoint_hash: config.checkpoint_hash,
+        },
         allow_initialize: activated_at_l1_block == imported_anchor.number,
         anchor_timestamp: anchor.timestamp(),
         anchor_timestamp_millis_part: (anchor.timestamp_millis % 1_000) as u16,
@@ -909,11 +1679,12 @@ fn persist_or_validate_enrollment(
     epoch: &FinalizedFastEpoch,
     proof_policy: FinalizedFastProofPolicy,
     may_create: bool,
+    state_present: bool,
 ) -> Result<(), FastRuntimeError> {
     let path = storage.join(ENROLLMENT_SENTINEL);
     let expected = enrollment_sentinel(epoch, proof_policy);
     match std::fs::read(&path) {
-        Ok(actual) if actual.as_slice() == expected.as_slice() && !may_create => return Ok(()),
+        Ok(actual) if actual.as_slice() == expected.as_slice() && state_present => return Ok(()),
         Ok(actual) if actual.as_slice() == expected.as_slice() => {
             return Err(FastRuntimeError::EnrollmentWithoutState(path));
         }
@@ -932,12 +1703,101 @@ fn persist_or_validate_enrollment(
     Ok(())
 }
 
+/// Verify that a nonempty prefix installed by the disjoint successor process is the exact
+/// checkpoint finalized by the predecessor epoch. The current epoch roster and the predecessor
+/// checkpoint are read at one hash-canonical imported Tempo anchor; local files supply no
+/// authority of their own.
+pub async fn verify_finalized_successor_checkpoint(
+    l1: &DynProvider<TempoNetwork>,
+    imported_anchor: NumHash,
+    activation: &FastActivation,
+    storage: &std::path::Path,
+) -> Result<bool, FastRuntimeError> {
+    let checkpoint_path = storage.join("checkpoint-image.bin");
+    if !checkpoint_path.is_file() {
+        return Ok(false);
+    }
+    let encoded = std::fs::read(&checkpoint_path)?;
+    let image = CheckpointImage::decode_durable(&encoded)
+        .map_err(|_| FastRuntimeError::InvalidSuccessorCheckpoint(storage.to_path_buf()))?;
+    image
+        .validate()
+        .map_err(|_| FastRuntimeError::InvalidSuccessorCheckpoint(storage.to_path_buf()))?;
+    let current = activation.epoch();
+    if image.l1_chain_id != current.l1_chain_id
+        || image.statement.portal != current.portal
+        || image.statement.next_epoch != current.epoch
+        || image.statement.next_roster_hash != current.roster_hash
+        || image.statement.old_epoch >= current.epoch
+    {
+        return Err(FastRuntimeError::InvalidSuccessorCheckpoint(
+            storage.to_path_buf(),
+        ));
+    }
+    let pinned = alloy_rpc_types_eth::BlockId::hash_canonical(imported_anchor.hash);
+    let predecessor =
+        read_fast_epoch_config(l1, current.portal, image.statement.old_epoch, pinned).await?;
+    let statement = &image.statement;
+    if !predecessor.closed
+        || !predecessor.retired
+        || predecessor.next_epoch != current.epoch
+        || predecessor.next_roster_hash != current.roster_hash
+        || predecessor.final_settlement_height != statement.final_zone_height
+        || predecessor.final_settlement_block_hash != statement.final_block_hash
+        || predecessor.final_settlement_withdrawal_batch_index
+            != statement.final_withdrawal_batch_index
+        || predecessor.final_settlement_hash != statement.final_settlement_hash
+        || predecessor.checkpoint_log_term != statement.checkpoint_log_term
+        || predecessor.checkpoint_log_index != statement.checkpoint_log_index
+        || predecessor.checkpoint_height != statement.checkpoint_height
+        || predecessor.checkpoint_block_hash != statement.checkpoint_block_hash
+        || predecessor.checkpoint_state_root != statement.checkpoint_state_root
+        || predecessor.checkpoint_hash != statement.registry_digest(image.l1_chain_id)
+    {
+        return Err(FastRuntimeError::InvalidSuccessorCheckpoint(
+            storage.to_path_buf(),
+        ));
+    }
+    let installed = inspect_exact_state_image(&image.consensus_snapshot)
+        .map_err(|_| FastRuntimeError::InvalidSuccessorCheckpoint(storage.to_path_buf()))?;
+    let installed_head = installed
+        .blocks
+        .last()
+        .ok_or_else(|| FastRuntimeError::InvalidSuccessorCheckpoint(storage.to_path_buf()))?;
+    if installed.last_applied.leader_id.term != statement.checkpoint_log_term
+        || installed.last_applied.index != statement.checkpoint_log_index
+        || alloy_primitives::U256::from(installed_head.output.block_height)
+            != statement.checkpoint_height
+        || installed_head.output.block_hash != statement.checkpoint_block_hash
+        || installed_head.output.state_root != statement.checkpoint_state_root
+    {
+        return Err(FastRuntimeError::InvalidSuccessorCheckpoint(
+            storage.to_path_buf(),
+        ));
+    }
+    let current = inspect_exact_state_image(&std::fs::read(
+        storage.join("state-machine/raft-state-machine.bin"),
+    )?)
+    .map_err(|_| FastRuntimeError::InvalidSuccessorCheckpoint(storage.to_path_buf()))?;
+    if current.last_applied.index < installed.last_applied.index
+        || !current.blocks.iter().any(|block| {
+            block.log_id == installed.last_applied && block.output == installed_head.output
+        })
+    {
+        return Err(FastRuntimeError::InvalidSuccessorCheckpoint(
+            storage.to_path_buf(),
+        ));
+    }
+    Ok(true)
+}
+
 /// Assemble durable stores, authenticated transport, peer handlers, and exact three-member
 /// OpenRaft membership. Existing Zone state may never silently acquire an empty Raft history.
 pub async fn assemble_production_fast_runtime<E, P>(
     activation: FastActivation,
     proof_policy: FinalizedFastProofPolicy,
     allow_initialize: bool,
+    successor_bootstrap: Option<SuccessorBootstrapArtifact>,
     config: FastRuntimeConfig,
     provider: &P,
     executor: Arc<E>,
@@ -1021,7 +1881,13 @@ where
         .validate()?,
     );
     std::fs::create_dir_all(&config.storage)?;
-    persist_or_validate_enrollment(&config.storage, epoch, proof_policy, !has_state)?;
+    persist_or_validate_enrollment(
+        &config.storage,
+        epoch,
+        proof_policy,
+        !has_state || successor_bootstrap.is_some(),
+        has_state,
+    )?;
     let transport = AuthenticatedRaftTransport::new(network_config, commands.clone(), responses)?;
     let runtime = Arc::new(
         assemble_fast_raft(
@@ -1051,6 +1917,49 @@ where
             )
         })
         .collect::<BTreeMap<_, _>>();
+    if let Some(successor) = successor_bootstrap.as_ref() {
+        let expected = membership.clone();
+        if successor.next_epoch != epoch.epoch
+            || successor.next_roster_hash != epoch.roster_hash
+            || successor.next_membership != expected
+        {
+            return Err(FastRuntimeError::InvalidSuccessorCheckpoint(
+                config.storage.clone(),
+            ));
+        }
+        let exact = runtime
+            .committed_handle()
+            .exact_state_image()
+            .map_err(|error| FastRuntimeError::CommittedState(error.to_string()))?;
+        if exact.last_applied.index < successor.accepted_prefix.index
+            || !exact
+                .blocks
+                .iter()
+                .any(|block| block.log_id == successor.accepted_prefix)
+        {
+            return Err(FastRuntimeError::InvalidSuccessorCheckpoint(
+                config.storage.clone(),
+            ));
+        }
+        let height = exact
+            .blocks
+            .last()
+            .ok_or_else(|| FastRuntimeError::InvalidSuccessorCheckpoint(config.storage.clone()))?
+            .output
+            .block_height;
+        let canonical = provider
+            .block_by_number(height)
+            .map_err(|error| FastRuntimeError::Provider(error.to_string()))?
+            .ok_or_else(|| FastRuntimeError::InvalidSuccessorCheckpoint(config.storage.clone()))?;
+        let expected_head = exact.blocks.last().expect("checked above");
+        if canonical.header.hash_slow() != expected_head.output.block_hash
+            || canonical.header.state_root() != expected_head.output.state_root
+        {
+            return Err(FastRuntimeError::InvalidSuccessorCheckpoint(
+                config.storage.clone(),
+            ));
+        }
+    }
     let needs_initialize = !runtime
         .raft
         .inner()
@@ -1066,6 +1975,7 @@ where
         epoch: epoch.epoch,
         initial_membership: membership,
         needs_initialize,
+        successor_storage: successor_bootstrap.map(|_| config.storage),
     })
 }
 
@@ -1078,6 +1988,7 @@ pub struct AssembledFastRuntime<E: DurableStateMachineExecution> {
     pub requests: mpsc::Receiver<RaftRequestFrame>,
     pub initial_membership: BTreeMap<u64, BasicNode>,
     pub needs_initialize: bool,
+    pub successor_storage: Option<PathBuf>,
 }
 
 /// Bootstrap exactly once, from finalized roster member 1, after all authenticated peer handlers
@@ -1100,18 +2011,87 @@ pub async fn initialize_production_fast_runtime<E: DurableStateMachineExecution>
 }
 
 pub trait LocalOutcomeSigner: Send + Sync + 'static {
-    fn sign_local(&self, transfer_id: B256) -> Result<SignedOutcome, String>;
+    fn sign_local(&self, request: OutcomeSigningRequest) -> Result<SignedOutcome, String>;
+}
+
+pub struct ProductionDrainPhaseSigner {
+    requester_roster: EpochRoster,
+    signing_roster: EpochRoster,
+    signer: PrivateKeySigner,
+    signing_journal: Arc<DurableJournal>,
+    committed: Arc<dyn FastDrainCommittedState>,
+}
+
+impl ProductionDrainPhaseSigner {
+    pub fn new(
+        roster: EpochRoster,
+        signer: PrivateKeySigner,
+        signing_journal: Arc<DurableJournal>,
+        committed: Arc<dyn FastDrainCommittedState>,
+    ) -> Self {
+        Self::new_handoff(roster.clone(), roster, signer, signing_journal, committed)
+    }
+
+    pub fn new_handoff(
+        requester_roster: EpochRoster,
+        signing_roster: EpochRoster,
+        signer: PrivateKeySigner,
+        signing_journal: Arc<DurableJournal>,
+        committed: Arc<dyn FastDrainCommittedState>,
+    ) -> Self {
+        Self {
+            requester_roster,
+            signing_roster,
+            signer,
+            signing_journal,
+            committed,
+        }
+    }
+}
+
+impl DrainPhaseSigner for ProductionDrainPhaseSigner {
+    fn sign(
+        &self,
+        authenticated_requester: Address,
+        purpose: DrainSigningPurpose,
+        key: &DrainObjectKey,
+        digest: B256,
+        point: CommittedDrainPoint,
+    ) -> Result<SignatureBytes, String> {
+        sign_authenticated_drain_phase_handoff(
+            authenticated_requester,
+            &self.requester_roster,
+            &self.signing_roster,
+            &self.signer,
+            self.signing_journal.as_ref(),
+            self.committed.as_ref(),
+            purpose,
+            key,
+            digest,
+            point,
+        )
+        .map_err(|error| error.to_string())
+    }
 }
 
 /// One production handler owns both consensus RPCs and the local committed-outcome signer.
 pub struct ProductionPeerHandler<E: DurableStateMachineExecution> {
     runtime: Arc<FastRaftRuntime<E>>,
     signer: Arc<dyn LocalOutcomeSigner>,
+    drain_signer: Arc<OnceLock<Arc<dyn DrainPhaseSigner>>>,
 }
 
 impl<E: DurableStateMachineExecution> ProductionPeerHandler<E> {
-    pub fn new(runtime: Arc<FastRaftRuntime<E>>, signer: Arc<dyn LocalOutcomeSigner>) -> Self {
-        Self { runtime, signer }
+    pub fn new(
+        runtime: Arc<FastRaftRuntime<E>>,
+        signer: Arc<dyn LocalOutcomeSigner>,
+        drain_signer: Arc<OnceLock<Arc<dyn DrainPhaseSigner>>>,
+    ) -> Self {
+        Self {
+            runtime,
+            signer,
+            drain_signer,
+        }
     }
 }
 
@@ -1158,19 +2138,37 @@ impl<E: DurableStateMachineExecution> FastRaftPeerHandler for ProductionPeerHand
     fn sign_outcome(
         &self,
         _peer: AuthenticatedRaftPeer,
-        transfer_id: B256,
+        request: OutcomeSigningRequest,
     ) -> HandlerFuture<'_, SignedOutcome> {
-        Box::pin(async move { self.signer.sign_local(transfer_id) })
+        Box::pin(async move { self.signer.sign_local(request) })
+    }
+
+    fn sign_drain_phase(
+        &self,
+        peer: AuthenticatedRaftPeer,
+        purpose: crate::fast_drain::DrainSigningPurpose,
+        key: crate::fast_drain::DrainObjectKey,
+        digest: B256,
+        point: crate::fast_drain::CommittedDrainPoint,
+    ) -> HandlerFuture<'_, zone_primitives::fast_transfer::SignatureBytes> {
+        Box::pin(async move {
+            self.drain_signer
+                .get()
+                .ok_or_else(|| "committed drain signing is not installed".to_owned())?
+                .sign(peer.member, purpose, &key, digest, point)
+        })
     }
 }
 
 pub struct ProductionOutcomeCertification<P> {
     execution: Arc<CanonicalFastExecution<P>>,
+    committed: CommittedStateHandle<CanonicalFastExecution<P>>,
     activation: FastActivation,
     signer: PrivateKeySigner,
     transport: AuthenticatedRaftTransport,
     local_node_id: u64,
     certification_lock: tokio::sync::Mutex<()>,
+    recovered_through: AtomicU64,
 }
 
 /// Runtime-owned committed facade used by the C4 service. Every read is fenced by the fsynced
@@ -1243,7 +2241,7 @@ where
     ) -> ServiceFuture<'a, Result<OutcomeCertificate, FastServiceError>> {
         Box::pin(async move {
             self.certification
-                .ensure_transfer_certificate(record.body.transfer_id)
+                .ensure_outcome_certificate(OutcomeSigningRequest::from(&record.body))
                 .await
                 .map_err(FastServiceError::CommittedState)
         })
@@ -1253,6 +2251,7 @@ where
 impl<P> ProductionOutcomeCertification<P> {
     pub fn new(
         execution: Arc<CanonicalFastExecution<P>>,
+        committed: CommittedStateHandle<CanonicalFastExecution<P>>,
         activation: FastActivation,
         signer: PrivateKeySigner,
         transport: AuthenticatedRaftTransport,
@@ -1260,11 +2259,13 @@ impl<P> ProductionOutcomeCertification<P> {
     ) -> Self {
         Self {
             execution,
+            committed,
             activation,
             signer,
             transport,
             local_node_id,
             certification_lock: tokio::sync::Mutex::new(()),
+            recovered_through: AtomicU64::new(0),
         }
     }
 }
@@ -1291,7 +2292,21 @@ where
             .committed_transfer(transfer_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "committed transfer is unavailable".to_owned())?;
-        if let Some(certificate) = record.certificate {
+        self.ensure_outcome_certificate(OutcomeSigningRequest::from(&record.body))
+            .await
+    }
+
+    /// Return the certificate for one exact historical outcome identity. Callers that already
+    /// read a committed record must not silently switch to a newer body for the same transfer.
+    pub async fn ensure_outcome_certificate(
+        &self,
+        request: OutcomeSigningRequest,
+    ) -> Result<OutcomeCertificate, String> {
+        let record = self
+            .execution
+            .outcome_for_signing(request)
+            .map_err(|error| error.to_string())?;
+        if let Some(certificate) = record.certificate.clone() {
             return Ok(certificate);
         }
         let commit = RaftCommit {
@@ -1307,20 +2322,31 @@ where
         };
         self.certify_commit(commit).await?;
         self.execution
-            .committed_transfer(transfer_id)
+            .outcome_for_signing(request)
             .map_err(|error| error.to_string())?
-            .and_then(|record| record.certificate)
+            .certificate
             .ok_or_else(|| "committed transfer certificate was not durably assembled".to_owned())
     }
 
     /// Recollect any certificate interrupted after commit, preserving the original term/index.
     pub async fn certify_pending(&self) -> Result<(), String> {
-        for commit in self
-            .execution
-            .uncertified_commits()
-            .map_err(|error| error.to_string())?
+        let through = self.recovered_through.load(Ordering::Acquire);
+        let applied = self
+            .committed
+            .applied_blocks()
+            .map_err(|error| error.to_string())?;
+        for entry in applied
+            .into_iter()
+            .filter(|entry| entry.log_id.index > through)
         {
+            let commit = RaftCommit {
+                term: entry.log_id.leader_id.term,
+                index: entry.log_id.index,
+                block: entry.output,
+            };
             self.certify_commit(commit).await?;
+            self.recovered_through
+                .store(entry.log_id.index, Ordering::Release);
         }
         Ok(())
     }
@@ -1337,10 +2363,19 @@ where
         + Sync
         + 'static,
 {
-    fn sign_local(&self, transfer_id: B256) -> Result<SignedOutcome, String> {
+    fn sign_local(&self, request: OutcomeSigningRequest) -> Result<SignedOutcome, String> {
+        let record = self
+            .execution
+            .outcome_for_signing(request)
+            .map_err(|error| error.to_string())?;
+        let applied = self
+            .committed
+            .applied_blocks()
+            .map_err(|error| error.to_string())?;
+        validate_outcome_in_applied_prefix(&record, &applied).map_err(|error| error.to_string())?;
         let (body, signature) = self
             .execution
-            .sign_committed_transfer(&self.activation, &self.signer, transfer_id)
+            .sign_committed_transfer(&self.activation, &self.signer, request)
             .map_err(|error| error.to_string())?;
         Ok(SignedOutcome {
             body: body.canonical_bytes(),
@@ -1363,6 +2398,18 @@ where
     fn certify_commit(&self, commit: RaftCommit) -> CertificationFuture<'_> {
         Box::pin(async move {
             let _guard = self.certification_lock.lock().await;
+            let applied = self
+                .committed
+                .applied_blocks()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|applied| {
+                    applied.log_id.leader_id.term == commit.term
+                        && applied.log_id.index == commit.index
+                })
+                .ok_or_else(|| {
+                    "certified outcome is outside the fsynced applied prefix".to_owned()
+                })?;
             let records = self
                 .execution
                 .outcomes_for_commit(commit.term, commit.index)
@@ -1386,10 +2433,18 @@ where
                 .map_err(|error| error.to_string())?,
             );
             for record in records {
-                if record.certificate.is_some() {
+                if let Some(certificate) = record.certificate {
+                    let history = self
+                        .execution
+                        .certified_execution_record(&applied, &record.intent, &certificate)
+                        .map_err(|error| error.to_string())?;
+                    self.committed
+                        .persist_certified_execution(history)
+                        .map_err(|error| error.to_string())?;
                     continue;
                 }
-                let local = self.sign_local(record.body.transfer_id)?;
+                let signing_request = OutcomeSigningRequest::from(&record.body);
+                let local = self.sign_local(signing_request)?;
                 let local_signature = signature_from_wire(&local.signature)?;
                 let mut remote_signature = None;
                 let remote_nodes = self
@@ -1404,9 +2459,9 @@ where
                 while remote_signature.is_none() && tokio::time::Instant::now() < deadline {
                     let (first, second) = tokio::join!(
                         self.transport
-                            .request_outcome_signature(remote_nodes[0], record.body.transfer_id),
+                            .request_outcome_signature(remote_nodes[0], signing_request),
                         self.transport
-                            .request_outcome_signature(remote_nodes[1], record.body.transfer_id)
+                            .request_outcome_signature(remote_nodes[1], signing_request)
                     );
                     for remote in [first, second].into_iter().flatten() {
                         if decode_exact::<CertificateBody>(&remote.body, MAX_CERTIFICATE_BYTES)
@@ -1447,8 +2502,24 @@ where
                 };
                 verify_committed_certificate(&verifier, &certificate, &record.intent, &commit)
                     .map_err(|error| error.to_string())?;
+                let history = self
+                    .execution
+                    .certified_execution_record(&applied, &record.intent, &certificate)
+                    .map_err(|error| error.to_string())?;
+                self.committed
+                    .persist_certified_execution(history)
+                    .map_err(|error| error.to_string())?;
                 self.execution
                     .persist_certificate(certificate)
+                    .map_err(|error| error.to_string())?;
+            }
+            for history in self
+                .execution
+                .authenticated_terminal_records(&applied)
+                .map_err(|error| error.to_string())?
+            {
+                self.committed
+                    .persist_certified_execution(history)
                     .map_err(|error| error.to_string())?;
             }
             Ok(())
@@ -1688,6 +2759,8 @@ pub enum FastRuntimeError {
     InvalidFinalizedEpochEncoding,
     #[error("finalized fast epoch has an invalid or unsafe proof policy")]
     InvalidFinalizedProofPolicy,
+    #[error("finalized fast epoch has an invalid drain or checkpoint capability")]
+    InvalidFinalizedDrainCapability,
     #[error("local signing key is not enrolled in the finalized epoch")]
     LocalMemberNotEnrolled,
     #[error("no authenticated manifest identity is configured for finalized member {0}")]
@@ -1696,6 +2769,8 @@ pub enum FastRuntimeError {
     MissingEnrolledStorage(PathBuf),
     #[error("fast runtime storage has only one of its durable log/state-machine files at {0}")]
     IncompleteEnrolledStorage(PathBuf),
+    #[error("installed successor checkpoint does not match finalized predecessor authority at {0}")]
+    InvalidSuccessorCheckpoint(PathBuf),
     #[error("existing fast runtime storage is missing its exact enrollment sentinel at {0}")]
     EnrollmentMissing(PathBuf),
     #[error("fast runtime enrollment sentinel conflicts with the finalized epoch at {0}")]
@@ -1740,4 +2815,117 @@ pub enum FastRuntimeError {
 
 fn l1_error(error: impl std::fmt::Display) -> FastRuntimeError {
     FastRuntimeError::L1(error.to_string())
+}
+
+#[cfg(test)]
+mod candidate_roster_tests {
+    use super::*;
+    use zone_primitives::fast_transfer::ZoneDomain;
+
+    fn old_roster() -> EpochRoster {
+        EpochRoster::from_finalized_registry(
+            ZoneDomain {
+                l1_chain_id: 1,
+                zone_id: 7,
+                chain_id: 7007,
+                portal: Address::repeat_byte(0x70),
+                authority_epoch: 4,
+                roster_hash: B256::repeat_byte(0x44),
+                protocol_version: 14,
+            },
+            [
+                Address::repeat_byte(1),
+                Address::repeat_byte(2),
+                Address::repeat_byte(3),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn candidate(old: &EpochRoster) -> ExpectedCandidateRoster {
+        let mut candidate = ExpectedCandidateRoster {
+            roster: EpochRoster::from_finalized_registry(
+                ZoneDomain {
+                    authority_epoch: 5,
+                    roster_hash: B256::repeat_byte(0xaa),
+                    ..old.domain
+                },
+                [
+                    Address::repeat_byte(4),
+                    Address::repeat_byte(5),
+                    Address::repeat_byte(6),
+                ],
+            )
+            .unwrap(),
+            threshold: 2,
+            proof_policy: FinalizedFastProofPolicy {
+                mode: PROOF_MODE_REQUIRED,
+                expected_verifier_code_hash: B256::repeat_byte(0x71),
+                expected_verifier_config_hash: B256::repeat_byte(0x72),
+            },
+            peer_portals: std::array::from_fn(|index| {
+                Address::repeat_byte(u8::try_from(index + 0x20).unwrap())
+            }),
+        };
+        candidate.roster.domain.roster_hash = candidate_roster_hash(&candidate);
+        candidate
+    }
+
+    fn closed_capability() -> FinalizedFastDrainCapability {
+        FinalizedFastDrainCapability {
+            closed: true,
+            retired: false,
+            closure_hash: B256::repeat_byte(0x10),
+            final_settlement_height: alloy_primitives::U256::from(17),
+            final_settlement_block_hash: B256::repeat_byte(0x11),
+            final_settlement_withdrawal_batch_index: 9,
+            barriers_hash: B256::repeat_byte(0x12),
+            final_settlement_hash: B256::repeat_byte(0x13),
+            next_epoch: 0,
+            next_roster_hash: B256::ZERO,
+            checkpoint_log_term: 0,
+            checkpoint_log_index: 0,
+            checkpoint_height: alloy_primitives::U256::ZERO,
+            checkpoint_block_hash: B256::ZERO,
+            checkpoint_state_root: B256::ZERO,
+            checkpoint_hash: B256::ZERO,
+        }
+    }
+
+    #[test]
+    fn disjoint_candidate_is_installable_before_native_successor_exists() {
+        let old = old_roster();
+        let next = candidate(&old);
+        assert!(
+            old.members
+                .iter()
+                .all(|member| !next.roster.members.contains(member))
+        );
+
+        let resolved = load_finalized_next_roster(&old, closed_capability(), Some(&next))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved, next.roster);
+
+        let mut installed = closed_capability();
+        installed.next_epoch = next.roster.domain.authority_epoch;
+        installed.next_roster_hash = next.roster.domain.roster_hash;
+        assert_eq!(
+            load_finalized_next_roster(&old, installed, Some(&next)).unwrap(),
+            Some(next.roster)
+        );
+    }
+
+    #[test]
+    fn candidate_commitment_or_lifecycle_mismatch_fails_closed() {
+        let old = old_roster();
+        let mut next = candidate(&old);
+        next.peer_portals[0] = Address::repeat_byte(0x7f);
+        assert!(load_finalized_next_roster(&old, closed_capability(), Some(&next)).is_err());
+
+        let next = candidate(&old);
+        let mut capability = closed_capability();
+        capability.retired = true;
+        assert!(load_finalized_next_roster(&old, capability, Some(&next)).is_err());
+    }
 }

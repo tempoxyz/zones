@@ -33,6 +33,7 @@ const MERKLE_ROOT_DOMAIN: &[u8] = b"TEMPO_ZONE_FAST_DRAIN_MERKLE_ROOT_T14_V1";
 const EMPTY_LOCK_ROOT_DOMAIN: &[u8] = b"TEMPO_ZONE_FAST_DRAIN_EMPTY_LOCKS_T14_V1";
 const BARRIERS_DOMAIN: &[u8] = b"TEMPO_ZONE_FAST_BARRIERS_T14_V1";
 const CHECKPOINT_IMAGE_DOMAIN: &[u8] = b"TEMPO_ZONE_FAST_CHECKPOINT_IMAGE_T14_V1";
+const NATIVE_BARRIER_PROOF_VERSION: u8 = 1;
 
 /// One source lock from the fsynced committed prefix.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -233,6 +234,49 @@ pub struct ProvenBarrierLock {
     pub lock: CommittedSourceLock,
     pub complete_proof: BoundedInclusionProof,
     pub unresolved: Option<(UnresolvedLock, BoundedInclusionProof)>,
+}
+
+impl ProvenBarrierLock {
+    /// Exact bounded fourth argument for native `resolve`. This format is shared with the T14
+    /// precompile decoder and binds the inclusion path to the signed full barrier statement.
+    pub fn native_barrier_proof(
+        &self,
+        l1_chain_id: u64,
+        statement: &FastBarrierStatement,
+    ) -> Result<Vec<u8>, DrainError> {
+        if l1_chain_id == 0
+            || self.complete_proof.leaf_count == 0
+            || self.complete_proof.siblings.len() > MAX_DRAIN_PROOF_DEPTH
+            || self.lock.intent.source.portal != statement.source_portal
+            || self.lock.intent.source.authority_epoch != statement.source_epoch
+            || self.lock.intent.destination.portal != statement.destination_portal
+            || self.lock.intent.destination.authority_epoch != statement.destination_epoch
+            || self.lock.lock.body.log_index > statement.lock_log_watermark
+        {
+            return Err(DrainError::InvalidProof);
+        }
+        self.complete_proof
+            .verify(self.lock.leaf(), statement.complete_lock_root)?;
+        let mut out = Vec::with_capacity(250 + self.complete_proof.siblings.len() * 32);
+        out.push(NATIVE_BARRIER_PROOF_VERSION);
+        out.extend_from_slice(statement.destination_portal.as_slice());
+        out.extend_from_slice(&statement.destination_epoch.to_be_bytes());
+        out.extend_from_slice(statement.closure_hash.as_slice());
+        out.extend_from_slice(statement.source_portal.as_slice());
+        out.extend_from_slice(&statement.source_epoch.to_be_bytes());
+        out.extend_from_slice(&statement.imported_anchor_number.to_be_bytes());
+        out.extend_from_slice(statement.imported_anchor_hash.as_slice());
+        out.extend_from_slice(statement.registry_digest(l1_chain_id).as_slice());
+        out.extend_from_slice(&statement.lock_log_watermark.to_be_bytes());
+        out.extend_from_slice(statement.complete_lock_root.as_slice());
+        out.extend_from_slice(&self.complete_proof.leaf_index.to_be_bytes());
+        out.extend_from_slice(&self.complete_proof.leaf_count.to_be_bytes());
+        out.push(self.complete_proof.siblings.len() as u8);
+        for sibling in &self.complete_proof.siblings {
+            out.extend_from_slice(sibling.as_slice());
+        }
+        Ok(out)
+    }
 }
 
 /// Source-produced full barrier inventory.  Sending the full bounded list lets a destination
@@ -775,12 +819,15 @@ impl CheckpointImage {
             || self.statement.checkpoint_log_index == 0
             || self.statement.checkpoint_block_hash.is_zero()
             || self.statement.checkpoint_state_root.is_zero()
+            || self.statement.checkpoint_height != self.statement.final_zone_height
+            || self.statement.checkpoint_block_hash != self.statement.final_block_hash
             || self.canonical_head_hash != self.statement.checkpoint_block_hash
             || self.canonical_state_root != self.statement.checkpoint_state_root
             || self.witness_root.is_zero()
             || self.outcomes_root.is_zero()
             || self.replay_barriers_root.is_zero()
             || self.raft_prefix.is_empty()
+            || self.raft_prefix.last() != Some(&self.canonical_head_hash)
             || self.raft_prefix.len() > MAX_CHECKPOINT_REPLAY_BLOCKS
             || self.raft_prefix.iter().any(B256::is_zero)
             || self.transfer_history.is_empty()
@@ -1470,6 +1517,17 @@ mod tests {
         assert_eq!(
             BarrierInventory::decode_durable(&barrier_bytes).expect("decode barrier"),
             barrier
+        );
+        let native_proof = barrier.locks[0]
+            .native_barrier_proof(barrier.l1_chain_id, &barrier.statement)
+            .expect("encode native fourth argument");
+        assert_eq!(native_proof[0], NATIVE_BARRIER_PROOF_VERSION);
+        assert_eq!(
+            &native_proof[129..161],
+            barrier
+                .statement
+                .registry_digest(barrier.l1_chain_id)
+                .as_slice()
         );
 
         let terminals = BTreeMap::from([(transfer_id, terminal(&source_lock, 20))]);

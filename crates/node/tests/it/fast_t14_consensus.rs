@@ -398,9 +398,9 @@ impl Cluster {
         for id in 1..=3 {
             cluster.start(id).await.unwrap();
         }
-        let membership = (1..=3)
+        let membership = (1_u64..=3)
             .map(|id| (id, BasicNode::new(format!("memory://replica-{id}"))))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
         cluster
             .node(1)
             .raft
@@ -986,12 +986,10 @@ async fn certification_requires_committed_replay_and_two_matching_durable_signer
     };
     assert_eq!(
         verify_committed_certificate(&verifier, &certificate, &transfer, &commit).unwrap(),
-        signer_ids
-            .iter()
-            .map(|id| cluster.signers[(*id - 1) as usize].address())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
+        [
+            cluster.signers[(signer_ids[0] - 1) as usize].address(),
+            cluster.signers[(signer_ids[1] - 1) as usize].address(),
+        ]
     );
 
     let duplicate = OutcomeCertificate {

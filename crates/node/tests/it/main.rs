@@ -11,6 +11,7 @@ mod fast_quorum_recovery;
 mod fast_t14_anchor;
 mod fast_t14_consensus;
 mod fast_t14_e2e;
+mod fast_t14_independent;
 mod handoff_e2e;
 mod hardfork_e2e;
 mod hardfork_settlement_e2e;

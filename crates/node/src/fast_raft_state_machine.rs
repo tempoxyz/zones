@@ -15,6 +15,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use alloy_consensus::{Transaction as _, transaction::TxHashRef as _};
+use alloy_eips::eip2718::Decodable2718 as _;
 use alloy_primitives::{B256, keccak256};
 use openraft::{
     BasicNode, Entry, EntryPayload, ErrorSubject, ErrorVerb, LogId, RaftSnapshotBuilder, Snapshot,
@@ -66,6 +68,7 @@ pub enum CommittedProtocolKind {
     NoNewLocks,
     ImportedBarrier,
     InstalledCheckpoint,
+    ObservedLocalClosure,
 }
 
 /// Canonical protocol-native transaction result retained at its committed Raft coordinate.
@@ -83,6 +86,19 @@ pub struct CommittedProtocolRecord {
 }
 
 impl CommittedProtocolRecord {
+    fn immutable_identity(&self) -> (LogId<u64>, CommittedProtocolKind, B256) {
+        (self.log_id, self.kind, keccak256(&self.canonical_payload))
+    }
+
+    fn sort_key(&self) -> (u64, u64, u8, B256) {
+        (
+            self.log_id.index,
+            self.log_id.leader_id.term,
+            self.kind as u8,
+            keccak256(&self.canonical_payload),
+        )
+    }
+
     fn validate_against(&self, blocks: &[AppliedBlock]) -> io::Result<()> {
         let Some(applied) = blocks.iter().find(|block| block.log_id == self.log_id) else {
             return Err(invalid_data(
@@ -100,6 +116,21 @@ impl CommittedProtocolRecord {
         {
             return Err(invalid_data(
                 "protocol record does not match its applied block",
+            ));
+        }
+        let transaction_matches = applied.input.transactions.iter().any(|encoded| {
+            let mut bytes = encoded.as_ref();
+            tempo_primitives::TempoTxEnvelope::decode_2718(&mut bytes)
+                .ok()
+                .filter(|_| bytes.is_empty())
+                .is_some_and(|transaction| {
+                    *transaction.tx_hash() == self.transaction_hash
+                        && transaction.input().as_ref() == self.native_calldata
+                })
+        });
+        if !transaction_matches {
+            return Err(invalid_data(
+                "protocol record transaction/calldata is absent from its applied block",
             ));
         }
         Ok(())
@@ -137,6 +168,21 @@ impl CertifiedExecutionRecord {
                 "certified execution record does not match its applied block",
             ));
         }
+        let transaction_matches = applied.input.transactions.iter().any(|encoded| {
+            let mut bytes = encoded.as_ref();
+            tempo_primitives::TempoTxEnvelope::decode_2718(&mut bytes)
+                .ok()
+                .filter(|_| bytes.is_empty())
+                .is_some_and(|transaction| {
+                    *transaction.tx_hash() == self.transaction_hash
+                        && transaction.input().as_ref() == self.native_calldata
+                })
+        });
+        if !transaction_matches {
+            return Err(invalid_data(
+                "certified execution transaction/calldata is absent from its applied block",
+            ));
+        }
         Ok(())
     }
 }
@@ -157,6 +203,37 @@ pub struct ExactStateImage {
     pub installed_checkpoint_hash: Option<B256>,
 }
 
+/// Strictly decode the exact OpenRaft snapshot bytes without starting an executor. This is used by
+/// a disjoint next-roster staging process to validate and fsync the accepted old prefix before it
+/// is allowed to acknowledge the handoff.
+pub fn inspect_exact_state_image(bytes: &[u8]) -> io::Result<ExactStateImage> {
+    let state = decode_image(bytes)?;
+    validate(&state)?;
+    let last_applied = state
+        .last_applied
+        .ok_or_else(|| invalid_data("checkpoint snapshot has no applied prefix"))?;
+    if state.blocks.is_empty() || state.membership.membership().voter_ids().count() != 3 {
+        return Err(invalid_data(
+            "checkpoint snapshot lacks blocks or exact three-member membership",
+        ));
+    }
+    let canonical = encode_image(&state)?;
+    if canonical != bytes {
+        return Err(invalid_data("checkpoint snapshot is not canonical"));
+    }
+    Ok(ExactStateImage {
+        checksum: keccak256(bytes),
+        bytes: bytes.to_vec(),
+        last_applied,
+        membership: state.membership,
+        blocks: state.blocks,
+        certified_history: state.certified_history,
+        checkpoint_resources: state.checkpoint_resources,
+        protocol_records: state.protocol_records,
+        installed_checkpoint_hash: state.installed_checkpoint_hash,
+    })
+}
+
 /// Exact non-consensus resources required to resume the committed head.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointResourceImage {
@@ -164,6 +241,7 @@ pub struct CheckpointResourceImage {
     pub imported_anchor_number: u64,
     pub imported_anchor_hash: B256,
     pub withdrawal_batch_index: u64,
+    pub local_closure_hash: B256,
     pub final_settlement_hash: B256,
     pub service_protocol_journal: Vec<u8>,
     pub drain_barriers: Vec<u8>,
@@ -180,7 +258,7 @@ impl CheckpointResourceImage {
         };
         if self.at != head.log_id
             || self.imported_anchor_hash.is_zero()
-            || self.final_settlement_hash.is_zero()
+            || self.local_closure_hash.is_zero()
             || self.service_protocol_journal.is_empty()
             || self.drain_barriers.is_empty()
             || self.canonical_batch_boundary.is_empty()
@@ -219,6 +297,13 @@ struct StateImage {
     checkpoint_resources: Option<CheckpointResourceImage>,
     protocol_records: Vec<CommittedProtocolRecord>,
     installed_checkpoint_hash: Option<B256>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+struct LegacyStateImageV1 {
+    last_applied: Option<LogId<u64>>,
+    membership: StoredMembership<u64, BasicNode>,
+    blocks: Vec<AppliedBlock>,
 }
 
 /// Node execution boundary required by the durable Raft state machine.
@@ -375,6 +460,40 @@ impl<E: DurableStateMachineExecution> CommittedStateHandle<E> {
         Ok(true)
     }
 
+    /// Seal a previously-published resource image with the finalized on-chain settlement hash.
+    /// This is the only permitted same-coordinate mutation and is one-way from zero to exact.
+    pub fn finalize_checkpoint_resources(
+        &self,
+        settlement_hash: B256,
+    ) -> Result<bool, CommittedReadError<E::Error>> {
+        if settlement_hash.is_zero() {
+            return Err(CommittedReadError::ConflictingResources);
+        }
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| CommittedReadError::Poisoned)?;
+        let resources = guard
+            .checkpoint_resources
+            .as_ref()
+            .ok_or(CommittedReadError::ConflictingResources)?;
+        if resources.final_settlement_hash == settlement_hash {
+            return Ok(false);
+        }
+        if !resources.final_settlement_hash.is_zero() {
+            return Err(CommittedReadError::ConflictingResources);
+        }
+        let mut next = guard.clone();
+        next.checkpoint_resources
+            .as_mut()
+            .expect("checked above")
+            .final_settlement_hash = settlement_hash;
+        validate(&next).map_err(CommittedReadError::InvalidImage)?;
+        persist(&self.directory, &next).map_err(CommittedReadError::InvalidImage)?;
+        *guard = next;
+        Ok(true)
+    }
+
     /// Fsync one immutable protocol-native transaction record after same-Raft commitment.
     pub fn persist_protocol_record(
         &self,
@@ -387,11 +506,11 @@ impl<E: DurableStateMachineExecution> CommittedStateHandle<E> {
         record
             .validate_against(&guard.blocks)
             .map_err(CommittedReadError::InvalidImage)?;
-        let identity = (record.log_id, record.kind);
+        let identity = record.immutable_identity();
         if let Some(existing) = guard
             .protocol_records
             .iter()
-            .find(|entry| (entry.log_id, entry.kind) == identity)
+            .find(|entry| entry.immutable_identity() == identity)
         {
             return if existing == &record {
                 Ok(false)
@@ -401,13 +520,8 @@ impl<E: DurableStateMachineExecution> CommittedStateHandle<E> {
         }
         let mut next = guard.clone();
         next.protocol_records.push(record);
-        next.protocol_records.sort_by_key(|entry| {
-            (
-                entry.log_id.index,
-                entry.log_id.leader_id.term,
-                entry.kind as u8,
-            )
-        });
+        next.protocol_records
+            .sort_by_key(CommittedProtocolRecord::sort_key);
         validate(&next).map_err(CommittedReadError::InvalidImage)?;
         persist(&self.directory, &next).map_err(CommittedReadError::InvalidImage)?;
         *guard = next;
@@ -705,13 +819,9 @@ impl<E: DurableStateMachineExecution> DurableRaftStateMachine<E> {
                     state.protocol_records.push(record.clone());
                 }
             }
-            state.protocol_records.sort_by_key(|entry| {
-                (
-                    entry.log_id.index,
-                    entry.log_id.leader_id.term,
-                    entry.kind as u8,
-                )
-            });
+            state
+                .protocol_records
+                .sort_by_key(CommittedProtocolRecord::sort_key);
             state.certified_history.sort_by_key(|entry| {
                 (
                     entry.log_id.index,
@@ -933,11 +1043,7 @@ fn validate(state: &StateImage) -> io::Result<()> {
     let mut previous_protocol = None;
     for record in &state.protocol_records {
         record.validate_against(&state.blocks)?;
-        let identity = (
-            record.log_id.index,
-            record.log_id.leader_id.term,
-            record.kind as u8,
-        );
+        let identity = record.sort_key();
         if previous_protocol.is_some_and(|previous| previous >= identity) {
             return Err(invalid_data(
                 "committed protocol records are duplicated or non-canonical",
@@ -985,7 +1091,7 @@ fn decode_image(bytes: &[u8]) -> io::Result<StateImage> {
         return Err(invalid_data("invalid Raft state-machine image magic"));
     }
     let version = u32::from_be_bytes(bytes[8..12].try_into().expect("fixed header"));
-    if version != IMAGE_VERSION {
+    if !matches!(version, 1 | IMAGE_VERSION) {
         return Err(invalid_data("unsupported Raft state-machine image version"));
     }
     let length = usize::try_from(u64::from_be_bytes(
@@ -999,7 +1105,20 @@ fn decode_image(bytes: &[u8]) -> io::Result<StateImage> {
     if keccak256(payload).as_slice() != &bytes[20..52] {
         return Err(invalid_data("Raft state-machine checksum mismatch"));
     }
-    bincode::deserialize(payload).map_err(invalid_data)
+    if version == 1 {
+        let legacy: LegacyStateImageV1 = bincode::deserialize(payload).map_err(invalid_data)?;
+        Ok(StateImage {
+            last_applied: legacy.last_applied,
+            membership: legacy.membership,
+            blocks: legacy.blocks,
+            certified_history: Vec::new(),
+            checkpoint_resources: None,
+            protocol_records: Vec::new(),
+            installed_checkpoint_hash: None,
+        })
+    } else {
+        bincode::deserialize(payload).map_err(invalid_data)
+    }
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -1024,4 +1143,140 @@ fn snapshot_write_error(error: io::Error) -> StorageError<u64> {
 
 fn snapshot_read_error(error: io::Error) -> StorageError<u64> {
     storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{Signed, TxLegacy};
+    use alloy_eips::eip2718::Encodable2718 as _;
+    use alloy_primitives::{B256, Bytes, U256};
+    use openraft::CommittedLeaderId;
+
+    fn applied(index: u64, witness: u8) -> AppliedBlock {
+        let transaction = tempo_primitives::TempoTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                chain_id: Some(1),
+                nonce: index,
+                gas_price: 0,
+                gas_limit: 100_000,
+                to: alloy_primitives::Address::repeat_byte(7).into(),
+                value: U256::ZERO,
+                input: Bytes::from(vec![3]),
+            },
+            tempo_primitives::transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
+        ));
+        let input = ReplicatedBlockInput {
+            epoch: 7,
+            parent_hash: B256::repeat_byte(1),
+            block_input: Bytes::from(vec![2]),
+            transactions: vec![transaction.encoded_2718().into()],
+            l1_inputs: Bytes::from(vec![4]),
+            replay_witness: Bytes::from(vec![witness]),
+        };
+        AppliedBlock {
+            log_id: LogId::new(CommittedLeaderId::new(2, 1), index),
+            output: CommittedBlock {
+                input_digest: input.digest(),
+                block_height: 100 + index,
+                block_hash: B256::repeat_byte(index as u8),
+                state_root: B256::repeat_byte(index as u8 + 20),
+                receipts_root: B256::repeat_byte(index as u8 + 40),
+            },
+            input,
+        }
+    }
+
+    fn history(block: &AppliedBlock) -> CertifiedExecutionRecord {
+        let mut encoded = block.input.transactions[0].as_ref();
+        let transaction = tempo_primitives::TempoTxEnvelope::decode_2718(&mut encoded).unwrap();
+        CertifiedExecutionRecord {
+            transfer_id: B256::repeat_byte(9),
+            log_id: block.log_id,
+            block_height: block.output.block_height,
+            block_hash: block.output.block_hash,
+            state_root: block.output.state_root,
+            transaction_hash: *transaction.tx_hash(),
+            canonical_intent: vec![1],
+            canonical_certificate: vec![2],
+            native_calldata: transaction.input().to_vec(),
+            canonical_receipt: vec![4],
+            replay_witness: block.input.replay_witness.to_vec(),
+        }
+    }
+
+    fn protocol(block: &AppliedBlock, payload: u8) -> CommittedProtocolRecord {
+        let mut encoded = block.input.transactions[0].as_ref();
+        let transaction = tempo_primitives::TempoTxEnvelope::decode_2718(&mut encoded).unwrap();
+        CommittedProtocolRecord {
+            log_id: block.log_id,
+            block_height: block.output.block_height,
+            block_hash: block.output.block_hash,
+            state_root: block.output.state_root,
+            transaction_hash: *transaction.tx_hash(),
+            kind: CommittedProtocolKind::NoNewLocks,
+            canonical_payload: vec![payload],
+            native_calldata: transaction.input().to_vec(),
+            canonical_receipt: vec![4],
+        }
+    }
+
+    #[test]
+    fn certified_lock_history_survives_later_disposition_and_image_restart() {
+        let first = applied(1, 31);
+        let second = applied(2, 32);
+        let state = StateImage {
+            last_applied: Some(second.log_id),
+            blocks: vec![first.clone(), second.clone()],
+            certified_history: vec![history(&first), history(&second)],
+            ..StateImage::default()
+        };
+        validate(&state).unwrap();
+        let recovered = decode_image(&encode_image(&state).unwrap()).unwrap();
+        assert_eq!(recovered.certified_history, state.certified_history);
+        assert_eq!(recovered.certified_history[0].log_id, first.log_id);
+        assert_eq!(recovered.certified_history[1].log_id, second.log_id);
+    }
+
+    #[test]
+    fn state_image_rejects_checksum_gap_witness_and_root_mismatch() {
+        let block = applied(3, 51);
+        let valid = StateImage {
+            last_applied: Some(block.log_id),
+            blocks: vec![block.clone()],
+            certified_history: vec![history(&block)],
+            ..StateImage::default()
+        };
+        let mut corrupt = encode_image(&valid).unwrap();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(decode_image(&corrupt).is_err());
+
+        let mut gap = valid.clone();
+        gap.certified_history[0].log_id.index += 1;
+        assert!(validate(&gap).is_err());
+
+        let mut witness = valid.clone();
+        witness.certified_history[0].replay_witness[0] ^= 1;
+        assert!(validate(&witness).is_err());
+
+        let mut root = valid;
+        root.certified_history[0].state_root = B256::repeat_byte(99);
+        assert!(validate(&root).is_err());
+    }
+
+    #[test]
+    fn one_import_entry_retains_multiple_destination_closures() {
+        let block = applied(4, 61);
+        let mut records = vec![protocol(&block, 2), protocol(&block, 1)];
+        records.sort_by_key(CommittedProtocolRecord::sort_key);
+        let state = StateImage {
+            last_applied: Some(block.log_id),
+            blocks: vec![block],
+            protocol_records: records,
+            ..StateImage::default()
+        };
+        validate(&state).unwrap();
+        let recovered = decode_image(&encode_image(&state).unwrap()).unwrap();
+        assert_eq!(recovered.protocol_records, state.protocol_records);
+    }
 }

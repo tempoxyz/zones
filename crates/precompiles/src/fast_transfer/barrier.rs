@@ -240,6 +240,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::U256;
     use std::collections::{BTreeMap, BTreeSet};
     use zone_fast_transfer::drain::{BarrierInventory, CommittedSourceLock};
     use zone_primitives::fast_transfer::{
@@ -279,8 +280,8 @@ mod tests {
             refund_account: Address::repeat_byte(4),
             destination_pool: Address::repeat_byte(9),
             reimbursement_account: Address::repeat_byte(10),
-            principal: 4u64.into(),
-            fee: 1u64.into(),
+            principal: U256::from_limbs([4, 0, 0, 0]),
+            fee: U256::from_limbs([1, 0, 0, 0]),
             quote_id: B256::repeat_byte(10),
             destination_expiry_height: 100,
             transfer_nonce: 11,
@@ -290,9 +291,8 @@ mod tests {
                 transfer_id: intent.transfer_id(),
                 intent_hash: intent.intent_hash(),
                 outcome: TransferOutcome::Locked {
-                    token: Address::repeat_byte(3),
-                    sender: Address::repeat_byte(4),
-                    total: 5,
+                    escrow: Address::repeat_byte(14),
+                    amount: U256::from_limbs([5, 0, 0, 0]),
                 },
                 zone: source,
                 log_term: 8,

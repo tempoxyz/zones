@@ -23,7 +23,10 @@ use crate::{
     },
     capabilities::PeerCapabilities,
     identity::{Ed25519Identity, Secp256k1Identity},
-    inter_zone::{self, InterZoneNodeChannels, InterZoneRoutingConfig, InterZoneServicePorts},
+    inter_zone::{
+        self, InterZoneNodeChannels, InterZoneRoutingConfig, InterZoneServicePorts,
+        NextRosterHandoffAuthoritySet, NextRosterHandoffRoutingConfig,
+    },
     network::{
         self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_CHANNEL, MAX_MESSAGE_SIZE,
         MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL, SETTLEMENT_SIGNATURE_CHANNEL,
@@ -329,6 +332,122 @@ pub enum P2pEvent {
 /// Handle used to communicate with, supervise, and stop the dedicated P2P runtime.
 pub struct P2pHandle {
     parts: Option<P2pHandleParts>,
+}
+
+/// Process-lifetime private carrier for a disjoint next-roster member before L1 activation. It
+/// deliberately does not start intra-Zone Raft or require the old manifest.
+pub struct NextRosterHandoffHandle {
+    shutdown: CancellationToken,
+    stopped: Option<oneshot::Receiver<Result<(), String>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    ports: Option<InterZoneServicePorts>,
+}
+
+impl NextRosterHandoffHandle {
+    pub fn take_ports(&mut self) -> Option<InterZoneServicePorts> {
+        self.ports.take()
+    }
+
+    /// Supervise the standalone carrier without consuming the handle. If another shutdown branch
+    /// wins a `tokio::select!`, dropping this future releases the borrow and `shutdown(self)` can
+    /// still cancel and join the runtime.
+    pub async fn wait_for_exit(&mut self) -> eyre::Result<()> {
+        let result = {
+            let stopped = self
+                .stopped
+                .as_mut()
+                .ok_or_else(|| eyre::eyre!("handoff endpoint already stopped"))?;
+            stopped
+                .await
+                .map_err(|error| eyre::eyre!("handoff endpoint dropped completion: {error}"))?
+        };
+        self.stopped.take();
+        let thread = self
+            .thread
+            .take()
+            .ok_or_else(|| eyre::eyre!("handoff endpoint thread missing"))?;
+        join_runtime_thread(thread).await?;
+        result.map_err(|error| eyre::eyre!("handoff endpoint failed: {error}"))
+    }
+
+    pub async fn shutdown(mut self) -> eyre::Result<()> {
+        self.shutdown.cancel();
+        drop(self.ports.take());
+        let stopped = self
+            .stopped
+            .take()
+            .expect("handoff endpoint already stopped")
+            .await;
+        let thread = self.thread.take().expect("handoff endpoint thread missing");
+        join_runtime_thread(thread).await?;
+        stopped
+            .map_err(|error| eyre::eyre!("handoff endpoint dropped completion: {error}"))?
+            .map_err(|error| eyre::eyre!("handoff endpoint failed: {error}"))
+    }
+}
+
+impl Drop for NextRosterHandoffHandle {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+/// Start only the encrypted old-to-next checkpoint carrier. The supplied ECDSA key must be the
+/// exact local member in the finalized handoff authority; an old process cannot substitute its
+/// signer for a disjoint next member.
+pub fn spawn_next_roster_handoff_endpoint(
+    routing: NextRosterHandoffRoutingConfig,
+    ed25519_key_path: impl AsRef<Path>,
+    secp256k1_key_path: impl AsRef<Path>,
+    storage_directory: Option<PathBuf>,
+    authority: NextRosterHandoffAuthoritySet,
+) -> eyre::Result<NextRosterHandoffHandle> {
+    let ed25519 = Ed25519Identity::read_from_file(ed25519_key_path)?;
+    let secp256k1 = Secp256k1Identity::read_from_file(secp256k1_key_path)?;
+    routing.validate(&ed25519.ed25519_public_key())?;
+    let carrier = routing.carrier();
+    authority.validate(&carrier, &ed25519.ed25519_public_key(), secp256k1.address())?;
+    let shutdown = CancellationToken::new();
+    let thread_shutdown = shutdown.clone();
+    let (ports, channels) = inter_zone::channels();
+    ports
+        .next_roster_handoff_authority
+        .try_send(authority)
+        .map_err(|error| eyre::eyre!("failed installing handoff authority: {error}"))?;
+    let (stopped_tx, stopped) = oneshot::channel();
+    let thread = std::thread::Builder::new()
+        .name("zone-next-roster-handoff".to_owned())
+        .spawn(move || {
+            let mut runtime = commonware_runtime::tokio::Config::default()
+                .with_tcp_nodelay(Some(true))
+                .with_worker_threads(1)
+                .with_catch_panics(true);
+            if let Some(directory) = storage_directory {
+                runtime = runtime.with_storage_directory(directory);
+            }
+            let result = commonware_runtime::tokio::Runner::new(runtime)
+                .start(|context| async move {
+                    tokio::select! {
+                        result = inter_zone::run(
+                            context.child("next-roster-handoff"),
+                            carrier,
+                            ed25519.into_private_key(),
+                            secp256k1.signer(),
+                            channels,
+                        ) => result,
+                        () = thread_shutdown.cancelled() => Ok(()),
+                    }
+                })
+                .map_err(|error| format!("{error:?}"));
+            let _ = stopped_tx.send(result);
+        })
+        .map_err(|error| eyre::eyre!("failed spawning handoff endpoint: {error}"))?;
+    Ok(NextRosterHandoffHandle {
+        shutdown,
+        stopped: Some(stopped),
+        thread: Some(thread),
+        ports: Some(ports),
+    })
 }
 
 /// Cross-runtime channels and lifecycle controls returned by [`P2pHandle::into_parts`].

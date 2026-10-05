@@ -1,18 +1,22 @@
 //! Concrete production adapters for the T14 direct-operator service.
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use alloy_consensus::Transaction as _;
-use alloy_network::TransactionBuilder as _;
+use alloy_consensus::{Transaction as _, transaction::TxHashRef as _};
+use alloy_eips::{
+    BlockId,
+    eip2718::{Decodable2718 as _, Encodable2718 as _},
+};
+use alloy_network::{ReceiptResponse as _, TransactionBuilder as _};
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
 use alloy_provider::{DynProvider, Provider as _, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::SolCall as _;
+use alloy_sol_types::{SolCall as _, SolEvent as _};
 use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, ReceiptProvider};
 use reth_transaction_pool::{
     PoolTransaction as _, TransactionOrigin, TransactionPool, error::PoolErrorKind,
@@ -22,34 +26,124 @@ use tempo_alloy::{
 };
 use tempo_primitives::{Block, TempoHeader, TempoReceipt};
 use tempo_transaction_pool::transaction::TempoPooledTransaction;
-use tempo_zone_contracts::{FAST_TRANSFER_ADDRESS, IFastTransfer};
-use tokio::sync::{mpsc, oneshot};
+use tempo_zone_contracts::{FAST_TRANSFER_ADDRESS, IFastTransfer, ImportedBarrierCall};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 use zone_fast_transfer::{
-    DurableJournal, EconomicActionKind, EconomicActionRecord, JournalIncomingRecord,
+    AuthenticatedPeerSession, DurableJournal, EconomicActionKind, EconomicActionRecord,
+    EpochRoster, JournalIncomingRecord, drain::ProvenBarrierLock,
 };
 use zone_p2p::{
     AuthenticatedInterZoneRequest, InterZoneAuthoritySet, InterZonePeerAuthority,
-    InterZoneServicePorts, InterZoneServiceRequest,
+    InterZoneServicePorts, InterZoneServiceRequest, NextRosterHandoffAuthoritySet,
 };
 use zone_primitives::fast_transfer::{
-    CancellationRequest, CanonicalEncode, MAX_CERTIFICATE_BYTES, MAX_INTENT_BYTES,
-    OutcomeCertificate, QuoteCertificate, TransferIntent, TransferOutcome,
+    CancellationRequest, CanonicalEncode, ExposureRetirementEvidence, FastBarrierStatement,
+    HeaderAncestryProof, MAX_CERTIFICATE_BYTES, MAX_INTENT_BYTES, OutcomeCertificate,
+    QuoteCertificate, TransferIntent, TransferOutcome, ZoneDomain,
 };
 use zone_rpc::auth::AuthContext;
 
 use crate::{
+    fast_drain::{DrainClosureObservation, DrainFuture, FastDrainError, FastDrainNative},
+    fast_drain_adapters::{
+        DrainCommonwareRoute, FastDrainIncoming, is_checkpoint_handoff_payload,
+        is_fast_drain_payload,
+    },
     fast_execution::CanonicalFastExecution,
-    fast_raft_state_machine::{CommittedStateHandle, CommittedTransferRecord},
+    fast_raft_state_machine::{
+        CommittedProtocolKind, CommittedProtocolRecord, CommittedStateHandle,
+        CommittedTransferRecord,
+    },
     fast_runtime::ProductionOutcomeCertification,
     fast_service::{
         CancellationStore, CertifiedPaymentReceipt, CommittedReceiptSink, CommittedTransferSource,
         FastServiceConfig, FastServiceError, FastServiceRoute, FastServiceTransport,
-        FastServiceWire, FastTransferService, IncomingRecoverySource, PersistedIncomingDelivery,
-        PrivateTransferStatus, ResolveTrigger, ServiceAcknowledgment, ServiceDelivery,
-        ServiceFuture, SubmitResult,
+        FastServiceWire, FastTransferService, IncomingRecoverySource, PeerEndpoint,
+        PersistedIncomingDelivery, PrivateTransferStatus, ResolveTrigger, ServiceAcknowledgment,
+        ServiceDelivery, ServiceFuture, SubmitResult,
     },
 };
+
+/// Authenticated C5 consumer installed after C4 owns the sole Commonware incoming receiver.
+/// Implementations must return only after durable service ingestion; an error withholds the ACK.
+pub trait FastDrainIncomingHandler: Send + Sync + 'static {
+    fn receive_authenticated<'a>(
+        &'a self,
+        session: &'a AuthenticatedPeerSession,
+        stream: u64,
+        sequence: u64,
+        payload: &'a [u8],
+    ) -> ServiceFuture<'a, Result<(), FastServiceError>>;
+}
+
+type FastDrainIncomingRegistry = RwLock<Option<Arc<dyn FastDrainIncomingHandler>>>;
+
+pub trait FastNextRosterCheckpointHandler: Send + Sync + 'static {
+    fn receive_authenticated<'a>(
+        &'a self,
+        session: &'a AuthenticatedPeerSession,
+        stream: u64,
+        sequence: u64,
+        payload: &'a [u8],
+    ) -> ServiceFuture<'a, Result<Vec<u8>, FastServiceError>>;
+}
+
+/// Bind a standalone next-member carrier only after that process has installed the exact old
+/// accepted-prefix OpenRaft image and constructed its committed-state-backed signer handler.
+pub async fn spawn_next_roster_checkpoint_signer(
+    ports: InterZoneServicePorts,
+    handler: Arc<dyn FastNextRosterCheckpointHandler>,
+    stop: CancellationToken,
+) -> Result<tokio::task::JoinHandle<()>, FastServiceError> {
+    let mut incoming = ports.incoming;
+    let keep_authority = ports.authority;
+    let keep_handoff_authority = ports.next_roster_handoff_authority;
+    let keep_requests = ports.requests;
+    Ok(tokio::spawn(async move {
+        let _keepers = (keep_authority, keep_handoff_authority, keep_requests);
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return,
+                request = incoming.recv() => {
+                    let Some(request) = request else { return };
+                    let result = if is_checkpoint_handoff_payload(&request.payload) {
+                        handler.receive_authenticated(
+                            &request.session,
+                            request.stream,
+                            request.sequence,
+                            &request.payload,
+                        ).await.map_err(|error| error.to_string())
+                    } else {
+                        Err("standalone next-roster endpoint accepts checkpoint handoff only".to_owned())
+                    };
+                    let _ = request.response.send(result);
+                }
+            }
+        }
+    }))
+}
+
+type FastNextRosterCheckpointRegistry = RwLock<Option<Arc<dyn FastNextRosterCheckpointHandler>>>;
+
+impl FastDrainIncomingHandler for FastDrainIncoming {
+    fn receive_authenticated<'a>(
+        &'a self,
+        session: &'a AuthenticatedPeerSession,
+        stream: u64,
+        sequence: u64,
+        payload: &'a [u8],
+    ) -> ServiceFuture<'a, Result<(), FastServiceError>> {
+        Box::pin(async move {
+            FastDrainIncoming::receive_authenticated(self, session, stream, sequence, payload)
+                .await
+                .map_err(|error| FastServiceError::Transport(error.to_string()))
+        })
+    }
+}
 
 const SERVICE_ENVELOPE_VERSION: u8 = 1;
 const SERVICE_ENVELOPE_HEADER_BYTES: usize = 2;
@@ -61,6 +155,8 @@ const SERVICE_ENVELOPE_MAX_BYTES: usize = SERVICE_ENVELOPE_HEADER_BYTES
     + 4
     + MAX_CERTIFICATE_BYTES;
 const RECEIPT_CHANNEL_CAPACITY: usize = 128;
+const INCOMING_DISPATCH_LIMIT: usize = 64;
+const INCOMING_ADMISSION_DISPATCH_LIMIT: usize = 48;
 
 /// Canonical, bounded service codec. Every variable field is independently length-delimited and
 /// bounded; no serde format participates in the peer protocol.
@@ -290,6 +386,7 @@ fn codec_error(error: impl Into<String>) -> FastServiceError {
 #[derive(Clone)]
 pub struct FastServiceCommonwarePort {
     authority: mpsc::Sender<InterZoneAuthoritySet>,
+    handoff_authority: mpsc::Sender<NextRosterHandoffAuthoritySet>,
     requests: mpsc::Sender<InterZoneServiceRequest>,
     incoming: Arc<Mutex<Option<mpsc::Receiver<AuthenticatedInterZoneRequest>>>>,
     response_timeout: Duration,
@@ -317,6 +414,7 @@ impl FastServiceCommonwarePort {
         }
         Ok(Self {
             authority: ports.authority,
+            handoff_authority: ports.next_roster_handoff_authority,
             requests: ports.requests,
             incoming: Arc::new(Mutex::new(Some(ports.incoming))),
             response_timeout,
@@ -398,7 +496,8 @@ impl FastServiceTransport for CommonwareFastServiceTransport {
                             && ack.remote_member == endpoint.member
                             && ack.authenticated_peer == endpoint.ed25519
                             && ack.stream == stream
-                            && ack.sequence == sequence =>
+                            && ack.sequence == sequence
+                            && ack.response_payload.is_empty() =>
                     {
                         return Ok(ServiceAcknowledgment {
                             remote_member: ack.remote_member,
@@ -724,6 +823,58 @@ pub struct ZoneNativeTransactionSubmitter<T> {
     nonce_lock: tokio::sync::Mutex<()>,
 }
 
+#[derive(Clone, Debug)]
+struct CommittedImportedBarrierSubmission {
+    transaction_hash: B256,
+    canonical_receipt: Vec<u8>,
+    receipt_block_hash: B256,
+    receipt_block_number: u64,
+}
+
+trait ImportedBarrierNativeSubmitter: Send + Sync + 'static {
+    fn submit_imported_barrier<'a>(
+        &'a self,
+        call: ImportedBarrierCall,
+        certificate_digest: B256,
+    ) -> ServiceFuture<'a, Result<CommittedImportedBarrierSubmission, FastServiceError>>;
+}
+
+#[derive(Clone, Debug)]
+struct CommittedExposureSubmission {
+    action_id: B256,
+    transaction_hash: B256,
+    calldata: Vec<u8>,
+    canonical_receipt: Vec<u8>,
+    receipt_block_hash: B256,
+    receipt_block_number: u64,
+    receipt_root: B256,
+}
+
+pub(crate) struct VerifiedExposureSubmission {
+    action_id: B256,
+    transaction_hash: B256,
+}
+
+trait ExposureNativeSubmitter: Send + Sync + 'static {
+    fn record_ancestry_checkpoint<'a>(
+        &'a self,
+        source_portal: Address,
+        header_chain: HeaderAncestryProof,
+    ) -> ServiceFuture<'a, Result<B256, FastServiceError>>;
+
+    fn retire_exposure<'a>(
+        &'a self,
+        evidence: ExposureRetirementEvidence,
+        source_zone: B256,
+    ) -> ServiceFuture<'a, Result<CommittedExposureSubmission, FastServiceError>>;
+
+    fn complete_retirement(
+        &self,
+        action_id: B256,
+        transaction_hash: B256,
+    ) -> Result<(), FastServiceError>;
+}
+
 impl<T> ZoneNativeTransactionSubmitter<T>
 where
     T: TransactionPool<Transaction = TempoPooledTransaction> + Clone + Send + Sync + 'static,
@@ -781,105 +932,125 @@ where
         kind: EconomicActionKind,
         calldata: Vec<u8>,
         expected: ExpectedCommittedOutcome,
+        expected_intent_hash: Option<B256>,
+        complete_action: bool,
     ) -> Result<B256, FastServiceError> {
-        let _nonce_guard = self.nonce_lock.lock().await;
         let action_id = economic_action_id(transfer_id, kind, &calldata);
-        let mut action = if let Some(existing) = self
-            .journal
-            .economic_action(action_id)
-            .map_err(storage_error)?
-        {
-            if existing.transfer_id != transfer_id
-                || existing.kind != kind
-                || existing.signer != self.config.operator_signer.address()
-                || existing.chain_id != self.config.chain_id
-                || existing.target != FAST_TRANSFER_ADDRESS
-                || existing.calldata != calldata
-            {
-                return Err(FastServiceError::Storage(
-                    "persisted economic action conflicts with requested native call".to_owned(),
-                ));
-            }
-            existing
-        } else {
-            let nonce = self
-                .config
-                .provider
-                .get_transaction_count(self.config.operator_signer.address())
-                .pending()
-                .await
-                .map_err(native_error)?;
-            let action = EconomicActionRecord {
-                action_id,
-                transfer_id,
-                kind,
-                signer: self.config.operator_signer.address(),
-                nonce,
-                chain_id: self.config.chain_id,
-                target: FAST_TRANSFER_ADDRESS,
-                calldata: calldata.clone(),
-                submission_hashes: Vec::new(),
-                completed_transaction_hash: None,
-            };
-            self.journal
-                .persist_economic_action(action.clone())
-                .map_err(storage_error)?;
-            action
-        };
-
-        let mut reverted_hash = None;
-        for transaction_hash in action.submission_hashes.iter().rev().copied() {
-            match self
-                .committed
-                .committed_transaction_result(transaction_hash)?
-            {
-                Some(true) => {
-                    self.wait_for_committed(transfer_id, transaction_hash, expected)
-                        .await?;
-                    return Ok(transaction_hash);
-                }
-                Some(false) => reverted_hash = Some(transaction_hash),
-                None => {}
-            }
-        }
-        if reverted_hash.is_some() {
-            let next_nonce = self
-                .config
-                .provider
-                .get_transaction_count(self.config.operator_signer.address())
-                .pending()
-                .await
-                .map_err(native_error)?;
-            action = self
+        // Serialize only nonce allocation, durable preparation, submission and durable hash
+        // recording. Waiting for Raft application must not serialize unrelated recovery work.
+        let transaction_hash = {
+            let _nonce_guard = self.nonce_lock.lock().await;
+            let mut action = if let Some(existing) = self
                 .journal
-                .next_economic_attempt(action_id, next_nonce)
+                .economic_action(action_id)
+                .map_err(storage_error)?
+            {
+                if existing.transfer_id != transfer_id
+                    || existing.kind != kind
+                    || existing.signer != self.config.operator_signer.address()
+                    || existing.chain_id != self.config.chain_id
+                    || existing.target != FAST_TRANSFER_ADDRESS
+                    || existing.calldata != calldata
+                {
+                    return Err(FastServiceError::Storage(
+                        "persisted economic action conflicts with requested native call".to_owned(),
+                    ));
+                }
+                existing
+            } else {
+                let nonce = self
+                    .config
+                    .provider
+                    .get_transaction_count(self.config.operator_signer.address())
+                    .pending()
+                    .await
+                    .map_err(native_error)?;
+                let action = EconomicActionRecord {
+                    action_id,
+                    transfer_id,
+                    kind,
+                    signer: self.config.operator_signer.address(),
+                    nonce,
+                    chain_id: self.config.chain_id,
+                    target: FAST_TRANSFER_ADDRESS,
+                    calldata: calldata.clone(),
+                    submission_hashes: Vec::new(),
+                    completed_transaction_hash: None,
+                };
+                self.journal
+                    .persist_economic_action(action.clone())
+                    .map_err(storage_error)?;
+                action
+            };
+
+            let mut committed_success = None;
+            // A single reverted replacement does not resolve another hash whose canonical result
+            // is still unknown. Only an entirely canonical-failed attempt may consume a new nonce.
+            let mut all_submissions_reverted = !action.submission_hashes.is_empty();
+            for transaction_hash in action.submission_hashes.iter().rev().copied() {
+                match self
+                    .committed
+                    .committed_transaction_result(transaction_hash)?
+                {
+                    Some(true) => {
+                        committed_success = Some(transaction_hash);
+                        break;
+                    }
+                    Some(false) => {}
+                    None => all_submissions_reverted = false,
+                }
+            }
+            if let Some(transaction_hash) = committed_success {
+                transaction_hash
+            } else {
+                if all_submissions_reverted {
+                    let next_nonce = self
+                        .config
+                        .provider
+                        .get_transaction_count(self.config.operator_signer.address())
+                        .pending()
+                        .await
+                        .map_err(native_error)?;
+                    action = self
+                        .journal
+                        .next_economic_attempt(action_id, next_nonce)
+                        .map_err(storage_error)?;
+                }
+
+                let request = TempoTransactionRequest {
+                    inner: TransactionRequest::default()
+                        .with_from(action.signer)
+                        .with_to(action.target)
+                        .with_nonce(action.nonce)
+                        .with_input(Bytes::from(action.calldata.clone())),
+                    fee_token: Some(self.config.fee_token),
+                    ..Default::default()
+                };
+                let pending = self
+                    .config
+                    .provider
+                    .send_transaction(request)
+                    .await
+                    .map_err(native_error)?;
+                let transaction_hash = *pending.tx_hash();
+                self.journal
+                    .record_economic_submission(action_id, transaction_hash)
+                    .map_err(storage_error)?;
+                transaction_hash
+            }
+        };
+        self.wait_for_committed(
+            transfer_id,
+            transaction_hash,
+            expected,
+            expected_intent_hash,
+        )
+        .await?;
+        if complete_action {
+            self.journal
+                .complete_economic_action(action_id, transaction_hash)
                 .map_err(storage_error)?;
         }
-
-        let request = TempoTransactionRequest {
-            inner: TransactionRequest::default()
-                .with_from(action.signer)
-                .with_to(action.target)
-                .with_nonce(action.nonce)
-                .with_input(Bytes::from(action.calldata.clone())),
-            fee_token: Some(self.config.fee_token),
-            ..Default::default()
-        };
-        let pending = self
-            .config
-            .provider
-            .send_transaction(request)
-            .await
-            .map_err(native_error)?;
-        let transaction_hash = *pending.tx_hash();
-        self.journal
-            .record_economic_submission(action_id, transaction_hash)
-            .map_err(storage_error)?;
-        self.wait_for_committed(transfer_id, transaction_hash, expected)
-            .await?;
-        self.journal
-            .complete_economic_action(action_id, transaction_hash)
-            .map_err(storage_error)?;
         Ok(transaction_hash)
     }
 
@@ -888,6 +1059,7 @@ where
         transfer_id: B256,
         transaction_hash: B256,
         expected: ExpectedCommittedOutcome,
+        expected_intent_hash: Option<B256>,
     ) -> Result<(), FastServiceError> {
         tokio::time::timeout(self.config.commit_timeout, async {
             loop {
@@ -907,6 +1079,8 @@ where
                     Some(true) => {
                         if let Some(record) = self.committed.committed_transfer(transfer_id)?
                             && record.body.transaction_hash == transaction_hash
+                            && expected_intent_hash
+                                .is_none_or(|hash| record.intent.intent_hash() == hash)
                             && expected.matches(&record.body.outcome)
                         {
                             return Ok(());
@@ -963,7 +1137,15 @@ where
             self.wait_for_committed(
                 intent.transfer_id(),
                 transaction_hash,
-                ExpectedCommittedOutcome::Locked,
+                ExpectedCommittedOutcome::Locked {
+                    escrow: FAST_TRANSFER_ADDRESS,
+                    amount: intent.principal.checked_add(intent.fee).ok_or_else(|| {
+                        FastServiceError::NativeSubmission(
+                            "lock principal plus fee overflows".to_owned(),
+                        )
+                    })?,
+                },
+                Some(intent.intent_hash()),
             )
             .await?;
             Ok(transaction_hash)
@@ -985,13 +1167,23 @@ where
                     .map(CanonicalEncode::canonical_bytes)
                     .unwrap_or_default()
                     .into(),
+                // Ordinary open-epoch delivery has no drain inclusion proof. After closure
+                // native execution rejects this path; the committed C5 barrier resolver must
+                // provide the exact historical proof rather than treating a retry as authority.
+                barrierProof: Bytes::new(),
             }
             .abi_encode();
             self.submit_operator_call(
                 intent.transfer_id(),
                 EconomicActionKind::Resolve,
                 calldata,
-                ExpectedCommittedOutcome::DestinationTerminal,
+                ExpectedCommittedOutcome::DestinationTerminal {
+                    pool: intent.destination_pool,
+                    recipient: intent.recipient,
+                    principal: intent.principal,
+                },
+                Some(intent.intent_hash()),
+                true,
             )
             .await
         })
@@ -1013,6 +1205,8 @@ where
                 EconomicActionKind::RecordOutcome,
                 calldata,
                 ExpectedCommittedOutcome::SuccessfulCall,
+                None,
+                true,
             )
             .await
         })
@@ -1032,16 +1226,376 @@ where
                 EconomicActionKind::DisposeEscrow,
                 calldata,
                 ExpectedCommittedOutcome::SourceDisposed,
+                None,
+                true,
             )
             .await
         })
     }
 }
 
+impl<T> ImportedBarrierNativeSubmitter for ZoneNativeTransactionSubmitter<T>
+where
+    T: TransactionPool<Transaction = TempoPooledTransaction> + Clone + Send + Sync + 'static,
+{
+    fn submit_imported_barrier<'a>(
+        &'a self,
+        call: ImportedBarrierCall,
+        certificate_digest: B256,
+    ) -> ServiceFuture<'a, Result<CommittedImportedBarrierSubmission, FastServiceError>> {
+        Box::pin(async move {
+            if call.target != FAST_TRANSFER_ADDRESS || call.calldata.is_empty() {
+                return Err(FastServiceError::NativeSubmission(
+                    "invalid imported-barrier target or calldata".to_owned(),
+                ));
+            }
+            let transaction_hash = self
+                .submit_operator_call(
+                    call.barrier_digest,
+                    EconomicActionKind::RecordOutcome,
+                    call.calldata.to_vec(),
+                    ExpectedCommittedOutcome::SuccessfulCall,
+                    None,
+                    true,
+                )
+                .await?;
+            let receipt = self
+                .config
+                .provider
+                .get_transaction_receipt(transaction_hash)
+                .await
+                .map_err(native_error)?
+                .ok_or_else(|| {
+                    FastServiceError::NativeSubmission(
+                        "committed imported-barrier receipt is unavailable".to_owned(),
+                    )
+                })?;
+            if !receipt.status() {
+                return Err(FastServiceError::NativeSubmission(
+                    "imported-barrier transaction canonically reverted".to_owned(),
+                ));
+            }
+            let matching_events = receipt
+                .logs()
+                .iter()
+                .filter_map(|log| {
+                    IFastTransfer::ImportedBarrierRecorded::decode_log(&log.inner).ok()
+                })
+                .filter(|event| {
+                    event.data.destinationEpoch == call.destination_epoch
+                        && event.data.sourcePortal == call.source_portal
+                        && event.data.sourceEpoch == call.source_epoch
+                        && event.data.barrierDigest == certificate_digest
+                        && event.data.completeLockRoot == call.complete_lock_root
+                })
+                .count();
+            if matching_events != 1 {
+                return Err(FastServiceError::NativeSubmission(
+                    "committed receipt does not contain the exact imported-barrier event"
+                        .to_owned(),
+                ));
+            }
+            let receipt_block_hash = receipt.block_hash().ok_or_else(|| {
+                FastServiceError::NativeSubmission(
+                    "committed imported-barrier receipt has no block hash".to_owned(),
+                )
+            })?;
+            let receipt_block_number = receipt.block_number().ok_or_else(|| {
+                FastServiceError::NativeSubmission(
+                    "committed imported-barrier receipt has no block number".to_owned(),
+                )
+            })?;
+            Ok(CommittedImportedBarrierSubmission {
+                transaction_hash,
+                canonical_receipt: serde_json::to_vec(&receipt).map_err(storage_error)?,
+                receipt_block_hash,
+                receipt_block_number,
+            })
+        })
+    }
+}
+
+impl<T> ExposureNativeSubmitter for ZoneNativeTransactionSubmitter<T>
+where
+    T: TransactionPool<Transaction = TempoPooledTransaction> + Clone + Send + Sync + 'static,
+{
+    fn record_ancestry_checkpoint<'a>(
+        &'a self,
+        source_portal: Address,
+        header_chain: HeaderAncestryProof,
+    ) -> ServiceFuture<'a, Result<B256, FastServiceError>> {
+        Box::pin(async move {
+            if source_portal.is_zero() || header_chain.headers.is_empty() {
+                return Err(FastServiceError::InvalidConfiguration);
+            }
+            let encoded = header_chain.canonical_bytes();
+            let calldata = IFastTransfer::recordAncestryCheckpointCall {
+                sourcePortal: source_portal,
+                headerChain: encoded.clone().into(),
+            }
+            .abi_encode();
+            self.submit_operator_call(
+                keccak256([source_portal.as_slice(), keccak256(&encoded).as_slice()].concat()),
+                EconomicActionKind::RecordAncestryCheckpoint,
+                calldata,
+                ExpectedCommittedOutcome::SuccessfulCall,
+                None,
+                true,
+            )
+            .await
+        })
+    }
+
+    fn retire_exposure<'a>(
+        &'a self,
+        evidence: ExposureRetirementEvidence,
+        source_zone: B256,
+    ) -> ServiceFuture<'a, Result<CommittedExposureSubmission, FastServiceError>> {
+        Box::pin(async move {
+            let calldata = IFastTransfer::retireExposureCall {
+                canonicalEvidence: evidence.canonical_bytes().into(),
+            }
+            .abi_encode();
+            let action_id = economic_action_id(
+                evidence.transfer_id,
+                EconomicActionKind::RetireExposure,
+                &calldata,
+            );
+            let transaction_hash = self
+                .submit_operator_call(
+                    evidence.transfer_id,
+                    EconomicActionKind::RetireExposure,
+                    calldata,
+                    ExpectedCommittedOutcome::SuccessfulCall,
+                    Some(evidence.intent_hash),
+                    false,
+                )
+                .await?;
+            let receipt = self
+                .config
+                .provider
+                .get_transaction_receipt(transaction_hash)
+                .await
+                .map_err(native_error)?
+                .ok_or_else(|| {
+                    FastServiceError::NativeSubmission(
+                        "committed exposure-retirement receipt is unavailable".into(),
+                    )
+                })?;
+            if !receipt.status() {
+                return Err(FastServiceError::NativeSubmission(
+                    "exposure-retirement receipt reverted".into(),
+                ));
+            }
+            let matching = receipt
+                .inner
+                .inner
+                .receipt
+                .logs
+                .iter()
+                .filter_map(|log| IFastTransfer::ExposureRetired::decode_log(&log.inner).ok())
+                .filter(|event| {
+                    event.data.transferId == evidence.transfer_id
+                        && event.data.sourceZone == source_zone
+                        && event.data.token == evidence.destination_token
+                        && U256::from(event.data.principal) == evidence.principal
+                })
+                .count();
+            if matching != 1 {
+                return Err(FastServiceError::NativeSubmission(
+                    "committed receipt lacks the exact ExposureRetired effect".into(),
+                ));
+            }
+            let receipt_block_hash = receipt.block_hash().ok_or_else(|| {
+                FastServiceError::NativeSubmission(
+                    "exposure-retirement receipt has no block hash".into(),
+                )
+            })?;
+            let receipt_block_number = receipt.block_number().ok_or_else(|| {
+                FastServiceError::NativeSubmission(
+                    "exposure-retirement receipt has no block number".into(),
+                )
+            })?;
+            let receipt_index = usize::try_from(receipt.transaction_index().ok_or_else(|| {
+                FastServiceError::NativeSubmission(
+                    "exposure-retirement receipt has no transaction index".into(),
+                )
+            })?)
+            .map_err(native_error)?;
+            let canonical_target_receipt = receipt
+                .inner
+                .inner
+                .clone()
+                .map_receipt(|receipt| receipt.map_logs(|log| log.into_inner()))
+                .encoded_2718();
+            let mut block_receipts = self
+                .config
+                .provider
+                .get_block_receipts(BlockId::hash_canonical(receipt_block_hash))
+                .await
+                .map_err(native_error)?
+                .ok_or_else(|| {
+                    FastServiceError::NativeSubmission(
+                        "committed exposure-retirement block receipts are unavailable".into(),
+                    )
+                })?;
+            block_receipts.sort_by_key(|receipt| receipt.transaction_index());
+            let mut encoded_receipts = Vec::with_capacity(block_receipts.len());
+            for (index, block_receipt) in block_receipts.into_iter().enumerate() {
+                if block_receipt.transaction_index() != Some(index as u64) {
+                    return Err(FastServiceError::NativeSubmission(
+                        "committed exposure-retirement block receipts are non-contiguous".into(),
+                    ));
+                }
+                encoded_receipts.push(
+                    block_receipt
+                        .inner
+                        .inner
+                        .map_receipt(|receipt| receipt.map_logs(|log| log.into_inner()))
+                        .encoded_2718(),
+                );
+            }
+            if encoded_receipts.get(receipt_index) != Some(&canonical_target_receipt) {
+                return Err(FastServiceError::NativeSubmission(
+                    "exposure-retirement receipt is absent from its complete block receipts".into(),
+                ));
+            }
+            Ok(CommittedExposureSubmission {
+                action_id,
+                transaction_hash,
+                calldata: IFastTransfer::retireExposureCall {
+                    canonicalEvidence: evidence.canonical_bytes().into(),
+                }
+                .abi_encode(),
+                canonical_receipt: serde_json::to_vec(&receipt).map_err(storage_error)?,
+                receipt_block_hash,
+                receipt_block_number,
+                receipt_root: canonical_receipts_root(&encoded_receipts),
+            })
+        })
+    }
+
+    fn complete_retirement(
+        &self,
+        action_id: B256,
+        transaction_hash: B256,
+    ) -> Result<(), FastServiceError> {
+        self.journal
+            .complete_economic_action(action_id, transaction_hash)
+            .map(|_| ())
+            .map_err(storage_error)
+    }
+}
+
+impl<T> FastDrainNative for ZoneNativeTransactionSubmitter<T>
+where
+    T: TransactionPool<Transaction = TempoPooledTransaction> + Clone + Send + Sync + 'static,
+{
+    fn resolve_old_lock<'a>(
+        &'a self,
+        statement: &'a FastBarrierStatement,
+        proven: &'a ProvenBarrierLock,
+    ) -> DrainFuture<'a, Result<(), FastDrainError>> {
+        Box::pin(async move {
+            let (transfer_id, intent_hash, calldata) =
+                encode_old_lock_resolution(statement, proven)?;
+            self.submit_operator_call(
+                transfer_id,
+                EconomicActionKind::Resolve,
+                calldata,
+                ExpectedCommittedOutcome::DestinationTerminal {
+                    pool: proven.lock.intent.destination_pool,
+                    recipient: proven.lock.intent.recipient,
+                    principal: proven.lock.intent.principal,
+                },
+                Some(intent_hash),
+                true,
+            )
+            .await
+            .map_err(|error| FastDrainError::Native(error.to_string()))?;
+            Ok(())
+        })
+    }
+}
+
+fn encode_old_lock_resolution(
+    statement: &FastBarrierStatement,
+    proven: &ProvenBarrierLock,
+) -> Result<(B256, B256, Vec<u8>), FastDrainError> {
+    let intent = &proven.lock.intent;
+    let lock = &proven.lock.lock;
+    let body = &lock.body;
+    let locked_amount_matches = intent
+        .principal
+        .checked_add(intent.fee)
+        .is_some_and(|expected| {
+            matches!(
+                &body.outcome,
+                TransferOutcome::Locked { escrow, amount }
+                    if *escrow == FAST_TRANSFER_ADDRESS && *amount == expected
+            )
+        });
+    if intent.validate().is_err()
+        || intent.transfer_id() != body.transfer_id
+        || intent.intent_hash() != body.intent_hash
+        || intent.source.l1_chain_id == 0
+        || intent.destination.l1_chain_id != intent.source.l1_chain_id
+        || intent.source.portal != statement.source_portal
+        || intent.source.authority_epoch != statement.source_epoch
+        || intent.destination.portal != statement.destination_portal
+        || intent.destination.authority_epoch != statement.destination_epoch
+        || body.zone != intent.source
+        || !locked_amount_matches
+        || statement.destination_portal.is_zero()
+        || statement.source_portal.is_zero()
+        || statement.destination_portal == statement.source_portal
+        || statement.destination_epoch == 0
+        || statement.source_epoch == 0
+        || statement.closure_hash.is_zero()
+        || statement.imported_anchor_number == 0
+        || statement.imported_anchor_hash.is_zero()
+        || statement.log_index < statement.lock_log_watermark
+        || statement.log_index < body.log_index
+        || statement.block_hash.is_zero()
+        || statement.state_root.is_zero()
+        || statement.complete_lock_root.is_zero()
+        || body.log_index == 0
+        || body.block_hash.is_zero()
+        || body.state_root.is_zero()
+    {
+        return Err(FastDrainError::Native(
+            "old lock does not exactly bind the signed barrier and Locked certificate".to_owned(),
+        ));
+    }
+    let barrier_proof = proven
+        .native_barrier_proof(intent.source.l1_chain_id, statement)
+        .map_err(FastDrainError::Protocol)?;
+    if barrier_proof.is_empty() {
+        return Err(FastDrainError::Native(
+            "canonical old-lock barrier proof is empty".to_owned(),
+        ));
+    }
+    let calldata = IFastTransfer::resolveCall {
+        canonicalIntent: intent.canonical_bytes().into(),
+        lockCertificate: lock.canonical_bytes().into(),
+        cancellation: Bytes::new(),
+        barrierProof: barrier_proof.into(),
+    }
+    .abi_encode();
+    Ok((intent.transfer_id(), intent.intent_hash(), calldata))
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ExpectedCommittedOutcome {
-    Locked,
-    DestinationTerminal,
+    Locked {
+        escrow: Address,
+        amount: U256,
+    },
+    DestinationTerminal {
+        pool: Address,
+        recipient: Address,
+        principal: U256,
+    },
     SuccessfulCall,
     SourceDisposed,
 }
@@ -1049,12 +1603,28 @@ enum ExpectedCommittedOutcome {
 impl ExpectedCommittedOutcome {
     fn matches(self, outcome: &TransferOutcome) -> bool {
         match self {
-            Self::Locked => matches!(outcome, TransferOutcome::Locked { .. }),
-            Self::DestinationTerminal => {
+            Self::Locked { escrow, amount } => matches!(
+                outcome,
+                TransferOutcome::Locked {
+                    escrow: actual_escrow,
+                    amount: actual_amount,
+                } if *actual_escrow == escrow && *actual_amount == amount
+            ),
+            Self::DestinationTerminal {
+                pool,
+                recipient,
+                principal,
+            } => {
                 matches!(
                     outcome,
-                    TransferOutcome::Paid { .. } | TransferOutcome::Rejected { .. }
-                )
+                    TransferOutcome::Paid {
+                        pool: actual_pool,
+                        recipient: actual_recipient,
+                        principal: actual_principal,
+                    } if *actual_pool == pool
+                        && *actual_recipient == recipient
+                        && *actual_principal == principal
+                ) || matches!(outcome, TransferOutcome::Rejected { .. })
             }
             Self::SuccessfulCall => false,
             Self::SourceDisposed => matches!(
@@ -1070,6 +1640,8 @@ fn economic_action_id(transfer_id: B256, kind: EconomicActionKind, calldata: &[u
         EconomicActionKind::Resolve => 0,
         EconomicActionKind::RecordOutcome => 1,
         EconomicActionKind::DisposeEscrow => 2,
+        EconomicActionKind::RecordAncestryCheckpoint => 3,
+        EconomicActionKind::RetireExposure => 4,
     };
     let mut encoded = Vec::with_capacity(32 + 1 + 32 + 39);
     encoded.extend_from_slice(b"tempo.zone.fast-service.economic-action.v1");
@@ -1077,6 +1649,25 @@ fn economic_action_id(transfer_id: B256, kind: EconomicActionKind, calldata: &[u
     encoded.push(kind_tag);
     encoded.extend_from_slice(keccak256(calldata).as_slice());
     keccak256(encoded)
+}
+
+fn canonical_receipts_root(receipts: &[Vec<u8>]) -> B256 {
+    if receipts.is_empty() {
+        return reth_trie_common::EMPTY_ROOT_HASH;
+    }
+    let mut builder = reth_trie_common::HashBuilder::default();
+    for insertion in 0..receipts.len() {
+        let index = if insertion > 0x7f {
+            insertion
+        } else if insertion == 0x7f || insertion + 1 == receipts.len() {
+            0
+        } else {
+            insertion + 1
+        };
+        let key = alloy_rlp::encode(index);
+        builder.add_leaf(reth_trie_common::Nibbles::unpack(&key), &receipts[index]);
+    }
+    builder.root()
 }
 
 fn native_error(error: impl ToString) -> FastServiceError {
@@ -1088,6 +1679,13 @@ fn native_error(error: impl ToString) -> FastServiceError {
 pub struct FastServiceHandle {
     service: Arc<FastTransferService>,
     receipts: Arc<PrivateCommittedReceiptHub>,
+    drain_native: Arc<dyn FastDrainNative>,
+    imported_barrier_native: Arc<dyn ImportedBarrierNativeSubmitter>,
+    exposure_native: Arc<dyn ExposureNativeSubmitter>,
+    drain_incoming: Arc<FastDrainIncomingRegistry>,
+    checkpoint_incoming: Arc<FastNextRosterCheckpointRegistry>,
+    drain_requests: mpsc::Sender<InterZoneServiceRequest>,
+    handoff_authority: mpsc::Sender<NextRosterHandoffAuthoritySet>,
     runtime: Arc<FastServiceRuntime>,
 }
 
@@ -1102,14 +1700,28 @@ impl Drop for FastServiceRuntime {
 }
 
 impl FastServiceHandle {
-    const fn new(
+    fn new(
         service: Arc<FastTransferService>,
         receipts: Arc<PrivateCommittedReceiptHub>,
+        drain_native: Arc<dyn FastDrainNative>,
+        imported_barrier_native: Arc<dyn ImportedBarrierNativeSubmitter>,
+        exposure_native: Arc<dyn ExposureNativeSubmitter>,
+        drain_incoming: Arc<FastDrainIncomingRegistry>,
+        checkpoint_incoming: Arc<FastNextRosterCheckpointRegistry>,
+        drain_requests: mpsc::Sender<InterZoneServiceRequest>,
+        handoff_authority: mpsc::Sender<NextRosterHandoffAuthoritySet>,
         runtime: Arc<FastServiceRuntime>,
     ) -> Self {
         Self {
             service,
             receipts,
+            drain_native,
+            imported_barrier_native,
+            exposure_native,
+            drain_incoming,
+            checkpoint_incoming,
+            drain_requests,
+            handoff_authority,
             runtime,
         }
     }
@@ -1167,9 +1779,317 @@ impl FastServiceHandle {
         &self.service
     }
 
+    pub(crate) fn exposure_routes(&self) -> BTreeMap<u32, ZoneDomain> {
+        self.service.route_domains()
+    }
+
+    pub(crate) fn exposure_retirement_candidates(
+        &self,
+    ) -> Result<Vec<(TransferIntent, OutcomeCertificate)>, FastServiceError> {
+        self.service.exposure_retirement_candidates()
+    }
+
+    pub(crate) fn complete_exposure_retirement(
+        &self,
+        transfer_id: B256,
+        submission: VerifiedExposureSubmission,
+    ) -> Result<(), FastServiceError> {
+        // Release the in-memory reservation first. A crash before the following fsynced marker
+        // merely reconstructs and retries it; the reverse order could strand a live reservation
+        // until restart after the marker made the candidate disappear.
+        self.service.complete_exposure_retirement(transfer_id)?;
+        self.exposure_native
+            .complete_retirement(submission.action_id, submission.transaction_hash)
+    }
+
+    pub(crate) fn set_exposure_recovery_backlog(&self, paused: bool) {
+        self.service.set_exposure_recovery_backlog(paused);
+    }
+
+    /// Run the real accepted-release recovery driver with the explicit nine-source provider map,
+    /// global Tempo L1 provider, live imported-anchor watch and cancellation token contained in
+    /// `resources`. Runtime must supervise this future; no empty provider facade is accepted.
+    pub async fn run_exposure_retirement<P>(
+        &self,
+        committed: CommittedStateHandle<CanonicalFastExecution<P>>,
+        resources: crate::fast_exposure::FastExposureRetirementResources,
+    ) -> Result<(), crate::fast_exposure::FastExposureError>
+    where
+        P: BlockNumReader
+            + BlockReader<Block = Block>
+            + HeaderProvider<Header = TempoHeader>
+            + ReceiptProvider<Receipt = TempoReceipt>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+    {
+        let owner_shutdown = self.runtime.stop.clone();
+        tokio::select! {
+            result = crate::fast_exposure::run_fast_exposure_retirement(
+                self.clone(),
+                committed,
+                resources,
+            ) => result,
+            () = owner_shutdown.cancelled() => Ok(()),
+        }
+    }
+
+    /// Refresh C4 quote/new-lock admission from closure state read at the exact committed
+    /// imported L1 anchor. Terminal delivery, cancellation, recovery, and C5 drain remain live.
+    pub async fn apply_drain_closure_observation(
+        &self,
+        observation: DrainClosureObservation,
+    ) -> Result<(), FastServiceError> {
+        self.service
+            .apply_drain_closure_observation(observation)
+            .await
+    }
+
+    /// The live provider/signer/pool/journal/committed-prefix adapter used by C4. C5 receives this
+    /// exact handle, so old-lock recovery cannot be assembled with a placeholder native backend.
+    pub fn drain_native(&self) -> Arc<dyn FastDrainNative> {
+        self.drain_native.clone()
+    }
+
+    /// Submit the prepared canonical `recordImportedBarrier` call through the same operator
+    /// wallet/journal path as C4, then bind its successful receipt to the exact applied Raft entry.
+    pub async fn submit_imported_barrier<P>(
+        &self,
+        committed: &CommittedStateHandle<CanonicalFastExecution<P>>,
+        call: ImportedBarrierCall,
+        certificate_digest: B256,
+        canonical_payload: Vec<u8>,
+    ) -> Result<CommittedProtocolRecord, FastServiceError>
+    where
+        P: BlockNumReader
+            + BlockReader<Block = Block>
+            + HeaderProvider<Header = TempoHeader>
+            + ReceiptProvider<Receipt = TempoReceipt>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+    {
+        if canonical_payload.as_slice() != call.calldata.as_ref() {
+            return Err(FastServiceError::NativeSubmission(
+                "imported-barrier canonical payload must be the exact ABI calldata".to_owned(),
+            ));
+        }
+        let submission = self
+            .imported_barrier_native
+            .submit_imported_barrier(call.clone(), certificate_digest)
+            .await?;
+        let image = committed.exact_state_image().map_err(committed_error)?;
+        let mut matches = image.blocks.iter().filter(|applied| {
+            applied.input.transactions.iter().any(|encoded| {
+                let mut bytes = encoded.as_ref();
+                tempo_primitives::TempoTxEnvelope::decode_2718(&mut bytes)
+                    .ok()
+                    .filter(|_| bytes.is_empty())
+                    .is_some_and(|transaction| {
+                        *transaction.tx_hash() == submission.transaction_hash
+                            && transaction.to() == Some(call.target)
+                            && transaction.input().as_ref() == call.calldata.as_ref()
+                    })
+            })
+        });
+        let applied = matches.next().ok_or_else(|| {
+            FastServiceError::CommittedState(
+                "imported-barrier transaction is absent from the applied Raft prefix".to_owned(),
+            )
+        })?;
+        if matches.next().is_some()
+            || applied.output.block_hash != submission.receipt_block_hash
+            || applied.output.block_height != submission.receipt_block_number
+        {
+            return Err(FastServiceError::CommittedState(
+                "imported-barrier receipt does not bind one exact Raft coordinate".to_owned(),
+            ));
+        }
+        Ok(CommittedProtocolRecord {
+            log_id: applied.log_id,
+            block_height: applied.output.block_height,
+            block_hash: applied.output.block_hash,
+            state_root: applied.output.state_root,
+            transaction_hash: submission.transaction_hash,
+            kind: CommittedProtocolKind::ImportedBarrier,
+            canonical_payload,
+            native_calldata: call.calldata.to_vec(),
+            canonical_receipt: submission.canonical_receipt,
+        })
+    }
+
+    pub(crate) async fn submit_ancestry_checkpoint(
+        &self,
+        source_portal: Address,
+        header_chain: HeaderAncestryProof,
+    ) -> Result<B256, FastServiceError> {
+        self.exposure_native
+            .record_ancestry_checkpoint(source_portal, header_chain)
+            .await
+    }
+
+    pub(crate) async fn submit_exposure_retirement<P>(
+        &self,
+        committed: &CommittedStateHandle<CanonicalFastExecution<P>>,
+        evidence: ExposureRetirementEvidence,
+        source_zone: B256,
+    ) -> Result<VerifiedExposureSubmission, FastServiceError>
+    where
+        P: BlockNumReader
+            + BlockReader<Block = Block>
+            + HeaderProvider<Header = TempoHeader>
+            + ReceiptProvider<Receipt = TempoReceipt>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+    {
+        let transfer_id = evidence.transfer_id;
+        let destination_token = evidence.destination_token;
+        let principal = evidence.principal;
+        let submission = self
+            .exposure_native
+            .retire_exposure(evidence, source_zone)
+            .await?;
+        let receipt: tempo_alloy::rpc::TempoTransactionReceipt =
+            serde_json::from_slice(&submission.canonical_receipt).map_err(storage_error)?;
+        let matching_effects = receipt
+            .inner
+            .inner
+            .receipt
+            .logs
+            .iter()
+            .filter_map(|log| IFastTransfer::ExposureRetired::decode_log(&log.inner).ok())
+            .filter(|event| {
+                event.data.transferId == transfer_id
+                    && event.data.sourceZone == source_zone
+                    && event.data.token == destination_token
+                    && U256::from(event.data.principal) == principal
+            })
+            .count();
+        if matching_effects != 1 {
+            return Err(FastServiceError::CommittedState(
+                "retirement receipt lost its exact native effect".into(),
+            ));
+        }
+        let image = committed.exact_state_image().map_err(committed_error)?;
+        let mut matches = image.blocks.iter().filter(|applied| {
+            applied.input.transactions.iter().any(|encoded| {
+                let mut bytes = encoded.as_ref();
+                tempo_primitives::TempoTxEnvelope::decode_2718(&mut bytes)
+                    .ok()
+                    .filter(|_| bytes.is_empty())
+                    .is_some_and(|transaction| {
+                        *transaction.tx_hash() == submission.transaction_hash
+                            && transaction.to() == Some(FAST_TRANSFER_ADDRESS)
+                            && transaction.input() == submission.calldata.as_slice()
+                    })
+            })
+        });
+        let applied = matches.next().ok_or_else(|| {
+            FastServiceError::CommittedState(
+                "retireExposure transaction is absent from the applied Raft prefix".into(),
+            )
+        })?;
+        if matches.next().is_some()
+            || applied.output.block_hash != submission.receipt_block_hash
+            || applied.output.block_height != submission.receipt_block_number
+            || applied.output.receipts_root != submission.receipt_root
+        {
+            return Err(FastServiceError::CommittedState(
+                "retireExposure effect does not bind one exact Raft coordinate".into(),
+            ));
+        }
+        Ok(VerifiedExposureSubmission {
+            action_id: submission.action_id,
+            transaction_hash: submission.transaction_hash,
+        })
+    }
+
+    /// Reuse the exact authenticated inter-Zone authority and bounded outbound transport owned
+    /// by this service. C5 must not create a second port with a different authority/session set.
+    pub fn drain_commonware_requests(&self) -> mpsc::Sender<InterZoneServiceRequest> {
+        self.drain_requests.clone()
+    }
+
+    /// Install the C5 consumer behind the already-running sole incoming receiver. Installation is
+    /// one-time for this epoch-scoped service handle; retrying with the same resource is idempotent
+    /// and a different resource fails closed instead of replacing an active callback.
+    pub fn install_fast_drain_incoming(
+        &self,
+        handler: Arc<dyn FastDrainIncomingHandler>,
+    ) -> Result<(), FastServiceError> {
+        install_fast_drain_handler(&self.drain_incoming, handler)
+    }
+
+    pub async fn install_next_roster_handoff_authority(
+        &self,
+        authority: NextRosterHandoffAuthoritySet,
+    ) -> Result<(), FastServiceError> {
+        self.handoff_authority.send(authority).await.map_err(|_| {
+            FastServiceError::Transport("Commonware handoff authority port is closed".into())
+        })
+    }
+
+    pub fn install_next_roster_checkpoint_handler(
+        &self,
+        handler: Arc<dyn FastNextRosterCheckpointHandler>,
+    ) -> Result<(), FastServiceError> {
+        install_checkpoint_handler(&self.checkpoint_incoming, handler)
+    }
+
     pub fn shutdown(&self) {
         self.runtime.stop.cancel();
     }
+}
+
+fn install_fast_drain_handler(
+    registry: &FastDrainIncomingRegistry,
+    handler: Arc<dyn FastDrainIncomingHandler>,
+) -> Result<(), FastServiceError> {
+    let mut installed = registry.write().map_err(|_| FastServiceError::Poisoned)?;
+    match installed.as_ref() {
+        Some(existing) if Arc::ptr_eq(existing, &handler) => Ok(()),
+        Some(_) => Err(FastServiceError::InvalidConfiguration),
+        None => {
+            *installed = Some(handler);
+            Ok(())
+        }
+    }
+}
+
+fn install_checkpoint_handler(
+    registry: &FastNextRosterCheckpointRegistry,
+    handler: Arc<dyn FastNextRosterCheckpointHandler>,
+) -> Result<(), FastServiceError> {
+    let mut installed = registry.write().map_err(|_| FastServiceError::Poisoned)?;
+    match installed.as_ref() {
+        Some(existing) if Arc::ptr_eq(existing, &handler) => Ok(()),
+        Some(_) => Err(FastServiceError::InvalidConfiguration),
+        None => {
+            *installed = Some(handler);
+            Ok(())
+        }
+    }
+}
+
+fn fast_drain_handler_for_payload(
+    payload: &[u8],
+    registry: &FastDrainIncomingRegistry,
+) -> Result<Option<Arc<dyn FastDrainIncomingHandler>>, FastServiceError> {
+    if !is_fast_drain_payload(payload) {
+        return Ok(None);
+    }
+    let handler = registry
+        .read()
+        .map_err(|_| FastServiceError::Poisoned)?
+        .clone()
+        .ok_or_else(|| {
+            FastServiceError::Transport("C5 drain handler is not installed".to_owned())
+        })?;
+    Ok(Some(handler))
 }
 
 fn authenticated_caller(auth: &AuthContext) -> Result<Address, FastServiceError> {
@@ -1200,6 +2120,8 @@ where
     let authority = inter_zone_authority(&config)?;
     commonware.install_authority(authority).await?;
     let incoming = commonware.take_incoming()?;
+    let drain_requests = commonware.requests.clone();
+    let handoff_authority = commonware.handoff_authority.clone();
     let receipts = Arc::new(PrivateCommittedReceiptHub::default());
     let durable = Arc::new(DurableServiceJournalAdapter::new(journal.clone()));
     let native = Arc::new(
@@ -1211,6 +2133,11 @@ where
         )
         .await?,
     );
+    let drain_native: Arc<dyn FastDrainNative> = native.clone();
+    let imported_barrier_native: Arc<dyn ImportedBarrierNativeSubmitter> = native.clone();
+    let exposure_native: Arc<dyn ExposureNativeSubmitter> = native.clone();
+    let drain_incoming = Arc::new(RwLock::new(None));
+    let checkpoint_incoming = Arc::new(RwLock::new(None));
     let service = Arc::new(FastTransferService::new(
         config,
         journal,
@@ -1235,12 +2162,32 @@ where
         }
     });
     let incoming_service = service.clone();
+    let incoming_drain = drain_incoming.clone();
+    let incoming_checkpoint = checkpoint_incoming.clone();
     let incoming_stop = runtime.stop.clone();
     tokio::spawn(async move {
-        run_commonware_incoming(incoming_service, incoming, incoming_stop.clone()).await;
+        run_commonware_incoming(
+            incoming_service,
+            incoming_drain,
+            incoming_checkpoint,
+            incoming,
+            incoming_stop.clone(),
+        )
+        .await;
         incoming_stop.cancel();
     });
-    Ok(FastServiceHandle::new(service, receipts, runtime))
+    Ok(FastServiceHandle::new(
+        service,
+        receipts,
+        drain_native,
+        imported_barrier_native,
+        exposure_native,
+        drain_incoming,
+        checkpoint_incoming,
+        drain_requests,
+        handoff_authority,
+        runtime,
+    ))
 }
 
 fn inter_zone_authority(
@@ -1286,48 +2233,227 @@ fn inter_zone_authority(
     Ok(InterZoneAuthoritySet { rosters, peers })
 }
 
+/// Construct the exact six old/next identity bindings used by both the old outbound carrier and
+/// each standalone next-member endpoint. Runtime supplies only finalized rosters plus explicit
+/// Tempo-config endpoints; this builder rejects partial, duplicate, or cross-Zone substitutions.
+pub fn next_roster_handoff_authority(
+    old_roster: &EpochRoster,
+    old_endpoints: &[PeerEndpoint; 3],
+    next_roster: &EpochRoster,
+    next_route: &DrainCommonwareRoute,
+) -> Result<NextRosterHandoffAuthoritySet, FastServiceError> {
+    if next_route.zone_id != next_roster.domain.zone_id
+        || next_route.portal != next_roster.domain.portal
+        || old_roster.domain.zone_id != next_roster.domain.zone_id
+        || old_roster.domain.portal != next_roster.domain.portal
+        || old_roster.domain.l1_chain_id != next_roster.domain.l1_chain_id
+        || old_roster.domain.chain_id != next_roster.domain.chain_id
+        || old_roster.domain.protocol_version != next_roster.domain.protocol_version
+        || next_roster.domain.authority_epoch <= old_roster.domain.authority_epoch
+    {
+        return Err(FastServiceError::InvalidConfiguration);
+    }
+    let old_members = old_endpoints
+        .iter()
+        .map(|endpoint| endpoint.member)
+        .collect::<BTreeSet<_>>();
+    let next_members = next_route
+        .endpoints
+        .iter()
+        .map(|endpoint| endpoint.member)
+        .collect::<BTreeSet<_>>();
+    if old_members != old_roster.members.into_iter().collect()
+        || next_members != next_roster.members.into_iter().collect()
+    {
+        return Err(FastServiceError::InvalidConfiguration);
+    }
+    let mut peers = BTreeMap::new();
+    for endpoint in old_endpoints {
+        if peers
+            .insert(
+                endpoint.ed25519.clone(),
+                InterZonePeerAuthority {
+                    domain: old_roster.domain,
+                    certificate_member: endpoint.member,
+                },
+            )
+            .is_some()
+        {
+            return Err(FastServiceError::InvalidConfiguration);
+        }
+    }
+    for endpoint in &next_route.endpoints {
+        if peers
+            .insert(
+                endpoint.identity.clone(),
+                InterZonePeerAuthority {
+                    domain: next_roster.domain,
+                    certificate_member: endpoint.member,
+                },
+            )
+            .is_some()
+        {
+            return Err(FastServiceError::InvalidConfiguration);
+        }
+    }
+    if peers.len() != 6 {
+        return Err(FastServiceError::InvalidConfiguration);
+    }
+    Ok(NextRosterHandoffAuthoritySet {
+        old_roster: old_roster.clone(),
+        next_roster: next_roster.clone(),
+        peers,
+    })
+}
+
 async fn run_commonware_incoming(
     service: Arc<FastTransferService>,
+    drain: Arc<FastDrainIncomingRegistry>,
+    checkpoint: Arc<FastNextRosterCheckpointRegistry>,
     mut incoming: mpsc::Receiver<AuthenticatedInterZoneRequest>,
     stop: CancellationToken,
 ) {
+    let mut tasks = JoinSet::new();
+    let mut admission_tasks = 0usize;
     loop {
+        if tasks.len() >= INCOMING_DISPATCH_LIMIT {
+            tokio::select! {
+                () = stop.cancelled() => break,
+                completed = tasks.join_next() => {
+                    if completed.is_some_and(|result| result.unwrap_or(false)) {
+                        admission_tasks = admission_tasks.saturating_sub(1);
+                    }
+                }
+            }
+            continue;
+        }
         tokio::select! {
-            () = stop.cancelled() => return,
+            biased;
+            () = stop.cancelled() => break,
+            completed = tasks.join_next(), if !tasks.is_empty() => {
+                if completed.is_some_and(|result| result.unwrap_or(false)) {
+                    admission_tasks = admission_tasks.saturating_sub(1);
+                }
+            }
             request = incoming.recv() => {
                 let Some(request) = request else {
                     tracing::error!(target: "zone::fast", "Commonware inter-Zone incoming port closed");
-                    return;
+                    break;
                 };
-                let result = service
-                    .receive_authenticated(
-                        &request.session,
-                        request.stream,
-                        request.sequence,
-                        &request.payload,
-                    )
-                    .await
-                    .and_then(|ack| {
-                        if ack.remote_member == request.session.remote_member()
-                            && ack.stream == request.stream
-                            && ack.sequence == request.sequence
-                        {
-                            Ok(())
-                        } else {
-                            Err(FastServiceError::UnauthenticatedPeer)
-                        }
-                    })
-                    .map_err(|error| error.to_string());
-                let _ = request.response.send(result);
+                let admission = incoming_request_is_admission(&request.payload);
+                if admission && admission_tasks >= INCOMING_ADMISSION_DISPATCH_LIMIT {
+                    let _ = request.response.send(Err(
+                        "fast admission dispatch capacity is reserved for terminal recovery"
+                            .to_owned(),
+                    ));
+                    continue;
+                }
+                if admission {
+                    admission_tasks += 1;
+                }
+                let service = service.clone();
+                let drain = drain.clone();
+                let checkpoint = checkpoint.clone();
+                tasks.spawn(async move {
+                    let result = dispatch_commonware_request(service, drain, checkpoint, &request)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = request.response.send(result);
+                    admission
+                });
             }
         }
     }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+
+fn incoming_request_is_admission(payload: &[u8]) -> bool {
+    if is_checkpoint_handoff_payload(payload) || is_fast_drain_payload(payload) {
+        return false;
+    }
+    match CanonicalFastServiceWire.decode(payload) {
+        Ok(ServiceDelivery::Quote(_)) | Err(_) => true,
+        Ok(_) => false,
+    }
+}
+
+async fn dispatch_commonware_request(
+    service: Arc<FastTransferService>,
+    drain: Arc<FastDrainIncomingRegistry>,
+    checkpoint: Arc<FastNextRosterCheckpointRegistry>,
+    request: &AuthenticatedInterZoneRequest,
+) -> Result<Vec<u8>, FastServiceError> {
+    if is_checkpoint_handoff_payload(&request.payload) {
+        let handler = checkpoint
+            .read()
+            .map_err(|_| FastServiceError::Poisoned)?
+            .clone()
+            .ok_or_else(|| {
+                FastServiceError::Transport(
+                    "next-roster checkpoint signer is not installed".to_owned(),
+                )
+            })?;
+        return handler
+            .receive_authenticated(
+                &request.session,
+                request.stream,
+                request.sequence,
+                &request.payload,
+            )
+            .await;
+    }
+    if let Some(handler) = fast_drain_handler_for_payload(&request.payload, &drain)? {
+        return handler
+            .receive_authenticated(
+                &request.session,
+                request.stream,
+                request.sequence,
+                &request.payload,
+            )
+            .await
+            .map(|()| Vec::new());
+    }
+    service
+        .receive_authenticated(
+            &request.session,
+            request.stream,
+            request.sequence,
+            &request.payload,
+        )
+        .await
+        .and_then(|ack| {
+            if ack.remote_member == request.session.remote_member()
+                && ack.stream == request.stream
+                && ack.sequence == request.sequence
+            {
+                Ok(Vec::new())
+            } else {
+                Err(FastServiceError::UnauthenticatedPeer)
+            }
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use zone_fast_transfer::drain::{BarrierInventory, CommittedSourceLock};
     use zone_primitives::fast_transfer::{AssetId, CertificateBody, SignatureBytes, ZoneDomain};
+
+    struct DenyDrain;
+
+    impl FastDrainIncomingHandler for DenyDrain {
+        fn receive_authenticated<'a>(
+            &'a self,
+            _session: &'a AuthenticatedPeerSession,
+            _stream: u64,
+            _sequence: u64,
+            _payload: &'a [u8],
+        ) -> ServiceFuture<'a, Result<(), FastServiceError>> {
+            Box::pin(async { Err(FastServiceError::UnauthenticatedPeer) })
+        }
+    }
 
     fn domain(zone_id: u32, byte: u8) -> ZoneDomain {
         ZoneDomain {
@@ -1403,6 +2529,21 @@ mod tests {
     }
 
     #[test]
+    fn locked_work_uses_reserved_terminal_dispatch_and_malformed_work_does_not() {
+        let intent = intent();
+        let encoded = CanonicalFastServiceWire
+            .encode(&ServiceDelivery::Locked {
+                certificate: certificate(&intent),
+                intent,
+                cancellation: None,
+            })
+            .unwrap();
+        assert!(!incoming_request_is_admission(&encoded));
+        assert!(incoming_request_is_admission(b"malformed"));
+        assert!(!incoming_request_is_admission(b"TZDRN14!recovery"));
+    }
+
+    #[test]
     fn envelope_rejects_certificate_for_different_intent() {
         let first = intent();
         let mut second = first.clone();
@@ -1414,6 +2555,93 @@ mod tests {
         let wire = CanonicalFastServiceWire;
         let encoded = wire.encode(&delivery).unwrap();
         assert!(wire.decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn c5_magic_is_multiplexed_and_missing_handler_fails_closed() {
+        let registry = RwLock::new(None);
+        assert!(
+            fast_drain_handler_for_payload(b"\x01\x01ordinary-c4", &registry)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            fast_drain_handler_for_payload(b"TZDRN14!", &registry),
+            Err(FastServiceError::Transport(_))
+        ));
+        assert!(!is_fast_drain_payload(b"TZDRN13!"));
+
+        let first: Arc<dyn FastDrainIncomingHandler> = Arc::new(DenyDrain);
+        install_fast_drain_handler(&registry, first.clone()).unwrap();
+        install_fast_drain_handler(&registry, first).unwrap();
+        assert!(
+            fast_drain_handler_for_payload(b"TZDRN14!frame", &registry)
+                .unwrap()
+                .is_some()
+        );
+        let replacement: Arc<dyn FastDrainIncomingHandler> = Arc::new(DenyDrain);
+        assert!(matches!(
+            install_fast_drain_handler(&registry, replacement),
+            Err(FastServiceError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn closed_resolve_uses_exact_four_field_abi_and_rejects_wrong_proof() {
+        let intent = intent();
+        let lock = CommittedSourceLock {
+            lock: certificate(&intent),
+            intent,
+        };
+        let inventory = BarrierInventory::build(
+            1,
+            lock.intent.destination.portal,
+            lock.intent.destination.authority_epoch,
+            B256::repeat_byte(21),
+            lock.intent.source.portal,
+            lock.intent.source.authority_epoch,
+            10,
+            B256::repeat_byte(22),
+            1,
+            2,
+            3,
+            B256::repeat_byte(23),
+            B256::repeat_byte(24),
+            vec![lock],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let (_, _, calldata) =
+            encode_old_lock_resolution(&inventory.statement, &inventory.locks[0]).unwrap();
+        let call = IFastTransfer::resolveCall::abi_decode(&calldata).unwrap();
+        let expected_intent = inventory.locks[0].lock.intent.canonical_bytes();
+        let expected_lock = inventory.locks[0].lock.lock.canonical_bytes();
+        let expected_proof = inventory.locks[0]
+            .native_barrier_proof(1, &inventory.statement)
+            .unwrap();
+        assert_eq!(call.canonicalIntent.as_ref(), expected_intent.as_slice());
+        assert_eq!(call.lockCertificate.as_ref(), expected_lock.as_slice());
+        assert!(call.cancellation.is_empty());
+        assert_eq!(call.barrierProof.as_ref(), expected_proof.as_slice());
+
+        let mut wrong_statement = inventory.statement.clone();
+        wrong_statement.complete_lock_root = B256::repeat_byte(25);
+        assert!(matches!(
+            encode_old_lock_resolution(&wrong_statement, &inventory.locks[0]),
+            Err(FastDrainError::Protocol(_))
+        ));
+
+        let mut wrong_locked_amount = inventory.locks[0].clone();
+        wrong_locked_amount.lock.lock.body.outcome = TransferOutcome::Locked {
+            escrow: FAST_TRANSFER_ADDRESS,
+            amount: U256::from(101),
+        };
+        assert!(matches!(
+            encode_old_lock_resolution(&inventory.statement, &wrong_locked_amount),
+            Err(FastDrainError::Native(_))
+        ));
     }
 
     #[test]

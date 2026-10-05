@@ -365,11 +365,14 @@ impl ReplenishmentJob {
 
     /// Record finalized treasury funds from the withdrawal leg.
     pub fn record_treasury_credit(&mut self, net_amount: U256) -> Result<bool, ReplenishmentError> {
-        if net_amount != self.gross_amount || !self.withdrawal_evidence_complete() {
-            return Err(ReplenishmentError::InvalidAmount);
-        }
         match (self.stage, self.treasury_credit) {
             (ReplenishmentStage::WithdrawalRequested, None) => {
+                if net_amount.is_zero() || net_amount > self.gross_amount {
+                    return Err(ReplenishmentError::InvalidAmount);
+                }
+                if !self.withdrawal_evidence_complete() {
+                    return Err(ReplenishmentError::OutOfOrder);
+                }
                 self.treasury_credit = Some(net_amount);
                 self.stage = ReplenishmentStage::TreasuryFunded;
                 Ok(true)
@@ -508,20 +511,22 @@ impl ReplenishmentJob {
 
     /// Record actual destination pool credit. This is the only availability-increasing event.
     pub fn record_pool_credit(&mut self, net_amount: U256) -> Result<bool, ReplenishmentError> {
-        let treasury_credit = self.treasury_credit.ok_or(ReplenishmentError::OutOfOrder)?;
-        let deposit_fee = self
-            .deposit
-            .as_ref()
-            .and_then(|record| record.deposit_fee)
-            .ok_or(ReplenishmentError::OutOfOrder)?;
-        if net_amount.is_zero()
-            || net_amount.checked_add(deposit_fee.amount) != Some(treasury_credit)
-            || !self.deposit_evidence_complete()
-        {
-            return Err(ReplenishmentError::InvalidAmount);
-        }
         match (self.stage, self.pool_credit) {
             (ReplenishmentStage::DepositSubmitted, None) => {
+                let treasury_credit = self.treasury_credit.ok_or(ReplenishmentError::OutOfOrder)?;
+                let deposit_fee = self
+                    .deposit
+                    .as_ref()
+                    .and_then(|record| record.deposit_fee)
+                    .ok_or(ReplenishmentError::OutOfOrder)?;
+                if net_amount.is_zero()
+                    || net_amount.checked_add(deposit_fee.amount) != Some(treasury_credit)
+                {
+                    return Err(ReplenishmentError::InvalidAmount);
+                }
+                if !self.deposit_evidence_complete() {
+                    return Err(ReplenishmentError::OutOfOrder);
+                }
                 self.pool_credit = Some(net_amount);
                 self.stage = ReplenishmentStage::PoolCredited;
                 Ok(true)

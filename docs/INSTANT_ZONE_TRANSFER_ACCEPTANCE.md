@@ -24,12 +24,17 @@ an explicit fail-closed configuration. Operator-attested settlement is a separat
 never an implicit fallback for missing or invalid proof-required evidence.
 
 All direct Tempo dependencies are pinned to
-[`19082cd8a0b7d3f5b3acf84683f3306710180f3b`](https://github.com/tempoxyz/tempo/commit/19082cd8a0b7d3f5b3acf84683f3306710180f3b),
+[`eee71306b9192cb0bd02b4a536e4f2a1040bffc3`](https://github.com/tempoxyz/tempo/commit/eee71306b9192cb0bd02b4a536e4f2a1040bffc3),
 published in [Tempo #8118](https://github.com/tempoxyz/tempo/pull/8118). This includes typed finalized
 epoch storage, native factory dispatch and the matching T14 Portal runtime. The embedded runtime
-was byte-for-byte compared with the compiled Solidity source: 37,856 bytes with hash
-`0xc25a2bb761ce6eb1338b45a53de4a22ab13b9d88d3a8d83a523bcc1ac69fa5d7`.
+was byte-for-byte compared with the compiled Solidity source: 37,935 bytes with hash
+`0x8395e7f34efb85d08826ec2e0f56653aae29cbaa4504f5caea337a21052ae258`.
 This is source/build verification, not a production deployment or activation.
+
+The factory and Solidity checkpoint gates now require the exact accepted final height/hash,
+nonzero Raft log index and nonzero state root. The matched source passed 17 native factory tests,
+15 Solidity fast-epoch tests and the T14 runtime/storage-preservation upgrade test. These results
+do not replace current combined-node and independent recovery validation.
 
 ## Implementation boundaries
 
