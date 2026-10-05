@@ -1,7 +1,7 @@
 use std::{future::Future, io, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use alloy_genesis::Genesis;
-use clap::{Args, Parser};
+use clap::{Args, Parser, ValueEnum};
 use tempo_chainspec::TempoChainSpec;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
@@ -37,9 +37,13 @@ async fn main() -> ExitCode {
 #[derive(Debug, Parser)]
 #[command(
     name = "tempo-zone-prover-enclave",
-    about = "AWS Nitro Enclave service for the Tempo Zone SPF"
+    about = "Nitro/experimental TDX service for the Tempo Zone SPF"
 )]
 struct Cli {
+    /// Attestation backend. TDX is experimental and is not yet accepted for L1 settlement.
+    #[arg(long, value_enum, default_value_t = Backend::Nitro)]
+    backend: Backend,
+
     /// Port on which the service accepts verification requests.
     #[arg(long, env = "SPF_PORT", default_value_t = 5000)]
     port: u32,
@@ -64,23 +68,52 @@ struct Cli {
     timeouts: Timeouts,
 }
 
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum Backend {
+    #[default]
+    Nitro,
+    Tdx,
+}
+
 impl Cli {
     async fn run(self) -> io::Result<()> {
         let specs = self.load_trusted_chain_specs()?;
 
         #[cfg(target_os = "linux")]
-        linux::verify_entropy_configuration()?;
-        let tls = AttestedServer::new(|nonce, user_data| {
-            nitro_attestation(user_data, Some(nonce)).map_err(io::Error::other)
-        })?;
+        match self.backend {
+            Backend::Nitro => linux::verify_entropy_configuration()?,
+            Backend::Tdx => linux::verify_tdx_entropy_configuration()?,
+        }
+        let tls = match self.backend {
+            Backend::Nitro => AttestedServer::new(|nonce, user_data| {
+                nitro_attestation(user_data, Some(nonce)).map_err(io::Error::other)
+            })?,
+            Backend::Tdx => AttestedServer::new_tdx()?,
+        };
 
         if self.use_tcp {
-            return serve_tcp(self.port, self.max_request_bytes, specs, self.timeouts, tls).await;
+            return serve_tcp(
+                self.port,
+                self.max_request_bytes,
+                specs,
+                self.timeouts,
+                tls,
+                self.backend,
+            )
+            .await;
         }
 
         #[cfg(target_os = "linux")]
         {
-            linux::serve_vsock(self.port, self.max_request_bytes, specs, self.timeouts, tls).await
+            linux::serve_vsock(
+                self.port,
+                self.max_request_bytes,
+                specs,
+                self.timeouts,
+                tls,
+                self.backend,
+            )
+            .await
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -152,6 +185,7 @@ async fn serve_tcp(
     specs: TrustedChainSpecs,
     timeouts: Timeouts,
     tls: AttestedServer,
+    backend: Backend,
 ) -> io::Result<()> {
     use tokio::net::TcpListener;
     use tracing::info;
@@ -178,7 +212,7 @@ async fn serve_tcp(
                 continue;
             }
         };
-        handle_connection(connection, &tls, maximum, &specs, &timeouts).await;
+        handle_connection(connection, &tls, maximum, &specs, &timeouts, backend).await;
     }
 }
 
@@ -214,12 +248,41 @@ mod linux {
         Ok(())
     }
 
+    pub(super) fn verify_tdx_entropy_configuration() -> io::Result<()> {
+        let cmdline = std::fs::read_to_string("/proc/cmdline")?;
+        for required in ["random.trust_bootloader=off", "random.trust_cpu=on"] {
+            let key = required.split_once('=').unwrap().0;
+            let arguments: Vec<_> = cmdline
+                .split_ascii_whitespace()
+                .filter(|argument| {
+                    argument
+                        .split_once('=')
+                        .is_some_and(|(name, _)| name == key)
+                })
+                .collect();
+            if arguments != [required] {
+                return Err(io::Error::other(format!(
+                    "TDX guest kernel requires exactly one {required} argument"
+                )));
+            }
+        }
+        match std::fs::read_to_string("/sys/devices/virtual/misc/hw_random/rng_current") {
+            Ok(rng) if rng.trim().is_empty() => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(io::Error::other(
+                "TDX guest must not use host-supplied hardware RNG; use CPU entropy",
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) async fn serve_vsock(
         port: u32,
         maximum: usize,
         specs: TrustedChainSpecs,
         timeouts: Timeouts,
         tls: AttestedServer,
+        backend: Backend,
     ) -> io::Result<()> {
         let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))?;
         info!(
@@ -237,7 +300,7 @@ mod linux {
                     continue;
                 }
             };
-            handle_connection(connection, &tls, maximum, &specs, &timeouts).await;
+            handle_connection(connection, &tls, maximum, &specs, &timeouts, backend).await;
         }
     }
 }
@@ -251,6 +314,7 @@ async fn handle_connection<T>(
     maximum: usize,
     specs: &TrustedChainSpecs,
     timeouts: &Timeouts,
+    backend: Backend,
 ) where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -283,7 +347,7 @@ async fn handle_connection<T>(
         None => return,
     };
     let request_bytes = connection.last_received_bytes().unwrap_or_default();
-    let response = process_request(request, specs);
+    let response = process_request_with_backend(request, specs, backend);
     if let Some(Ok(response_bytes)) = timed(connection.send(response), timeouts.response).await {
         info!(
             request_bytes,
@@ -312,7 +376,16 @@ where
     }
 }
 
+#[cfg(test)]
 fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyResponse {
+    process_request_with_backend(request, specs, Backend::Nitro)
+}
+
+fn process_request_with_backend(
+    request: VerifyRequest,
+    specs: &TrustedChainSpecs,
+    backend: Backend,
+) -> VerifyResponse {
     if request.version != PROTOCOL_VERSION {
         return VerifyResponse::Error {
             version: PROTOCOL_VERSION,
@@ -362,22 +435,30 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
 
     let public_inputs = request.witness.public_inputs.clone();
     match prove_zone_batch(&config, request.witness) {
-        Ok(output) => match build_proof_bundle(&public_inputs, &output, |digest| {
-            nitro_attestation(digest.as_slice(), None)
-        }) {
-            Ok(proof_bundle) => VerifyResponse::Ok {
-                version: PROTOCOL_VERSION,
-                request_id: request.request_id,
-                output: Box::new(output),
-                proof_bundle,
-            },
-            Err(message) => VerifyResponse::Error {
-                version: PROTOCOL_VERSION,
-                request_id: Some(request.request_id),
-                code: ErrorCode::AttestationUnavailable,
-                message,
-            },
-        },
+        Ok(output) => {
+            match build_proof_bundle_for_backend(&public_inputs, &output, backend, |digest| {
+                match backend {
+                    Backend::Nitro => nitro_attestation(digest.as_slice(), None),
+                    Backend::Tdx => {
+                        zone_prover::tdx::quote(&zone_prover::tdx::batch_report_data(digest))
+                            .map_err(|error| error.to_string())
+                    }
+                }
+            }) {
+                Ok(proof_bundle) => VerifyResponse::Ok {
+                    version: PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    output: Box::new(output),
+                    proof_bundle,
+                },
+                Err(message) => VerifyResponse::Error {
+                    version: PROTOCOL_VERSION,
+                    request_id: Some(request.request_id),
+                    code: ErrorCode::AttestationUnavailable,
+                    message,
+                },
+            }
+        }
         Err(error) => VerifyResponse::Error {
             version: PROTOCOL_VERSION,
             request_id: Some(request.request_id),
@@ -387,6 +468,7 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
     }
 }
 
+#[cfg(test)]
 fn build_proof_bundle<F>(
     public_inputs: &PublicInputs,
     output: &BatchOutput,
@@ -395,10 +477,34 @@ fn build_proof_bundle<F>(
 where
     F: FnOnce(alloy_primitives::B256) -> Result<Vec<u8>, String>,
 {
-    let digest = nitro_batch_attestation_hash(public_inputs, output);
+    build_proof_bundle_for_backend(public_inputs, output, Backend::Nitro, attestor)
+}
+
+fn build_proof_bundle_for_backend<F>(
+    public_inputs: &PublicInputs,
+    output: &BatchOutput,
+    backend: Backend,
+    attestor: F,
+) -> Result<ProofBundle, String>
+where
+    F: FnOnce(alloy_primitives::B256) -> Result<Vec<u8>, String>,
+{
+    let (digest, verifier_config) = match backend {
+        Backend::Nitro => (
+            nitro_batch_attestation_hash(public_inputs, output),
+            NITRO_VERIFIER_CONFIG_V1,
+        ),
+        Backend::Tdx => (
+            zone_prover::tdx_batch_attestation_hash(public_inputs, output),
+            zone_prover::TDX_VERIFIER_CONFIG_V1,
+        ),
+    };
     let document = attestor(digest)?;
+    if document.is_empty() {
+        return Err("attestor returned empty evidence".into());
+    }
     Ok(ProofBundle {
-        verifier_config: NITRO_VERIFIER_CONFIG_V1.into(),
+        verifier_config: verifier_config.into(),
         proof: document.into(),
     })
 }
@@ -524,6 +630,29 @@ mod tests {
 
         assert_eq!(bundle.verifier_config.as_ref(), NITRO_VERIFIER_CONFIG_V1);
         assert_eq!(bundle.proof.as_ref(), document);
+
+        let tdx_digest = zone_prover::tdx_batch_attestation_hash(&public_inputs, &output);
+        assert_ne!(tdx_digest, expected_digest);
+        let tdx = build_proof_bundle_for_backend(&public_inputs, &output, Backend::Tdx, |digest| {
+            assert_eq!(digest, tdx_digest);
+            Ok(document.clone())
+        })
+        .unwrap();
+        assert_eq!(
+            tdx.verifier_config.as_ref(),
+            zone_prover::TDX_VERIFIER_CONFIG_V1
+        );
+        assert!(zone_prover::VerifierMode::try_from(tdx.verifier_config.as_ref()).is_err());
+        assert!(
+            build_proof_bundle_for_backend(&public_inputs, &output, Backend::Tdx, |_| Err(
+                "QGS unavailable".into()
+            ))
+            .is_err()
+        );
+        assert!(
+            build_proof_bundle_for_backend(&public_inputs, &output, Backend::Tdx, |_| Ok(vec![]))
+                .is_err()
+        );
 
         let mut other_height = output;
         other_height.next_zone_height += 1;

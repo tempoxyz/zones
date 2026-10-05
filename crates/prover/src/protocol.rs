@@ -13,6 +13,11 @@ pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
 /// Compile-time Keccak-256 hash of [`NITRO_VERIFIER_CONFIG_V1`].
 pub const NITRO_VERIFIER_CONFIG_V1_HASH: B256 =
     B256::new(Keccak256::new().update(NITRO_VERIFIER_CONFIG_V1).finalize());
+/// Experimental TDX profile. Not accepted by the pinned Tempo L1 verifier.
+pub const TDX_VERIFIER_CONFIG_V1: &[u8] = &[3];
+/// Hash of the experimental TDX configuration.
+pub const TDX_VERIFIER_CONFIG_V1_HASH: B256 =
+    B256::new(Keccak256::new().update(TDX_VERIFIER_CONFIG_V1).finalize());
 /// Canonical one-byte configuration selecting temporary proofless fallback settlement.
 pub const NO_PROOF_FALLBACK_VERIFIER: &[u8] = &[2];
 /// Compile-time Keccak-256 hash of [`NO_PROOF_FALLBACK_VERIFIER`].
@@ -136,7 +141,7 @@ sol! {
 pub struct ProofBundle {
     /// Opaque configuration passed to `IVerifier` and committed by the settlement certificate.
     pub verifier_config: Bytes,
-    /// Raw COSE/CBOR Nitro attestation document.
+    /// Hardware evidence: Nitro COSE/CBOR document or experimental TDX quote.
     pub proof: Bytes,
 }
 
@@ -169,7 +174,7 @@ pub enum VerifyResponse {
         request_id: String,
         /// Output produced by the Zone stateless proof function.
         output: Box<BatchOutput>,
-        /// Nitro proof material returned by the attesting prover.
+        /// Proof material returned by the attesting prover.
         proof_bundle: ProofBundle,
     },
     /// The request could not be decoded, accepted, or verified.
@@ -199,7 +204,7 @@ pub enum ErrorCode {
     UnsupportedChain,
     /// Stateless proof execution rejected the supplied witness.
     VerificationFailed,
-    /// The prover could not obtain an attestation from the Nitro Secure Module.
+    /// The prover could not obtain hardware attestation evidence.
     AttestationUnavailable,
     /// The framed request exceeds the configured size limit.
     RequestTooLarge,
@@ -215,6 +220,19 @@ pub enum ErrorCode {
 /// require its caller to be the canonical portal derived from the Zone ID. Every portal-facing
 /// commitment prevents reuse for a different batch.
 pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &BatchOutput) -> B256 {
+    batch_attestation_hash(public_inputs, output, NITRO_VERIFIER_CONFIG_V1_HASH)
+}
+
+/// Experimental TDX batch digest. Uses the existing settlement schema with a distinct config hash.
+pub fn tdx_batch_attestation_hash(public_inputs: &PublicInputs, output: &BatchOutput) -> B256 {
+    batch_attestation_hash(public_inputs, output, TDX_VERIFIER_CONFIG_V1_HASH)
+}
+
+fn batch_attestation_hash(
+    public_inputs: &PublicInputs,
+    output: &BatchOutput,
+    verifier_config_hash: B256,
+) -> B256 {
     let attestation = NitroBatchAttestation {
         parentChainId: alloy_primitives::U256::from(public_inputs.parent_chain_id),
         verifier: ZONE_VERIFIER_ADDRESS,
@@ -233,7 +251,7 @@ pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &Batch
         prevProcessedTokenCount: output.token_enablement_transition.prevProcessedTokenCount,
         nextProcessedTokenCount: output.token_enablement_transition.nextProcessedTokenCount,
         withdrawalQueueHash: output.withdrawal_queue_hash,
-        verifierConfigHash: NITRO_VERIFIER_CONFIG_V1_HASH,
+        verifierConfigHash: verifier_config_hash,
     };
     attestation.eip712_hash_struct()
 }
