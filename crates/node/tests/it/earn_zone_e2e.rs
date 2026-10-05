@@ -801,7 +801,7 @@ impl EarnZoneFixture {
             portal_after - portal_before
         );
         eyre::ensure!(
-            self.l1.balance_of(token, self.router).await? == U256::ZERO,
+            self.l1.balance_of(token, self.router).await?.is_zero(),
             "{description} left tokens on the closed-loop router"
         );
         Ok(())

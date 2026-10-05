@@ -263,7 +263,7 @@ impl DeployNeobankFixtures {
             .call()
             .await
             .wrap_err("failed querying ZonePortal zone ID")?;
-        ensure!(messenger != Address::ZERO, "ZonePortal messenger is zero");
+        ensure!(!messenger.is_zero(), "ZonePortal messenger is zero");
         let mut allowed_accounts = read_private_address_file(&self.allowed_accounts_file)?;
         allowed_accounts.sort_unstable();
         allowed_accounts.dedup();
@@ -405,7 +405,7 @@ impl DeployNeobankFixtures {
             ("EarnVault", earn_vault),
             ("EarnFees", earn_fees),
         ] {
-            ensure!(address != Address::ZERO, "{label} address is zero");
+            ensure!(!address.is_zero(), "{label} address is zero");
         }
 
         let receipt = ERC4626EngineInitializer::new(engine, &deployer_provider)
@@ -561,11 +561,8 @@ fn portal_role_assignments(
     earn_router: Address,
     messenger: Address,
 ) -> eyre::Result<Vec<(Address, PortalRole)>> {
-    ensure!(
-        bridge_wallet != Address::ZERO,
-        "Bridge wallet address is zero"
-    );
-    ensure!(earn_router != Address::ZERO, "EarnRouter address is zero");
+    ensure!(!bridge_wallet.is_zero(), "Bridge wallet address is zero");
+    ensure!(!earn_router.is_zero(), "EarnRouter address is zero");
     ensure!(
         bridge_wallet != earn_router,
         "Bridge wallet and EarnRouter addresses must be distinct"
@@ -581,7 +578,7 @@ fn portal_role_assignments(
     let mut assignments = Vec::with_capacity(allowed_accounts.len() + 2);
     for account in allowed_accounts {
         ensure!(
-            *account != Address::ZERO,
+            !account.is_zero(),
             "the benchmark account allowlist contains the zero address"
         );
         ensure!(
@@ -861,14 +858,14 @@ async fn configure_token_authority<P: Provider<TempoNetwork>>(
             })?;
         check(&receipt, &format!("seed {label} token authority reserve"))?;
         ensure!(
-            authority_contract
+            !authority_contract
                 .getReserveStore(token)
                 .call()
                 .await
                 .wrap_err_with(|| {
                     format!("failed querying the {label} token authority reserve store")
                 })?
-                != Address::ZERO,
+                .is_zero(),
             "{label} token authority reserve store was not created"
         );
     }
@@ -938,10 +935,7 @@ async fn create_reserve_ledger<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed waiting for Bridge reserve ledger creation")?;
     check(&receipt, "create Bridge reserve ledger")?;
-    ensure!(
-        token != Address::ZERO,
-        "Bridge reserve ledger address is zero"
-    );
+    ensure!(!token.is_zero(), "Bridge reserve ledger address is zero");
     println!("Created Bridge reserve ledger: {token}");
     Ok(token)
 }

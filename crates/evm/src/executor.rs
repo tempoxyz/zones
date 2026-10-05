@@ -324,7 +324,7 @@ mod tests {
     use alloy_sol_types::{SolCall, SolEvent};
     use reth_chainspec::EthChainSpec as _;
     use reth_primitives_traits::Recovered;
-    use revm::database::{CacheDB, EmptyDB};
+    use revm::database::InMemoryDB;
     use tempo_chainspec::{hardfork::TempoHardfork, spec::DEV};
     use tempo_evm::{TempoBlockEnv, TempoBlockExecutionCtx};
     use tempo_precompiles::{
@@ -535,7 +535,7 @@ mod tests {
         let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let mut env = EvmEnv::default();
         env.cfg_env.spec = TempoHardfork::T11;
-        let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
+        let evm = factory.create_evm(InMemoryDB::default(), env);
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
                 parent_hash: B256::ZERO,
@@ -588,7 +588,7 @@ mod tests {
         zone_genesis.config.chain_id = zone_chain_id(DEV.chain_id(), 2).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
         let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
-        let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), EvmEnv::default());
+        let evm = factory.create_evm(InMemoryDB::default(), EvmEnv::default());
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
                 parent_hash: B256::ZERO,
@@ -682,7 +682,7 @@ mod tests {
             let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
             let mut env: EvmEnv<TempoHardfork, TempoBlockEnv> = EvmEnv::default();
             env.cfg_env.spec = spec;
-            let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
+            let evm = factory.create_evm(InMemoryDB::default(), env);
             let ctx = TempoBlockExecutionCtx {
                 inner: EthBlockExecutionCtx {
                     parent_hash: B256::ZERO,
@@ -908,7 +908,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_HASH, genesis_hash.into())
             .unwrap();
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)

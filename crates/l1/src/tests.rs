@@ -82,8 +82,7 @@ fn parse_fixture_b256(value: &str) -> B256 {
 }
 
 fn parse_fixture_hex(value: &str) -> Vec<u8> {
-    const_hex::decode(value.strip_prefix("0x").unwrap_or(value))
-        .unwrap_or_else(|err| panic!("invalid fixture hex {value}: {err}"))
+    const_hex::decode(value).unwrap_or_else(|err| panic!("invalid fixture hex {value}: {err}"))
 }
 
 fn parse_fixture_fixed<const N: usize>(value: &str, name: &str) -> [u8; N] {
