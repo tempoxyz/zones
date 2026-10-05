@@ -563,6 +563,10 @@ jobs:
           set: tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
           project: 0c6tg19qsp
           load: true
+          # Rebuild the fallback toolchain without layers tied to an earlier
+          # Bake call's expired registry authorization session.
+          no-cache: true
+          pull: true
 
 
       - name: Build tempo-zone-prover EIF
