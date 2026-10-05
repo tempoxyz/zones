@@ -696,6 +696,8 @@ pub enum SigningError<E: std::error::Error + 'static> {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -720,5 +722,37 @@ mod tests {
             FastActivation::from_finalized_epoch(epoch).unwrap_err(),
             ActivationError::UnsupportedPinnedDependencies
         );
+    }
+
+    #[test]
+    fn committed_replay_material_survives_journal_reopen() {
+        let directory = tempdir().unwrap();
+        let input = ReplicatedBlockInput {
+            epoch: 4,
+            parent_hash: B256::repeat_byte(1),
+            block_input: Bytes::from_static(b"attributes"),
+            transactions: vec![Bytes::from_static(b"opening"), Bytes::from_static(b"user")],
+            l1_inputs: Bytes::from_static(b"anchor"),
+            replay_witness: Bytes::from_static(b"witness"),
+        };
+        let committed = CommittedPrefix {
+            term: 7,
+            index: 11,
+            block_height: 9,
+            block_hash: B256::repeat_byte(2),
+            state_root: B256::repeat_byte(3),
+        };
+        {
+            let journal = DurableJournal::open(directory.path()).unwrap();
+            journal.persist_committed(&input, &committed).unwrap();
+        }
+        let reopened = DurableJournal::open(directory.path()).unwrap();
+        assert_eq!(reopened.committed_prefix().unwrap(), Some(committed));
+        let replay = reopened.replicated_blocks_from(0).unwrap();
+        assert_eq!(
+            replay[0].transactions,
+            vec![b"opening".to_vec(), b"user".to_vec()]
+        );
+        assert_eq!(replay[0].witness, b"witness");
     }
 }

@@ -132,7 +132,7 @@ impl FastTransfer {
         let total = intent
             .principal
             .checked_add(intent.fee)
-            .ok_or_else(|| FastTransferError::arithmetic_overflow())?;
+            .ok_or_else(FastTransferError::arithmetic_overflow)?;
         if intent.transferId != Self::expected_transfer_id(intent)
             || supplied_hash != Self::intent_hash(intent)
             || intent.principal == 0
@@ -232,7 +232,7 @@ impl FastTransfer {
         let total = intent
             .principal
             .checked_add(intent.fee)
-            .ok_or_else(|| FastTransferError::arithmetic_overflow())?;
+            .ok_or_else(FastTransferError::arithmetic_overflow)?;
         self.transfer_in(intent.sourceToken, caller, total)?;
         self.write_intent(&intent, intent_hash, total)?;
         self.consumed_nonces[caller][intent.transferNonce].write(intent_hash)?;
@@ -297,7 +297,7 @@ impl FastTransfer {
         let limit = self.exposure_limits[intent.destinationToken][intent.sourceZone].read()?;
         let next_exposure = exposure
             .checked_add(intent.principal)
-            .ok_or_else(|| FastTransferError::arithmetic_overflow())?;
+            .ok_or_else(FastTransferError::arithmetic_overflow)?;
         if intent.principal > spendable || limit == 0 || next_exposure > limit {
             return self.record_rejection(&intent, intent_hash, 2);
         }
@@ -435,7 +435,7 @@ impl FastTransfer {
         let balance = self.pool_balances[token]
             .read()?
             .checked_add(amount)
-            .ok_or_else(|| FastTransferError::arithmetic_overflow())?;
+            .ok_or_else(FastTransferError::arithmetic_overflow)?;
         if minimum_reserve > balance {
             return Err(FastTransferError::insufficient_pool_liquidity().into());
         }
@@ -518,7 +518,7 @@ impl FastTransfer {
         let exposure = self.unsettled_exposure[token][source_zone].read()?;
         let next = exposure
             .checked_sub(amount)
-            .ok_or_else(|| FastTransferError::invalid_retirement_evidence())?;
+            .ok_or_else(FastTransferError::invalid_retirement_evidence)?;
         self.unsettled_exposure[token][source_zone].write(next)?;
         self.exposure_retired[transfer_id].write(true)?;
         self.emit_event(FastTransferEvent::exposure_retired(

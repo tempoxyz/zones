@@ -10,6 +10,7 @@ import {
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
     EncryptionKeyEntry,
+    FastEpochConfig,
     IVerifier,
     IZoneMessenger,
     IZonePortal,
@@ -18,7 +19,6 @@ import {
     Role,
     TokenConfig,
     TokenEnablementTransition,
-    FastEpochConfig,
     Withdrawal,
     WithdrawalBounceBackDeposit,
     ZONE_FACTORY_ADDRESS,
@@ -251,12 +251,12 @@ contract ZonePortal is IZonePortal {
     mapping(uint64 epoch => FastEpochConfig config) internal _fastEpochs;
     mapping(uint64 epoch => address[] members) internal _fastEpochMembers;
     mapping(uint64 epoch => mapping(address member => bool)) internal _isFastEpochMember;
-    mapping(uint64 epoch => mapping(bytes32 peerZone => bytes32 unresolvedRoot))
-        internal _fastPeerBarrierRoots;
-    mapping(uint64 epoch => mapping(bytes32 peerZone => uint64 lockLogWatermark))
-        internal _fastPeerBarrierWatermarks;
-    mapping(uint64 epoch => mapping(bytes32 peerZone => bool recorded))
-        internal _fastPeerBarrierRecorded;
+    mapping(uint64 epoch => mapping(bytes32 peerZone => bytes32 unresolvedRoot)) internal
+        _fastPeerBarrierRoots;
+    mapping(uint64 epoch => mapping(bytes32 peerZone => uint64 lockLogWatermark)) internal
+        _fastPeerBarrierWatermarks;
+    mapping(uint64 epoch => mapping(bytes32 peerZone => bool recorded)) internal
+        _fastPeerBarrierRecorded;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -495,15 +495,15 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @inheritdoc IZonePortal
-    function fastPeerBarrier(uint64 epoch, bytes32 peerZone)
+    function fastPeerBarrier(
+        uint64 epoch,
+        bytes32 peerZone
+    )
         external
         view
         returns (bytes32 unresolvedRoot, uint64 lockLogWatermark)
     {
-        return (
-            _fastPeerBarrierRoots[epoch][peerZone],
-            _fastPeerBarrierWatermarks[epoch][peerZone]
-        );
+        return (_fastPeerBarrierRoots[epoch][peerZone], _fastPeerBarrierWatermarks[epoch][peerZone]);
     }
 
     /// @inheritdoc IZonePortal
@@ -520,9 +520,10 @@ contract ZonePortal is IZonePortal {
         onlyDelegateCall
     {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
-        if (
-            FAST_PROTOCOL_NATIVE_PIN == bytes32(0) || nativeProtocolPin != FAST_PROTOCOL_NATIVE_PIN
-        ) revert FastProtocolUnavailable();
+        if (FAST_PROTOCOL_NATIVE_PIN == bytes32(0) || nativeProtocolPin != FAST_PROTOCOL_NATIVE_PIN)
+        {
+            revert FastProtocolUnavailable();
+        }
         if (
             epoch == 0 || epoch <= fastEpoch || protocolVersion == 0 || members.length != 3
                 || threshold != 2 || expectedPeerBarriers != FAST_EXPECTED_PEER_BARRIERS

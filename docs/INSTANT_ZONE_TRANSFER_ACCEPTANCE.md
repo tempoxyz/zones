@@ -100,8 +100,13 @@ A second fresh runner then passed all 30 package tests, strict nightly package C
 denied and workspace formatting. This does not change the independent rejection of full E2E.
 
 Foundry 1.8.3 was checksum-verified before use. The Solidity source build passed with Solc 0.8.35.
-Rendered storage packs `fastEpoch` at slot 28 offset 9 and the new mappings at slots 29–33. These
+Rendered storage packs `fastEpoch` at slot 28 offset 9 and the new mappings at slots 29–34. These
 are source-rendered results, not proof that matching runtime bytes are installed on Tempo L1.
+
+Full node compilation and node integration test compilation/execution remain unverified. The
+remaining broad dependency builds were stopped at the protocol-owner decision boundary; this is
+not a successful node/prover/E2E result. Source work is preserved in the draft, and the idle
+bare-metal build box was destroyed after its package-test evidence was collected.
 
 There is no accepted ten-Zone E2E result. Do not enable the compatibility pin or remove the
 activation gates based on these unit, model, journal or Solidity results.

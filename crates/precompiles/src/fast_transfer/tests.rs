@@ -152,7 +152,7 @@ fn public_state_transition_is_dormant_without_consensus_fork() -> eyre::Result<(
     assert!(output.is_revert());
     assert_eq!(
         output.bytes,
-        Bytes::from(FastTransferError::FastTransferNotActive {}.abi_encode())
+        Bytes::from(IFastTransfer::FastTransferNotActive {}.abi_encode())
     );
     Ok(())
 }

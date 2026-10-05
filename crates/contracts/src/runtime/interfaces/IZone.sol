@@ -779,7 +779,10 @@ interface IZonePortal {
 
     function isFastEpochMember(uint64 epoch, address account) external view returns (bool);
 
-    function fastPeerBarrier(uint64 epoch, bytes32 peerZone)
+    function fastPeerBarrier(
+        uint64 epoch,
+        bytes32 peerZone
+    )
         external
         view
         returns (bytes32 unresolvedRoot, uint64 lockLogWatermark);
