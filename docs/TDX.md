@@ -87,6 +87,15 @@ a fresh attested TLS session without sending a witness.
 
 ## First hardware test on Google Cloud
 
+Draft infrastructure is split between [GCP foundation #35](https://github.com/tempoxyz/gcp/pull/35)
+and [hardware smoke workflow #464](https://github.com/tempoxyz/tempo-multi-region-benchmark/pull/464).
+The workflow uses the existing `chain-benchmarking-zygis` project, a private C3 VM,
+and IAP SSH. Before running it, apply the foundation through its protected workflow,
+configure the benchmark repository’s `tdx-test` environment and reviewers, and check
+the documented quotas. The laboratory policy is derived from observed measurements;
+it is not production approval of the measured software. A synthetic witness is
+optional, so the default smoke run tests quotes and TLS rather than SPF replay.
+
 Google Cloud supports Intel TDX on C3 and C4 Confidential VMs. A C3 VM in
 `us-central1-a` is a candidate for a short-lived test, subject to project quota
 and available capacity. Azure DCesv6 is another option. This is a proposed test
