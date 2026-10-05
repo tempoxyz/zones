@@ -402,7 +402,6 @@ jobs:
         with:
           files: |
             docker/docker-bake.hcl
-            ${{ runner.temp }}/zones-buildcache.json
           targets: ${{ steps.eif_builder.outputs.hit == 'true' && 'tempo-zone-prover-enclave' || 'prover-eif-inputs' }}
           set: |
             tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
@@ -412,11 +411,13 @@ jobs:
             tempo-zone-prover-enclave.args.PROVER_BINARY_SHA256=${{ steps.compiled.outputs.binary_sha }}
             tempo-zone-prover-enclave.contexts.tempo-genesis=.tempo-genesis
             tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
-            tempo-zone-prover-eif-builder.no-cache=${{ github.event_name == 'schedule' }}
           project: 0c6tg19qsp
           load: true
-          # Compilation was already refreshed in the first Bake call.
-          pull: ${{ github.event_name == 'schedule' }}
+          # Cached Nitro layers can retain an expired registry auth session from
+          # the earlier Bake call. Rebuild these packaging-only inputs locally;
+          # the Rust binary was already compiled and exported above.
+          no-cache: true
+          pull: true
 
       - name: Export EIF builder cache image
         if: >-
