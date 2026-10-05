@@ -440,7 +440,7 @@ fn process_request_with_backend(
                 match backend {
                     Backend::Nitro => nitro_attestation(digest.as_slice(), None),
                     Backend::Tdx => {
-                        zone_prover::tdx::quote(&zone_prover::tdx::batch_report_data(digest))
+                        zone_prover::tdx::batch_quote(&zone_prover::tdx::batch_report_data(digest))
                             .map_err(|error| error.to_string())
                     }
                 }
@@ -642,7 +642,10 @@ mod tests {
             tdx.verifier_config.as_ref(),
             zone_prover::TDX_VERIFIER_CONFIG_V1
         );
-        assert!(zone_prover::VerifierMode::try_from(tdx.verifier_config.as_ref()).is_err());
+        assert_eq!(
+            zone_prover::VerifierMode::try_from(tdx.verifier_config.as_ref()).unwrap(),
+            zone_prover::VerifierMode::TdxV1
+        );
         assert!(
             build_proof_bundle_for_backend(&public_inputs, &output, Backend::Tdx, |_| Err(
                 "QGS unavailable".into()

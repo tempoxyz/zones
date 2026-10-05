@@ -86,6 +86,14 @@ impl RemoteProverConfig {
         Self::new(address, policy)
     }
 
+    /// Settlement mode is selected from the configured trust backend before quorum signing.
+    pub fn verifier_mode(&self) -> crate::VerifierMode {
+        match &self.policy {
+            VerificationPolicy::Nitro(_) => crate::VerifierMode::NitroV1,
+            VerificationPolicy::Tdx(_) => crate::VerifierMode::TdxV1,
+        }
+    }
+
     /// Use the exact PCR0/1/2 tuple approved by the Tempo verifier.
     pub fn from_pcrs(address: String, pcrs: [[u8; SHA384_SIZE]; 3]) -> io::Result<Self> {
         let policy = Policy {

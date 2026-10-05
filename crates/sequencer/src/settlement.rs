@@ -1457,6 +1457,10 @@ fn settlement_proof(
 ) -> Result<(Bytes, Bytes)> {
     let config = Bytes::from_static(verifier_mode.config());
     let Some(bundle) = proof_bundle else {
+        eyre::ensure!(
+            verifier_mode != VerifierMode::TdxV1,
+            "TDX settlement requires evidence"
+        );
         return Ok((config, Bytes::new()));
     };
     eyre::ensure!(
@@ -2706,6 +2710,14 @@ mod tests {
         let (verifier_config, proof) = settlement_proof(VerifierMode::NoProof, None).unwrap();
         assert_eq!(verifier_config.as_ref(), &[2]);
         assert!(proof.is_empty());
+
+        assert!(settlement_proof(VerifierMode::TdxV1, None).is_err());
+        let raw_tdx = ProofBundle {
+            verifier_config: VerifierMode::TdxV1.config().into(),
+            proof: vec![0; 637].into(),
+        };
+        assert!(settlement_proof(VerifierMode::TdxV1, Some(&raw_tdx)).is_err());
+        assert!(settlement_proof(VerifierMode::NitroV1, Some(&raw_tdx)).is_err());
 
         let empty_nitro = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),

@@ -2,9 +2,31 @@
 
 The initial TDX implementation runs the existing Zone SPF service in a Linux x86_64
 TDX VM, produces Intel DCAP quote-v4 evidence, and authenticates connections before
-sending witnesses. It is an experimental guest/local-verification path. **The pinned
-Tempo verifier does not accept TDX settlement.** No production hardfork or measurement
+sending witnesses. It is an experimental development-settlement path. **The pinned
+Tempo verifier accepts TDX settlement only with its explicit development feature and policy.** No production hardfork or measurement
 policy is added by this change.
+
+## Draft development settlement integration
+
+This stacked integration builds on Zones #1658 and pins the Tempo TDX verifier
+from [Tempo #8125](https://github.com/tempoxyz/tempo/pull/8125). Both application
+PRs can remain draft; a development network can build their exact commit SHAs.
+No deployment workflow or production activation is included.
+
+Build the Tempo node with `--features custom-tdx`. Every validator must receive
+the same `--zone-verifier.tdx-policy` JSON and `--zone-verifier.tdx-activation`
+(T13 or later, enabled in the development genesis). Mainnet and Moderato reject
+this override. Use the same measurement allowlist for Zones remote transport.
+The guest accepts a trusted custom Tempo genesis directory with `--tempo-genesis`.
+Configure Zone prover endpoints using the existing hardfork assignments and
+`--sequencer.prover-attestation-policy`; the tagged policy selects TDX explicitly.
+Do not configure a Nitro-only local PCR verification override for TDX.
+
+The node chooses the backend before requesting a settlement certificate, checks
+that the prover returns that exact config, and simulates the deployed L1 verifier.
+TDX is rejected before native verifier activation. A TDX proving/verification
+failure stops settlement rather than switching to Nitro or NoProof. Followers and
+L1 submission use the same config hash already bound by settlement certificates.
 
 ## Run the initial implementation
 
@@ -65,7 +87,7 @@ or unused runtime fields can be valid, but must match the approved tuple exactly
 
 Use the existing `prove --attestation-policy <file>` utility against the host proxy
 with the original witness. It saves the SPF output and TDX proof bundle. The existing
-RPC `verify` command targets L1 and cannot validate TDX with the current Tempo pin.
+RPC `verify` command targets L1 and requires the development TDX policy to be active.
 For local batch verification, use the saved response with its original witness:
 
 ```bash
@@ -164,7 +186,11 @@ later in its worker thread.
 After SPF replay, the guest emits an experimental proof bundle:
 
 - `verifierConfig = 0x03` (a provisional allocation, not a ratified Tempo mode).
-- `proof = raw Intel ECDSA P-256 TDX quote v4` (bounded to 64 KiB).
+- `proof = TZTDXB01 || quote_length_be_u32 || collateral_length_be_u32 || quote || collateral_JSON`.
+  The raw Intel ECDSA P-256 TDX quote v4 is bounded to 64 KiB and the self-contained
+  collateral to 128 KiB. The shared Tempo verifier checks it offline at block time.
+  Batch generation collects collateral from Intel PCS outside consensus. TLS
+  bootstrap and `tdx quote` continue to use raw quotes.
 - Report data bytes 0–31 contain the batch digest; bytes 32–63 must be zero.
 
 The digest uses the existing `NitroBatchAttestation` EIP-712 struct schema, including
@@ -178,7 +204,8 @@ mismatches are rejected. Parsing claims alone never authenticates a quote.
 
 ## Existing Nitro implementation and remaining work
 
-The dependency is Tempo revision `9de35499af7dd84c889fae8edbf8d0db0331b8eb`.
+The initial guest implementation used Tempo revision `9de35499af7dd84c889fae8edbf8d0db0331b8eb`.
+The stacked settlement integration pins the companion Tempo draft instead.
 The relevant upstream pieces are:
 
 | Area | Current Nitro implementation | Work needed for TDX |
@@ -189,7 +216,7 @@ The relevant upstream pieces are:
 | Collateral | AWS document includes its certificate chain; root and PCRs are fork policy | Define a self-contained collateral envelope or consensus-controlled collateral registry, expiration/revocation rules and updates. Validators must never fetch PCCS/PCS or use wall-clock time during execution. Use block time and protocol-pinned inputs. Local DCAP QVL is not the precompile implementation. |
 | Measurement policy | Hardfork-indexed PCR0/1/2 allowlist; restricted development overrides | Hardfork-indexed MRTD/RTMR/configuration/attributes/XFAM policy from reproducible approved builds; measured boot must cover the full trusted guest software and configuration. |
 | Gas and limits | TIP-1098 common input/document/crypto charges and dispatcher caps | Charge quote bytes, collateral bytes, certificate/signature work and TCB/CRL processing before expensive work. Define malformed-input gas behavior and denial-of-service limits. |
-| Zone settlement | `VerifierMode`, sequencer `prover.rs`, `monitor.rs`, settlement manager, follower/quorum certificates | Add the activated TDX mode, select the mode before quorum signing, route to an approved backend by fork, validate returned mode, and propagate its config hash through certificates and settlement. Current code intentionally rejects `0x03`. |
+| Zone settlement | `VerifierMode`, sequencer `prover.rs`, `monitor.rs`, settlement manager, follower/quorum certificates | Add the activated TDX mode, select the mode before quorum signing, route to an approved backend by fork, validate returned mode, and propagate its config hash through certificates and settlement. The stacked development integration accepts `0x03`; public-network activation remains pending. |
 | Observation/tooling | Nitro transport policy, `ShadowProofVerifier`, prover utility ABI calls and fork readiness checks | Extend CLI shadow verification and readiness for TDX, verify batch quotes after transport, and distinguish transport, SPF, collateral, policy and L1 errors. |
 | Deployment | Nitro EIF/kernel/NSM Docker build, host allocator/`nitro-cli`, vsock proxy and release workflows | Reproducible measured VM image and boot chain, QGS/PCCS operations, CPU entropy configuration, immutable guest launch, exact build-to-measurement manifest, artifact signing and release workflows. EIF PCRs cannot be translated into TDX measurements. |
 | Verification | Nitro fixtures, parser fuzzing, native verifier gas tests, settlement/fork integration tests | Real signed TDX fixtures and hardware smoke tests, quote/envelope fuzzing, certificate/CRL/TCB adversarial tests, gas tests, fork gating and complete settlement/cross-backend replay tests. |
@@ -235,3 +262,13 @@ work and makes availability depend on both platforms.
 - [Google Cloud Confidential VM creation](https://docs.cloud.google.com/confidential-computing/confidential-vm/docs/create-a-confidential-vm-instance)
 - [Google Cloud raw TDX attestation procedure](https://docs.cloud.google.com/confidential-computing/confidential-vm/docs/tdx-provenance)
 - [Azure DCesv6](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dcesv6-series)
+
+## Existing comment-triggered devnet
+
+The Tempo PR command is `/build-devnet`; draft PRs are eligible and the publisher
+requires a member-authored comment. At the inspected revisions, the publisher
+omits `sha` and `pr_number` required by dev-infra’s sensor. Its existing devnet image
+also lacks `custom-tdx`, and it does not provision a TDX guest or accept a paired
+Zones draft SHA. Those deployment gaps are outside these implementation PRs.
+The `derek bench prover <SHA>` command in Zones launches a Nitro benchmark and
+cannot substitute for a TDX-settling devnet.

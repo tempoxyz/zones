@@ -439,6 +439,16 @@ mod tests {
         let signer = PrivateKeySigner::random();
         let nitro = settlement_attestation(domain(), &config, &prepared, VerifierMode::NitroV1);
         let fallback = settlement_attestation(domain(), &config, &prepared, VerifierMode::NoProof);
+        let tdx = settlement_attestation(domain(), &config, &prepared, VerifierMode::TdxV1);
+        assert_eq!(tdx.verifierConfigHash, VerifierMode::TdxV1.config_hash());
+        assert_ne!(
+            domain().settlement_digest(&tdx),
+            domain().settlement_digest(&nitro)
+        );
+        assert_ne!(
+            domain().settlement_digest(&tdx),
+            domain().settlement_digest(&fallback)
+        );
         assert_eq!(
             fallback.verifierConfigHash,
             VerifierMode::NoProof.config_hash()
