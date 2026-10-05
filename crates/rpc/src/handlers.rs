@@ -171,6 +171,11 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
         Box::pin(async { Err(JsonRpcError::method_disabled()) })
     }
 
+    /// Private committed fast-transfer receipts for the authenticated participant only.
+    fn ws_subscribe_fast_transfer_receipts(&self, _auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
+
     /// `zone_getAuthorizationTokenInfo()` — returns the authenticated account
     /// and token expiry.
     fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_>;
@@ -181,6 +186,32 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     /// `zone_getEncryptionKey()` — returns the active encryption key at the
     /// current Tempo L1 head.
     fn zone_get_encryption_key(&self, auth: AuthContext) -> BoxFut<'_>;
+
+    /// Return only a fsynced, Raft-committed fast-transfer record visible to this participant.
+    fn zone_get_fast_transfer_status(&self, _transfer_id: B256, _auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
+
+    /// Return the quorum certificate for a committed payment/disposition once assembled.
+    fn zone_get_fast_transfer_receipt(&self, _transfer_id: B256, _auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
+
+    /// Validate and submit an authenticated canonical fast-transfer lock.
+    fn zone_submit_fast_transfer(
+        &self,
+        _intent: Bytes,
+        _quote: Bytes,
+        _signed_transaction: Bytes,
+        _auth: AuthContext,
+    ) -> BoxFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
+
+    /// Persist an authenticated sender cancellation before reporting acceptance.
+    fn zone_cancel_fast_transfer(&self, _cancellation: Bytes, _auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
@@ -324,7 +355,78 @@ pub async fn dispatch(
         Method::ZoneGetEncryptionKey => {
             api_result(id, method, api.zone_get_encryption_key(auth.clone()).await)
         }
+        Method::ZoneGetFastTransferStatus => handle_fast_transfer(id, raw, auth, api, false).await,
+        Method::ZoneGetFastTransferReceipt => handle_fast_transfer(id, raw, auth, api, true).await,
+        Method::ZoneSubmitFastTransfer => handle_submit_fast_transfer(id, raw, auth, api).await,
+        Method::ZoneCancelFastTransfer => handle_cancel_fast_transfer(id, raw, auth, api).await,
     }
+}
+
+async fn handle_submit_fast_transfer(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let (intent, quote, signed_transaction) = match parse_params::<(Bytes, Bytes, Bytes)>(
+        raw,
+        &id,
+        "expected [canonicalIntent, quoteCertificate, signedTransaction]",
+    ) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    api_result(
+        id,
+        Method::ZoneSubmitFastTransfer,
+        api.zone_submit_fast_transfer(intent, quote, signed_transaction, auth.clone())
+            .await,
+    )
+}
+
+async fn handle_cancel_fast_transfer(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let (cancellation,) =
+        match parse_params::<(Bytes,)>(raw, &id, "expected [canonicalCancellation]") {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+    api_result(
+        id,
+        Method::ZoneCancelFastTransfer,
+        api.zone_cancel_fast_transfer(cancellation, auth.clone())
+            .await,
+    )
+}
+
+async fn handle_fast_transfer(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+    receipt_only: bool,
+) -> JsonRpcResponse {
+    let (transfer_id,) = match parse_params::<(B256,)>(raw, &id, "expected [transferId]") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let result = if receipt_only {
+        api.zone_get_fast_transfer_receipt(transfer_id, auth.clone())
+            .await
+    } else {
+        api.zone_get_fast_transfer_status(transfer_id, auth.clone())
+            .await
+    };
+    let method = if receipt_only {
+        Method::ZoneGetFastTransferReceipt
+    } else {
+        Method::ZoneGetFastTransferStatus
+    };
+    api_result(id, method, result)
 }
 
 /// Handle `web3_sha3(data)` locally.

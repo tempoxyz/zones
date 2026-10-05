@@ -210,6 +210,47 @@ impl ZoneOutbox {
         )
     }
 
+    /// Atomically enqueue operator inventory from the fast-transfer precompile. The caller and
+    /// fallback recipient are the same policy-valid operator, and the expected nonce fences
+    /// retries against any intervening withdrawal.
+    pub(crate) fn request_operator_withdrawal<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        caller: Address,
+        fee_payer: Address,
+        current_tx_hash: B256,
+        token: Address,
+        treasury: Address,
+        amount: u128,
+        job_id: B256,
+    ) -> ZoneResult<(u64, u64, u128)> {
+        let next_fallback_nonce = self
+            .last_fallback_nonce
+            .read()?
+            .checked_add(1)
+            .ok_or_else(TempoPrecompileError::under_overflow)?;
+        let withdrawal_index = self.next_withdrawal_index.read()?;
+        let gas_limit = 0;
+        let fee = self.calculate_fee_unchecked(gas_limit)?;
+        self.request_withdrawal(
+            l1,
+            caller,
+            fee_payer,
+            current_tx_hash,
+            IZoneOutbox::requestWithdrawalCall {
+                token,
+                amount,
+                to: treasury,
+                memo: job_id,
+                gasLimit: gas_limit,
+                data: Bytes::new(),
+                zoneFallbackRecipient: caller,
+                revealTo: Bytes::new(),
+            },
+        )?;
+        Ok((next_fallback_nonce, withdrawal_index, fee))
+    }
+
     fn transfer_and_burn(
         &self,
         token: &mut TIP20Token,

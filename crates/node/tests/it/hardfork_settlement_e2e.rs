@@ -137,6 +137,11 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     );
     let deposit_batch = BatchData {
         zone_height: deposit_block.header.number(),
+        tempo_block_hash: TempoState::new(TEMPO_STATE_ADDRESS, &provider)
+            .tempoBlockHash()
+            .block(BlockId::number(deposit_block.header.number()))
+            .call()
+            .await?,
         tempo_block_number: TempoState::new(TEMPO_STATE_ADDRESS, &provider)
             .tempoBlockNumber()
             .block(BlockId::number(deposit_block.header.number()))
@@ -155,6 +160,11 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     };
     let interval_batch = BatchData {
         zone_height: 8,
+        tempo_block_hash: TempoState::new(TEMPO_STATE_ADDRESS, &provider)
+            .tempoBlockHash()
+            .block(BlockId::number(8))
+            .call()
+            .await?,
         tempo_block_number: zone.tempo_block_number().await?,
         prev_block_hash: deposit_batch.next_block_hash,
         next_block_hash: parent.header.hash,
@@ -306,7 +316,17 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
         "the full token suffix is mandatory"
     );
 
-    let batch = batch_from_output(end, zone.tempo_block_number().await?, &output);
+    let imported_hash = TempoState::new(TEMPO_STATE_ADDRESS, &provider)
+        .tempoBlockHash()
+        .block(BlockId::number(end))
+        .call()
+        .await?;
+    let batch = batch_from_output(
+        end,
+        zone.tempo_block_number().await?,
+        imported_hash,
+        &output,
+    );
     let prepared = submitter.prepare_batch(batch).await?;
     // This harness has no Nitro attestation service. Use `NoProof` explicitly.
     let settled = submitter
@@ -424,10 +444,16 @@ fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result
     Ok(portal_address)
 }
 
-fn batch_from_output(height: u64, tempo_number: u64, output: &BatchOutput) -> BatchData {
+fn batch_from_output(
+    height: u64,
+    tempo_number: u64,
+    tempo_block_hash: B256,
+    output: &BatchOutput,
+) -> BatchData {
     BatchData {
         zone_height: height,
         tempo_block_number: tempo_number,
+        tempo_block_hash,
         prev_block_hash: output.block_transition.prevBlockHash,
         next_block_hash: output.block_transition.nextBlockHash,
         prev_processed_deposit_hash: output.deposit_queue_transition.prevProcessedHash,

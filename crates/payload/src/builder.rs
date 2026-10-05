@@ -51,11 +51,26 @@ use zone_precompiles::L1StateError;
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
 
 use crate::{
-    TempoImport, ZonePayloadAttributes, ZonePayloadTypes, prewarming::PrewarmingExecutionContext,
+    FastSettlementBoundary, TempoImport, ZonePayloadAttributes, ZonePayloadTypes,
+    prewarming::PrewarmingExecutionContext,
 };
 
 /// Default empty-batch cadence: every 120 zone blocks (~60 sec at Tempo's 500 ms block time).
 pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
+/// Same-anchor settlement cadence once the compatible protocol fork exists.
+pub const FAST_SETTLEMENT_BATCH_MAX_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(500);
+/// Same-anchor settlement size boundary.
+pub const FAST_SETTLEMENT_BATCH_MAX_BYTES: usize = 1024 * 1024;
+
+/// The fast settlement boundary is elapsed time or retained encoded input size, whichever occurs
+/// first. The caller must measure elapsed time from the last committed settlement boundary.
+pub fn should_finalize_fast_settlement_batch(
+    elapsed: std::time::Duration,
+    encoded_bytes: usize,
+) -> bool {
+    elapsed >= FAST_SETTLEMENT_BATCH_MAX_DELAY || encoded_bytes >= FAST_SETTLEMENT_BATCH_MAX_BYTES
+}
 
 /// Safety margin reserved out of [`MAX_RLP_BLOCK_SIZE`] for everything in the block other than
 /// pool transactions: the header, RLP list framing, `advanceTempo`, `finalizeWithdrawalBatch`
@@ -178,12 +193,40 @@ where
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
         let tempo_import = attributes.tempo_import();
-        let imported_headers = match tempo_import {
-            TempoImport::Full(prepared) => core::slice::from_ref(&prepared.header),
-            TempoImport::CheckpointOnly(headers) => headers.as_slice(),
+        let chain_spec = self.provider.chain_spec();
+        if let TempoImport::SameAnchor(opening) = tempo_import
+            && !chain_spec.supports_same_anchor_at(opening.tempo_timestamp)
+        {
+            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                "same-anchor execution requires T14 at the finalized Tempo anchor",
+            )));
+        }
+        let (final_l1_number, final_l1_hash, imported_header_count) = match tempo_import {
+            TempoImport::Full(prepared) => {
+                let headers = core::slice::from_ref(&prepared.header);
+                validate_l1_continuity(state_provider.as_ref(), headers)?;
+                (prepared.header.number(), prepared.header.hash(), 1)
+            }
+            TempoImport::CheckpointOnly(headers) => {
+                validate_l1_continuity(state_provider.as_ref(), headers)?;
+                let final_imported = headers.last().expect("validated nonempty import");
+                (
+                    final_imported.number(),
+                    final_imported.hash(),
+                    headers.len(),
+                )
+            }
+            TempoImport::SameAnchor(opening) => {
+                validate_same_anchor(
+                    state_provider.as_ref(),
+                    opening,
+                    &parent_header,
+                    attributes.timestamp(),
+                    attributes.timestamp_millis_part(),
+                )?;
+                (opening.tempo_block_number, opening.tempo_block_hash, 0)
+            }
         };
-        validate_l1_continuity(state_provider.as_ref(), imported_headers)?;
-        let final_imported = imported_headers.last().expect("validated nonempty import");
         let checkpoint_only = matches!(tempo_import, TempoImport::CheckpointOnly(_));
         let follows_checkpoint_blocks = tempo_import.follows_checkpoint_blocks();
         let total_deposits = tempo_import.total_deposits();
@@ -193,15 +236,15 @@ where
             info!(
                 target: "zone::payload",
                 zone_block = parent_header.number() + 1,
-                l1_block = final_imported.inner.number,
-                header_count = imported_headers.len(),
+                l1_block = final_l1_number,
+                header_count = imported_header_count,
                 "Including advanceTempoHeaders system tx (chain continuity OK)"
             );
         } else {
             info!(
                 target: "zone::payload",
                 zone_block = parent_header.number() + 1,
-                l1_block = final_imported.inner.number,
+                l1_block = final_l1_number,
                 deposits = total_deposits,
                 enabled_tokens,
                 "Including advanceTempo system tx (chain continuity OK)"
@@ -216,7 +259,6 @@ where
             .with_bundle_update()
             .build();
 
-        let chain_spec = self.provider.chain_spec();
         let chain_id = chain_spec.chain_id();
 
         let block_gas_limit = parent_header.gas_limit();
@@ -250,6 +292,36 @@ where
             .try_into()
             .expect("block number fits u64");
 
+        let fast_boundary = attributes.fast_settlement_boundary();
+        if let Some(boundary) = fast_boundary {
+            let boundary_supported = match tempo_import {
+                TempoImport::SameAnchor(_) => true,
+                TempoImport::Full(prepared) => {
+                    chain_spec.supports_same_anchor_at(prepared.header.timestamp())
+                }
+                TempoImport::CheckpointOnly(_) => false,
+            };
+            if !boundary_supported {
+                return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                    "fast-settlement boundary requires a T14 full or same-anchor payload",
+                )));
+            }
+            let timestamp_millis = attributes
+                .timestamp()
+                .checked_mul(1_000)
+                .and_then(|value| value.checked_add(attributes.timestamp_millis_part()))
+                .ok_or_else(|| {
+                    PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                        "fast-settlement boundary timestamp overflows milliseconds",
+                    ))
+                })?;
+            boundary
+                .validate_payload_binding(block_number, parent_header.hash(), timestamp_millis)
+                .map_err(|error| {
+                    PayloadBuilderError::Internal(reth_errors::RethError::msg(error))
+                })?;
+        }
+
         builder.apply_pre_execution_changes().map_err(|err| {
             warn!(%err, "failed to apply pre-execution changes");
             PayloadBuilderError::Internal(err.into())
@@ -268,7 +340,7 @@ where
                 }
                 .start(&self.task_executor, prepared),
             ),
-            TempoImport::CheckpointOnly(_) => None,
+            TempoImport::CheckpointOnly(_) | TempoImport::SameAnchor(_) => None,
         };
 
         // Execute advanceTempo system transaction — exactly one per zone block.
@@ -276,6 +348,11 @@ where
             TempoImport::Full(prepared) => build_advance_tempo_tx(prepared, chain_id),
             TempoImport::CheckpointOnly(headers) => {
                 build_advance_tempo_headers_tx(headers, chain_id)?
+            }
+            TempoImport::SameAnchor(opening) => {
+                opening.system_transaction(chain_id).map_err(|err| {
+                    PayloadBuilderError::Internal(reth_errors::RethError::msg(err.to_string()))
+                })?
             }
         };
         builder
@@ -285,7 +362,7 @@ where
             .map_err(|err| {
                 error!(
                     ?err,
-                    l1_block = final_imported.inner.number,
+                    l1_block = final_l1_number,
                     deposits = total_deposits,
                     "advanceTempo system tx failed"
                 );
@@ -324,6 +401,8 @@ where
                 self.withdrawal_batch_interval_blocks,
                 follows_checkpoint_blocks,
                 total_deposits > 0,
+                !matches!(tempo_import, TempoImport::SameAnchor(_)),
+                fast_boundary,
                 self.withdrawal_reveal_encryptor.as_deref(),
                 chain_id,
             )?;
@@ -357,8 +436,8 @@ where
         let elapsed = start.elapsed();
         info!(
             number = sealed_block.number(),
-            l1_block = final_imported.number(),
-            l1_hash = ?final_imported.hash(),
+            l1_block = final_l1_number,
+            l1_hash = ?final_l1_hash,
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
@@ -489,6 +568,43 @@ fn validate_l1_continuity(
     Ok(())
 }
 
+/// Validate the authenticated replay source for a same-anchor opening without advancing any
+/// Tempo, deposit, token-enablement, or withdrawal cursor.
+fn validate_same_anchor(
+    state_provider: &dyn StateProvider,
+    opening: &zone_evm::same_anchor::SameAnchorOpening,
+    parent: &TempoHeader,
+    timestamp: u64,
+    timestamp_millis_part: u64,
+) -> Result<(), PayloadBuilderError> {
+    opening.validate().map_err(|err| {
+        PayloadBuilderError::Internal(reth_errors::RethError::msg(err.to_string()))
+    })?;
+    let stored = state_provider
+        .tempo_num_hash()
+        .map_err(|err| PayloadBuilderError::Internal(err.into()))?;
+    if (stored.number, stored.hash) != (opening.tempo_block_number, opening.tempo_block_hash) {
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            format!(
+                "same-anchor opening does not match parent Tempo checkpoint: got ({}, {}), expected ({}, {})",
+                opening.tempo_block_number, opening.tempo_block_hash, stored.number, stored.hash
+            ),
+        )));
+    }
+    let parent_millis = parent
+        .timestamp()
+        .checked_mul(1_000)
+        .and_then(|value| value.checked_add(parent.timestamp_millis_part))
+        .ok_or_else(|| {
+            PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                "parent Zone timestamp overflows milliseconds",
+            ))
+        })?;
+    opening
+        .validate_block_timestamp(parent_millis, timestamp, timestamp_millis_part)
+        .map_err(|err| PayloadBuilderError::Internal(reth_errors::RethError::msg(err.to_string())))
+}
+
 /// Execute the best pool transactions until the iterator is exhausted or the build is cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PoolExecutionOutcome {
@@ -600,6 +716,8 @@ fn finalize_withdrawal_batch_if_needed<B>(
     interval_blocks: u64,
     follows_checkpoint_blocks: bool,
     has_processed_deposits: bool,
+    legacy_interval_enabled: bool,
+    fast_boundary: Option<&FastSettlementBoundary>,
     encryptor: Option<&dyn WithdrawalRevealEncryptor>,
     chain_id: u64,
 ) -> Result<(), PayloadBuilderError>
@@ -608,13 +726,16 @@ where
 {
     let pending_withdrawals =
         read_pending_withdrawals_from_outbox(builder.evm_mut(), block_number)?;
-    if !should_finalize_withdrawal_batch(
-        !pending_withdrawals.is_empty(),
+    let has_pending_withdrawals = !pending_withdrawals.is_empty();
+    let required_by_existing_semantics = should_finalize_withdrawal_batch(
+        has_pending_withdrawals,
         block_number,
         interval_blocks,
         follows_checkpoint_blocks,
         has_processed_deposits,
-    ) {
+        legacy_interval_enabled,
+    );
+    if !required_by_existing_semantics && fast_boundary.is_none() {
         return Ok(());
     }
 
@@ -647,6 +768,15 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
     let count = U256::from(pending_withdrawals.len());
+    let calldata =
+        encode_finalize_withdrawal_batch_calldata(count, block_number, encrypted_senders.clone());
+    if let Some(boundary) = fast_boundary
+        && boundary.finalization_calldata.as_ref() != calldata.as_slice()
+    {
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            "fast-settlement boundary finalization calldata does not match canonical outbox state",
+        )));
+    }
     let finalize_tx =
         build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders, chain_id);
     builder
@@ -668,11 +798,12 @@ fn should_finalize_withdrawal_batch(
     interval_blocks: u64,
     follows_checkpoint_blocks: bool,
     has_processed_deposits: bool,
+    legacy_interval_enabled: bool,
 ) -> bool {
     has_pending_withdrawals
         || has_processed_deposits
-        || block_number.is_multiple_of(interval_blocks)
         || follows_checkpoint_blocks
+        || (legacy_interval_enabled && block_number.is_multiple_of(interval_blocks))
 }
 
 /// Build the `finalizeWithdrawalBatch(count)` system transaction.
@@ -693,12 +824,8 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     encrypted_senders: Vec<Bytes>,
     chain_id: u64,
 ) -> Recovered<TempoTxEnvelope> {
-    let calldata = abi::IZoneOutbox::finalizeWithdrawalBatchCall {
-        count,
-        blockNumber: block_number,
-        encryptedSenders: encrypted_senders,
-    }
-    .abi_encode();
+    let calldata =
+        encode_finalize_withdrawal_batch_calldata(count, block_number, encrypted_senders);
 
     let tx = TxLegacy {
         chain_id: Some(chain_id),
@@ -714,6 +841,19 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
         TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
         TEMPO_SYSTEM_TX_SENDER,
     )
+}
+
+fn encode_finalize_withdrawal_batch_calldata(
+    count: U256,
+    block_number: u64,
+    encrypted_senders: Vec<Bytes>,
+) -> Vec<u8> {
+    abi::IZoneOutbox::finalizeWithdrawalBatchCall {
+        count,
+        blockNumber: block_number,
+        encryptedSenders: encrypted_senders,
+    }
+    .abi_encode()
 }
 
 /// Read all pending withdrawals in the ZoneOutbox
@@ -883,25 +1023,45 @@ mod tests {
     use zone_l1::PreparedL1Block;
 
     #[test]
+    fn fast_settlement_boundary_is_time_or_size() {
+        assert!(!super::should_finalize_fast_settlement_batch(
+            std::time::Duration::from_millis(499),
+            super::FAST_SETTLEMENT_BATCH_MAX_BYTES - 1,
+        ));
+        assert!(super::should_finalize_fast_settlement_batch(
+            std::time::Duration::from_millis(500),
+            0,
+        ));
+        assert!(super::should_finalize_fast_settlement_batch(
+            std::time::Duration::ZERO,
+            super::FAST_SETTLEMENT_BATCH_MAX_BYTES,
+        ));
+    }
+
+    #[test]
     fn withdrawal_batch_boundary_conditions() {
         let blocks = super::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
         assert_eq!(blocks, 120);
         assert!(!super::should_finalize_withdrawal_batch(
-            false, 119, blocks, false, false
+            false, 119, blocks, false, false, true
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            false, 120, blocks, false, false
+            false, 120, blocks, false, false, true
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            true, 121, blocks, false, false
+            true, 121, blocks, false, false, true
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            false, 150, blocks, true, false
+            false, 150, blocks, true, false, true
         ));
         // Deposit-only blocks must settle before the interval to reopen portal capacity.
         assert!(super::should_finalize_withdrawal_batch(
-            false, 121, blocks, false, true
+            false, 121, blocks, false, true, true
+        ));
+        // T14 same-anchor batching is time/retained-size based, never fast-block-count based.
+        assert!(!super::should_finalize_withdrawal_batch(
+            false, 120, blocks, false, false, false
         ));
     }
 

@@ -1,4 +1,5 @@
 pub mod common;
+pub mod fast_transfer;
 pub mod outbox;
 pub mod swap_and_deposit_router;
 pub mod tempo_state;
@@ -7,6 +8,7 @@ pub mod zone_inbox;
 pub mod zone_portal;
 
 pub use common::*;
+pub use fast_transfer::*;
 pub use outbox::*;
 pub use swap_and_deposit_router::*;
 pub use tempo_state::*;

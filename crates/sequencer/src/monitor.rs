@@ -22,7 +22,9 @@
 //! block header chain linking that anchor back to `tempoBlockNumber`.
 
 use std::{
-    ops::ControlFlow,
+    fs::{self, File, OpenOptions},
+    io::Write as _,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -31,11 +33,13 @@ use std::{
 };
 
 use alloy_primitives::{Address, B256};
-use alloy_provider::DynProvider;
+use alloy_provider::{DynProvider, Provider as _};
+use alloy_rpc_types_eth::BlockId;
 use alloy_signer_local::PrivateKeySigner;
-use eyre::{Result, WrapErr};
+use eyre::{OptionExt as _, Result, WrapErr};
 use futures::StreamExt;
 use reth_chain_state::PersistedBlockSubscriptions;
+use serde::{Deserialize, Serialize};
 use tempo_alloy::TempoNetwork;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::{sync, task::AbortOnDropHandle};
@@ -45,7 +49,7 @@ use zone_prover::VerifierMode;
 use crate::{
     SettlementManager, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX},
-    attestation::SettlementCertificate,
+    attestation::{SettlementCertificate, SettlementProofMode},
     prover::{SettlementProof, SettlementProver},
     prover_config::active_l1_hardfork,
     resolve_portal_zone_anchor,
@@ -83,6 +87,12 @@ pub struct ZoneMonitorConfig {
     pub batch_anchor_config: BatchAnchorConfig,
     /// Settlement preparation for a P2P leader generation.
     pub settlements: Option<SettlementManager>,
+    /// Explicit operator mode. Fast settlement additionally requires an exact match with the
+    /// immutable historical enrollment at the batch's imported Tempo anchor.
+    pub proof_mode: SettlementProofMode,
+    /// Durable settlement journal directory. Prepared state is fsynced here before prover, P2P,
+    /// or L1 submission I/O and retained as operator-visible settlement evidence.
+    pub settlement_store_path: PathBuf,
 }
 
 /// Withdrawal state shared between the zone monitor and withdrawal processor.
@@ -141,6 +151,7 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     submitted_zone_block: Arc<AtomicU64>,
     /// Backpressured SPF and Nitro attestation worker required before configured settlement.
     settlement_prover: Option<SettlementProver>,
+    settlement_store: SettlementArtifactStore,
 }
 
 /// Commitments at the tail of the prepared batch chain.
@@ -173,6 +184,218 @@ struct ReadyBatch {
     withdrawals: Vec<abi::Withdrawal>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum SettlementArtifactPhase {
+    Prepared,
+    Ready,
+    Submitted,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedSettlementArtifact {
+    phase: SettlementArtifactPhase,
+    prepared: PreparedBatch,
+    proof_mode: SettlementProofMode,
+    verifier_config: Option<alloy_primitives::Bytes>,
+    proof: Option<alloy_primitives::Bytes>,
+    proof_hash: Option<B256>,
+    certificate: Option<SettlementCertificate>,
+    verification_evidence: Option<FastSettlementVerificationEvidence>,
+}
+
+/// Exact structured evidence retained for every fast settlement attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FastSettlementVerificationEvidence {
+    security_mode: SettlementProofMode,
+    fast_epoch: u64,
+    roster_hash: B256,
+    verifier: Address,
+    verifier_code_hash: B256,
+    verifier_config_hash: B256,
+    proof_hash: Option<B256>,
+    batch_digest: B256,
+    imported_tempo_number: u64,
+    imported_tempo_hash: B256,
+    anchor_number: u64,
+    anchor_hash: B256,
+}
+
+/// Fsync-backed monotonic record for one immutable batch/anchor and its verification evidence.
+#[derive(Debug, Clone)]
+struct SettlementArtifactStore {
+    directory: Arc<PathBuf>,
+}
+
+impl SettlementArtifactStore {
+    fn open(directory: PathBuf) -> Result<Self> {
+        fs::create_dir_all(&directory).wrap_err("create settlement artifact directory")?;
+        File::open(&directory)
+            .and_then(|directory| directory.sync_all())
+            .wrap_err("fsync settlement artifact directory")?;
+        Ok(Self {
+            directory: Arc::new(directory),
+        })
+    }
+
+    fn path(&self, prepared: &PreparedBatch) -> PathBuf {
+        self.directory.join(format!(
+            "{:020}-{}.json",
+            prepared.batch.zone_height, prepared.batch.next_block_hash
+        ))
+    }
+
+    fn persist_prepared(
+        &self,
+        prepared: &PreparedBatch,
+        proof_mode: SettlementProofMode,
+    ) -> Result<()> {
+        if let Some(existing) = self.load(prepared)? {
+            Self::ensure_same_identity(&existing, prepared, proof_mode)?;
+            eyre::ensure!(
+                (existing.phase == SettlementArtifactPhase::Prepared
+                    && existing.verifier_config.is_none()
+                    && existing.proof.is_none()
+                    && existing.proof_hash.is_none()
+                    && existing.certificate.is_none()
+                    && existing.verification_evidence.is_none())
+                    || matches!(
+                        existing.phase,
+                        SettlementArtifactPhase::Ready | SettlementArtifactPhase::Submitted
+                    ),
+                "persisted prepared settlement artifact has an invalid phase payload"
+            );
+            return Ok(());
+        }
+        self.persist(&PersistedSettlementArtifact {
+            phase: SettlementArtifactPhase::Prepared,
+            prepared: prepared.clone(),
+            proof_mode,
+            verifier_config: None,
+            proof: None,
+            proof_hash: None,
+            certificate: None,
+            verification_evidence: None,
+        })
+    }
+
+    fn persist_ready(
+        &self,
+        prepared: &PreparedBatch,
+        proof_mode: SettlementProofMode,
+        proof: Option<&SettlementProof>,
+        certificate: Option<&SettlementCertificate>,
+        verification_evidence: Option<FastSettlementVerificationEvidence>,
+    ) -> Result<()> {
+        match proof_mode {
+            SettlementProofMode::OperatorAttested => {
+                eyre::ensure!(
+                    proof.is_none(),
+                    "operator-attested artifact must not contain proof evidence"
+                );
+            }
+            SettlementProofMode::ProofRequired => {
+                let proof =
+                    proof.ok_or_eyre("proof-required artifact is missing proof evidence")?;
+                eyre::ensure!(
+                    proof.bundle.verifier_config.as_ref() == VerifierMode::NitroV1.config(),
+                    "proof-required artifact verifier config does not match NitroV1"
+                );
+                VerifierMode::NitroV1.validate_proof_shape(&proof.bundle.proof)?;
+            }
+        }
+        let verifier_config = Some(alloy_primitives::Bytes::from_static(match proof_mode {
+            SettlementProofMode::OperatorAttested => VerifierMode::NoProof.config(),
+            SettlementProofMode::ProofRequired => VerifierMode::NitroV1.config(),
+        }));
+        let proof_bytes = proof.map(|proof| proof.bundle.proof.clone());
+        let artifact = PersistedSettlementArtifact {
+            phase: SettlementArtifactPhase::Ready,
+            prepared: prepared.clone(),
+            proof_mode,
+            verifier_config,
+            proof_hash: proof_bytes.as_ref().map(alloy_primitives::keccak256),
+            proof: proof_bytes,
+            certificate: certificate.cloned(),
+            verification_evidence,
+        };
+        let existing = self
+            .load(prepared)?
+            .ok_or_eyre("settlement batch was not durably prepared before ready evidence")?;
+        Self::ensure_same_identity(&existing, prepared, proof_mode)?;
+        if matches!(
+            existing.phase,
+            SettlementArtifactPhase::Ready | SettlementArtifactPhase::Submitted
+        ) {
+            let existing_phase = existing.phase;
+            let mut expected = artifact;
+            expected.phase = existing_phase;
+            eyre::ensure!(
+                existing == expected,
+                "persisted ready settlement evidence conflicts with regenerated evidence"
+            );
+            return Ok(());
+        }
+        self.persist(&artifact)
+    }
+
+    fn mark_submitted(&self, prepared: &PreparedBatch) -> Result<()> {
+        let path = self.path(prepared);
+        let bytes = fs::read(&path).wrap_err("read ready settlement artifact")?;
+        let mut artifact: PersistedSettlementArtifact =
+            serde_json::from_slice(&bytes).wrap_err("decode ready settlement artifact")?;
+        eyre::ensure!(
+            artifact.prepared == *prepared
+                && matches!(artifact.phase, SettlementArtifactPhase::Ready),
+            "settlement artifact is not the exact ready batch being submitted"
+        );
+        artifact.phase = SettlementArtifactPhase::Submitted;
+        self.persist(&artifact)
+    }
+
+    fn load(&self, prepared: &PreparedBatch) -> Result<Option<PersistedSettlementArtifact>> {
+        let path = self.path(prepared);
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .wrap_err("decode persisted settlement artifact"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).wrap_err("read persisted settlement artifact"),
+        }
+    }
+
+    fn ensure_same_identity(
+        existing: &PersistedSettlementArtifact,
+        prepared: &PreparedBatch,
+        proof_mode: SettlementProofMode,
+    ) -> Result<()> {
+        eyre::ensure!(
+            existing.prepared == *prepared && existing.proof_mode == proof_mode,
+            "persisted settlement identity conflicts with the canonical prepared batch"
+        );
+        Ok(())
+    }
+
+    fn persist(&self, artifact: &PersistedSettlementArtifact) -> Result<()> {
+        let path = self.path(&artifact.prepared);
+        let temporary = path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec(artifact).wrap_err("encode settlement artifact")?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)
+            .wrap_err("open temporary settlement artifact")?;
+        file.write_all(&bytes)
+            .wrap_err("write temporary settlement artifact")?;
+        file.sync_all()
+            .wrap_err("fsync temporary settlement artifact")?;
+        fs::rename(&temporary, &path).wrap_err("publish settlement artifact")?;
+        File::open(self.directory.as_path())
+            .and_then(|directory| directory.sync_all())
+            .wrap_err("fsync settlement artifact directory")
+    }
+}
+
 /// Discovers persisted batch boundaries and prepares the next submission independently of L1.
 struct BatchPreparer<P: ZoneSequencerProvider> {
     config: ZoneMonitorConfig,
@@ -184,6 +407,7 @@ struct BatchPreparer<P: ZoneSequencerProvider> {
     observed_zone_block: Arc<AtomicU64>,
     submitted_zone_block: Arc<AtomicU64>,
     settlement_prover: Option<SettlementProver>,
+    settlement_store: SettlementArtifactStore,
 }
 
 impl<P> BatchPreparer<P>
@@ -211,6 +435,74 @@ where
 }
 
 impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
+    async fn fast_verification_evidence(
+        &self,
+        prepared: &PreparedBatch,
+        proof: Option<&SettlementProof>,
+        certificate: Option<&SettlementCertificate>,
+    ) -> Result<Option<FastSettlementVerificationEvidence>, BatchSubmitError> {
+        let Some(certificate) = certificate.filter(|certificate| certificate.attestation.is_fast())
+        else {
+            return Ok(None);
+        };
+        let attestation = &certificate.attestation;
+        let block = BlockId::hash_canonical(prepared.batch.tempo_block_hash);
+        let config = crate::attestation::read_historical_fast_epoch_config(
+            self.batch_submitter.l1_provider(),
+            self.config.portal_address,
+            attestation.fastEpoch,
+            block,
+        )
+        .await?;
+        let policy = crate::attestation::FastSettlementProofPolicy::from_config(&config)?;
+        let expected_mode = policy.mode;
+        if expected_mode != self.config.proof_mode {
+            return Err(BatchSubmitError::Other(eyre::eyre!(
+                "local settlement mode does not match historical fast enrollment"
+            )));
+        }
+        if attestation.rosterHash != config.rosterHash
+            || attestation.verifierConfigHash != policy.expected_verifier_config_hash
+        {
+            return Err(BatchSubmitError::Other(eyre::eyre!(
+                "settlement certificate does not match historical roster/verifier policy"
+            )));
+        }
+        let code = self
+            .batch_submitter
+            .l1_provider()
+            .get_code_at(attestation.verifier)
+            .block_id(block)
+            .await
+            .map_err(|error| eyre::eyre!(error))?;
+        let verifier_code_hash = alloy_primitives::keccak256(&code);
+        if verifier_code_hash != policy.expected_verifier_code_hash {
+            return Err(BatchSubmitError::Other(eyre::eyre!(
+                "settlement verifier code hash does not match historical fast enrollment"
+            )));
+        }
+        let proof_hash = proof.map(|proof| alloy_primitives::keccak256(&proof.bundle.proof));
+        if expected_mode == SettlementProofMode::ProofRequired && proof_hash.is_none() {
+            return Err(BatchSubmitError::Other(eyre::eyre!(
+                "proof-required fast settlement is missing proof evidence"
+            )));
+        }
+        Ok(Some(FastSettlementVerificationEvidence {
+            security_mode: expected_mode,
+            fast_epoch: attestation.fastEpoch,
+            roster_hash: attestation.rosterHash,
+            verifier: attestation.verifier,
+            verifier_code_hash,
+            verifier_config_hash: attestation.verifierConfigHash,
+            proof_hash,
+            batch_digest: certificate.digest,
+            imported_tempo_number: prepared.batch.tempo_block_number,
+            imported_tempo_hash: prepared.batch.tempo_block_hash,
+            anchor_number: prepared.anchor_block_number(),
+            anchor_hash: prepared.anchor.block_hash(),
+        }))
+    }
+
     /// Create a new zone monitor with integrated batch submission.
     ///
     /// Uses the node's native provider for Zone data and creates a [`BatchSubmitter`] backed by
@@ -248,7 +540,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         repair_notify: Arc<Notify>,
         settlement_prover: Option<SettlementProver>,
     ) -> Result<Self> {
+        eyre::ensure!(
+            config.proof_mode != SettlementProofMode::ProofRequired || settlement_prover.is_some(),
+            "proof-required settlement needs a configured settlement prover"
+        );
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
+        let settlement_store = SettlementArtifactStore::open(config.settlement_store_path.clone())?;
         let batch_submitter = Arc::new(BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
             l1_provider,
@@ -312,6 +609,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             observed_zone_block,
             submitted_zone_block,
             settlement_prover,
+            settlement_store,
         };
 
         // Restore pending withdrawal data from zone L2 events so the
@@ -377,6 +675,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             observed_zone_block: self.observed_zone_block.clone(),
             submitted_zone_block: self.submitted_zone_block.clone(),
             settlement_prover: self.settlement_prover.clone(),
+            settlement_store: self.settlement_store.clone(),
         }
     }
 }
@@ -564,6 +863,7 @@ impl<P: ZoneSequencerProvider> BatchPreparer<P> {
         let batch = BatchData {
             zone_height: to,
             tempo_block_number: end_state.tempo_block_number,
+            tempo_block_hash: end_state.tempo_block_hash,
             prev_block_hash: self.cursor.block_hash,
             next_block_hash: end_state.block_hash,
             prev_processed_deposit_hash: self.cursor.processed_deposit_hash,
@@ -613,48 +913,28 @@ impl<P: ZoneSequencerProvider> BatchPreparer<P> {
         withdrawals: Vec<abi::Withdrawal>,
     ) -> std::result::Result<ReadyBatch, BatchSubmitError> {
         let to = prepared.batch.zone_height;
-        let nitro_attempt = async {
-            let Some(prover) = &self.settlement_prover else {
-                return Ok::<_, BatchSubmitError>(ControlFlow::Break(None));
-            };
-            let proof = prover.prove(from, to, prepared.clone());
-            tokio::pin!(proof);
-
-            let certificate = self.prepare_certificate(&prepared, VerifierMode::NitroV1);
-            tokio::pin!(certificate);
-
-            // Poll both concurrently. `NoProof` fallback decision doesn't wait for `Nitro` quorum.
-            let (proof, certificate) = tokio::select! {
-                result = &mut proof => match result {
-                    Err(cause) => return Ok(ControlFlow::Break(Some(cause))),
-                    Ok(proof) => (proof, certificate.await?),
-                },
-                result = &mut certificate => {
-                    let certificate = result?;
-                    match proof.await {
-                        Err(cause) => return Ok(ControlFlow::Break(Some(cause))),
-                        Ok(proof) => (proof, certificate),
-                    }
-                }
-            };
-
-            Ok::<_, BatchSubmitError>(ControlFlow::Continue((proof, certificate)))
-        };
-
-        let (verifier_mode, proof, certificate) = match nitro_attempt.await? {
-            ControlFlow::Continue((proof, certificate)) => {
-                (VerifierMode::NitroV1, Some(proof), certificate)
+        self.settlement_store
+            .persist_prepared(&prepared, self.config.proof_mode)
+            .map_err(BatchSubmitError::Other)?;
+        let (verifier_mode, proof) = match self.config.proof_mode {
+            SettlementProofMode::OperatorAttested => {
+                info!(
+                    security_mode = "operator-attested",
+                    "Prepared explicitly non-proof settlement input"
+                );
+                (VerifierMode::NoProof, None)
             }
-            ControlFlow::Break(cause) => {
-                if let Some(cause) = cause {
-                    warn!(error = ?cause, "Settling batch with the `NoProof` verifier fallback");
-                    self.metrics.batch_no_proof_fallback_total.increment(1);
-                }
-                // Dropping the Nitro attempt releases its signature route before the fallback.
-                let certificate = self
-                    .prepare_certificate(&prepared, VerifierMode::NoProof)
-                    .await?;
-                (VerifierMode::NoProof, None, certificate)
+            SettlementProofMode::ProofRequired => {
+                let prover = self.settlement_prover.as_ref().ok_or_else(|| {
+                    BatchSubmitError::Other(eyre::eyre!(
+                        "proof-required settlement has no configured prover"
+                    ))
+                })?;
+                let proof = prover
+                    .prove(from, to, prepared.clone())
+                    .await
+                    .map_err(BatchSubmitError::Other)?;
+                (VerifierMode::NitroV1, Some(proof))
             }
         };
 
@@ -662,20 +942,9 @@ impl<P: ZoneSequencerProvider> BatchPreparer<P> {
             prepared,
             proof,
             verifier_mode,
-            certificate,
+            certificate: None,
             withdrawals,
         })
-    }
-
-    async fn prepare_certificate(
-        &self,
-        prepared: &PreparedBatch,
-        verifier_mode: VerifierMode,
-    ) -> Result<Option<SettlementCertificate>, BatchSubmitError> {
-        match &self.config.settlements {
-            Some(settlements) => settlements.prepare(prepared, verifier_mode).await.map(Some),
-            None => Ok(None),
-        }
     }
 }
 
@@ -690,9 +959,27 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             prepared,
             proof,
             verifier_mode,
-            certificate,
+            mut certificate,
             withdrawals,
         } = ready;
+        self.settlement_store
+            .persist_prepared(&prepared, self.config.proof_mode)?;
+        if certificate.is_none() {
+            certificate = match &self.config.settlements {
+                Some(settlements) => Some(settlements.prepare(&prepared, verifier_mode).await?),
+                None => None,
+            };
+        }
+        let verification_evidence = self
+            .fast_verification_evidence(&prepared, proof.as_ref(), certificate.as_ref())
+            .await?;
+        self.settlement_store.persist_ready(
+            &prepared,
+            self.config.proof_mode,
+            proof.as_ref(),
+            certificate.as_ref(),
+            verification_evidence,
+        )?;
         let batch_data = &prepared.batch;
         let last_zone_block = batch_data.zone_height;
         let mut delay = INITIAL_RETRY_DELAY;
@@ -752,6 +1039,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                             eyre::eyre!("withdrawal queue index overflow in BatchSubmitted")
                         })?)
                     };
+                    self.settlement_store.mark_submitted(&prepared)?;
 
                     self.metrics
                         .batch_submit_latency_seconds
@@ -761,6 +1049,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     info!(
                         last_zone_block,
                         blocks_in_batch,
+                        security_mode = ?self.config.proof_mode,
+                        proof_hash = ?proof.as_ref().map(|proof| alloy_primitives::keccak256(&proof.bundle.proof)),
                         tempo_block_number = batch_data.tempo_block_number,
                         withdrawal_batch_index = event.withdrawalBatchIndex,
                         withdrawal_queue_index = %event.withdrawalQueueIndex,
@@ -892,6 +1182,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         if zone_block_number == 0 {
             return Ok(ZoneBlockSnapshot {
                 tempo_block_number: 0,
+                tempo_block_hash: B256::ZERO,
                 processed_deposit_hash: B256::ZERO,
                 processed_deposit_number: 0,
                 processed_token_count: 0,
@@ -1112,6 +1403,8 @@ mod tests {
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
             settlements: None,
+            proof_mode: SettlementProofMode::OperatorAttested,
+            settlement_store_path: tempfile::tempdir().unwrap().keep(),
         };
         let l1_provider = mock_provider(l1);
         let chain_spec = config.chain_spec.clone();
@@ -1135,6 +1428,8 @@ mod tests {
             observed_zone_block: Arc::new(AtomicU64::new(50)),
             submitted_zone_block: Arc::new(AtomicU64::new(10)),
             settlement_prover: None,
+            settlement_store: SettlementArtifactStore::open(tempfile::tempdir().unwrap().keep())
+                .unwrap(),
         }
     }
 
@@ -1151,6 +1446,7 @@ mod tests {
         BatchData {
             zone_height: 20,
             tempo_block_number: 123,
+            tempo_block_hash: B256::ZERO,
             prev_block_hash: B256::repeat_byte(0xbb),
             next_block_hash: B256::repeat_byte(0xcc),
             prev_processed_deposit_hash: B256::repeat_byte(0xaa),
@@ -1174,8 +1470,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn settlement_artifact_store_fsyncs_monotonic_exact_batch_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettlementArtifactStore::open(directory.path().to_path_buf()).unwrap();
+        let prepared = prepared(test_batch_data());
+        store
+            .persist_prepared(&prepared, SettlementProofMode::OperatorAttested)
+            .unwrap();
+        let path = store.path(&prepared);
+        let first: PersistedSettlementArtifact =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(matches!(first.phase, SettlementArtifactPhase::Prepared));
+        assert_eq!(
+            first.prepared.batch.next_block_hash,
+            prepared.batch.next_block_hash
+        );
+        assert!(first.certificate.is_none());
+
+        store
+            .persist_ready(
+                &prepared,
+                SettlementProofMode::OperatorAttested,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let ready: PersistedSettlementArtifact =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(matches!(ready.phase, SettlementArtifactPhase::Ready));
+        assert_eq!(
+            ready.verifier_config.unwrap().as_ref(),
+            VerifierMode::NoProof.config()
+        );
+        assert!(ready.proof.is_none());
+        assert!(ready.proof_hash.is_none());
+        assert!(
+            store
+                .persist_ready(
+                    &prepared,
+                    SettlementProofMode::ProofRequired,
+                    None,
+                    None,
+                    None,
+                )
+                .is_err(),
+            "proof-required persistence must reject missing proof evidence"
+        );
+        let conflicting_evidence = FastSettlementVerificationEvidence {
+            security_mode: SettlementProofMode::OperatorAttested,
+            fast_epoch: 1,
+            roster_hash: B256::repeat_byte(1),
+            verifier: Address::repeat_byte(2),
+            verifier_code_hash: B256::repeat_byte(3),
+            verifier_config_hash: VerifierMode::NoProof.config_hash(),
+            proof_hash: None,
+            batch_digest: B256::repeat_byte(4),
+            imported_tempo_number: prepared.batch.tempo_block_number,
+            imported_tempo_hash: prepared.batch.tempo_block_hash,
+            anchor_number: prepared.anchor_block_number(),
+            anchor_hash: prepared.anchor.block_hash(),
+        };
+        assert!(
+            store
+                .persist_ready(
+                    &prepared,
+                    SettlementProofMode::OperatorAttested,
+                    None,
+                    None,
+                    Some(conflicting_evidence),
+                )
+                .is_err(),
+            "ready evidence must be immutable for one prepared batch"
+        );
+
+        store.mark_submitted(&prepared).unwrap();
+        let submitted: PersistedSettlementArtifact =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(matches!(
+            submitted.phase,
+            SettlementArtifactPhase::Submitted
+        ));
+    }
+
     #[tokio::test]
-    async fn proof_verification_failure_enters_no_proof_submission_path() {
+    async fn explicit_operator_mode_never_attempts_or_claims_a_proof() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
         monitor.settlement_prover = Some(SettlementProver::fixed(Err(eyre::eyre!(
@@ -1200,112 +1580,65 @@ mod tests {
                 .to_string()
                 .contains("batch submission failed after 3 retries")
         );
-        assert!(l1.read_q().is_empty(), "fallback must reach submission");
+        assert!(
+            l1.read_q().is_empty(),
+            "explicit operator-attested mode must reach submission"
+        );
     }
 
     #[tokio::test]
-    async fn unconfigured_prover_collects_no_proof_quorum() {
-        assert_no_proof_quorum(None).await;
-    }
-
-    #[tokio::test]
-    async fn proof_verification_setup_failure_collects_no_proof_quorum_until_leader_demotion() {
-        let proof = Some(Err(eyre::eyre!("failed to read portal verifier")));
-        assert_no_proof_quorum(proof).await;
-    }
-
-    async fn assert_no_proof_quorum(proof: Option<eyre::Result<SettlementProof>>) {
+    async fn proof_required_policy_rejects_prover_failure_without_fallback() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        let proof_tx = proof.map(|proof| {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            monitor.settlement_prover = Some(SettlementProver::fixed_after(async move {
-                rx.await.expect("release proof after the Nitro proposal");
-                proof
-            }));
-            tx
-        });
-        let (commands, mut proposals) = tokio::sync::mpsc::channel(1);
-        let settlements = SettlementManager::new(
-            crate::attestation::AttestationDomain {
-                l1_chain_id: 1337,
-                portal_address: monitor.config.portal_address,
-                zone_id: 7,
-            },
-            None,
-            PrivateKeySigner::random(),
-            Default::default(),
-            mock_provider(l1.clone()),
-            monitor.config.chain_spec.clone(),
-            BatchAnchorConfig::default(),
-            commands,
-        );
-        monitor.config.settlements = Some(settlements);
-        let header = tempo_alloy::rpc::TempoHeaderResponse {
-            inner: alloy_rpc_types_eth::Header {
-                hash: B256::ZERO,
-                inner: TempoHeader::default(),
-                total_difficulty: None,
-                size: None,
-            },
-            timestamp_millis: 0,
-        };
-        // `NoProof` prepares once. A configured prover also prepares a Nitro certificate first.
-        for _ in 0..(1 + usize::from(proof_tx.is_some())) {
-            l1.push_success(&mock_l1_header(1_000));
-            l1.push_success(&abi_encode_multicall(vec![
-                abi_encode_u64(1),
-                abi_encode_u64(2),
-                Address::ZERO.abi_encode().into(),
-                abi_encode_u64(0),
-            ]));
-            l1.push_success(&serde_json::json!("0x7b"));
-            l1.push_success(&header);
-        }
+        monitor.config.proof_mode = SettlementProofMode::ProofRequired;
+        monitor.settlement_prover =
+            Some(SettlementProver::fixed(Err(eyre::eyre!("invalid proof"))));
 
-        let task = tokio::spawn(async move {
-            monitor
-                .batch_preparer()
-                .prepare_artifacts(11, prepared(test_batch_data()), Vec::new())
-                .await
-        });
-        if let Some(proof_tx) = proof_tx {
-            // Fail proving after the Nitro proposal, forcing a fresh `NoProof` quorum.
-            let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
-                panic!("expected a Nitro settlement proposal");
-            };
-            let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
-            assert_eq!(
-                attestation.verifierConfigHash,
-                VerifierMode::NitroV1.config_hash()
-            );
-            proof_tx.send(()).unwrap();
-        }
-        let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
+        let error = monitor
+            .batch_preparer()
+            .prepare_artifacts(11, prepared(test_batch_data()), Vec::new())
             .await
-            .unwrap()
-            .unwrap();
-        let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
-            panic!("expected a NoProof settlement proposal");
-        };
-        let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
-        assert_eq!(
-            attestation.verifierConfigHash,
-            VerifierMode::NoProof.config_hash()
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid proof"));
+        assert!(
+            l1.read_q().is_empty(),
+            "NoProof submission must not be prepared"
         );
-        assert!(!task.is_finished(), "a second signature is still required");
-        // Leader demotion drops the monitor run future, which aborts its preparation task.
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn explicit_operator_mode_needs_no_prover_during_preparation() {
+        assert_operator_preparation_ignores_prover(None).await;
+    }
+
+    #[tokio::test]
+    async fn operator_mode_does_not_probe_a_configured_prover() {
+        let proof = Some(Err(eyre::eyre!("failed to read portal verifier")));
+        assert_operator_preparation_ignores_prover(proof).await;
+    }
+
+    async fn assert_operator_preparation_ignores_prover(
+        proof: Option<eyre::Result<SettlementProof>>,
+    ) {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        if let Some(proof) = proof {
+            monitor.settlement_prover = Some(SettlementProver::fixed(proof));
+        }
+        let ready = monitor
+            .batch_preparer()
+            .prepare_artifacts(11, prepared(test_batch_data()), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(ready.verifier_mode, VerifierMode::NoProof);
+        assert!(ready.proof.is_none());
+        assert!(ready.certificate.is_none());
         assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
-    async fn validation_failure_enters_no_proof_submission_path() {
+    async fn explicit_operator_mode_submits_without_probing_failed_prover() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
         monitor.settlement_prover =
@@ -1329,7 +1662,10 @@ mod tests {
                 .to_string()
                 .contains("batch submission failed after 3 retries")
         );
-        assert!(l1.read_q().is_empty(), "fallback must reach submission");
+        assert!(
+            l1.read_q().is_empty(),
+            "operator mode must reach submission"
+        );
     }
 
     #[tokio::test]
@@ -1338,9 +1674,11 @@ mod tests {
 
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.config.proof_mode = SettlementProofMode::ProofRequired;
         let batch = BatchData {
             zone_height: 20,
             tempo_block_number: 123,
+            tempo_block_hash: B256::ZERO,
             prev_block_hash: B256::repeat_byte(0xbb),
             next_block_hash: B256::repeat_byte(0xcc),
             prev_processed_deposit_hash: B256::ZERO,
@@ -1398,6 +1736,8 @@ mod tests {
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
             settlements: None,
+            proof_mode: SettlementProofMode::OperatorAttested,
+            settlement_store_path: tempfile::tempdir().unwrap().keep(),
         };
 
         l1.push_failure_msg("boom");
@@ -1479,6 +1819,7 @@ mod tests {
         let batch_data = BatchData {
             zone_height: 20,
             tempo_block_number: 123,
+            tempo_block_hash: B256::ZERO,
             prev_block_hash: B256::repeat_byte(0x99),
             next_block_hash: B256::repeat_byte(0x55),
             prev_processed_deposit_hash: B256::repeat_byte(0x77),

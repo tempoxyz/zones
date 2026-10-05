@@ -64,14 +64,22 @@ use zone_rpc::{
     auth::AuthContext,
     types::{
         ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoundDecryptionKey, BoxEyreFut, BoxFut,
-        DecryptionKeyCandidate, DecryptionKeyStatus, JsonRpcError, LocalSequencerInfo, PeerTipInfo,
-        SequencerInfoResponse, SequencerPeerInfo, SequencerProgress, SequencerReadiness,
-        SetLeaderResponse, ZoneExecutionWitness, ZoneInfoResponse, internal, raw_null, raw_zero,
-        to_raw,
+        DecryptionKeyCandidate, DecryptionKeyStatus, FastTransferStatusResponse, JsonRpcError,
+        LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
+        SequencerProgress, SequencerReadiness, SetLeaderResponse, ZoneExecutionWitness,
+        ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
     },
 };
 
-use crate::{follower::PeerTipRegistry, role::SharedRoleStatus};
+use crate::{
+    fast_service::{FastServiceError, PrivateTransferState, PrivateTransferStatus},
+    fast_service_adapters::FastServiceHandle,
+    follower::PeerTipRegistry,
+    role::SharedRoleStatus,
+};
+use zone_primitives::fast_transfer::{
+    CancellationRequest, CanonicalEncode, QuoteCertificate, TransferIntent, TransferOutcome,
+};
 
 /// Multi-sequencer handles for the sequencer RPC methods.
 ///
@@ -752,6 +760,28 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     /// Maps filter IDs to the authenticated account that created them.
     /// The reth filter registry remains the source of truth for filter liveness.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
+    fast_transfers: Option<Arc<dyn FastTransferRpcReader>>,
+    fast_service: Option<Arc<FastServiceHandle>>,
+}
+
+/// Read-only adapter to the fsynced OpenRaft-applied state machine.
+pub trait FastTransferRpcReader: Send + Sync + 'static {
+    fn committed_transfer(
+        &self,
+        transfer_id: B256,
+    ) -> eyre::Result<Option<crate::fast_raft_state_machine::CommittedTransferRecord>>;
+}
+
+impl<E> FastTransferRpcReader for crate::fast_raft_state_machine::CommittedStateHandle<E>
+where
+    E: crate::fast_raft_state_machine::DurableStateMachineExecution,
+{
+    fn committed_transfer(
+        &self,
+        transfer_id: B256,
+    ) -> eyre::Result<Option<crate::fast_raft_state_machine::CommittedTransferRecord>> {
+        self.committed_transfer(transfer_id).map_err(Into::into)
+    }
 }
 
 impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
@@ -761,6 +791,8 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
         config: zone_rpc::RedactedRpcConfig,
         enabled_tokens: EnabledTokenRegistry,
         l1_provider: DynProvider<TempoNetwork>,
+        fast_transfers: Option<Arc<dyn FastTransferRpcReader>>,
+        fast_service: Option<Arc<FastServiceHandle>>,
     ) -> Self {
         let rpc = Self {
             eth,
@@ -768,6 +800,8 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             enabled_tokens,
             l1_provider,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
+            fast_transfers,
+            fast_service,
         };
         rpc.spawn_filter_owner_pruner();
         rpc
@@ -1359,6 +1393,44 @@ where
         })
     }
 
+    fn ws_subscribe_fast_transfer_receipts(&self, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            let service = self
+                .fast_service
+                .as_ref()
+                .ok_or_else(JsonRpcError::method_disabled)?;
+            let subscription = service.subscribe(&auth).map_err(fast_service_rpc_error)?;
+            let stream = futures::stream::unfold(subscription, |mut subscription| async move {
+                loop {
+                    let record = subscription.recv().await?;
+                    let certificate = record
+                        .certificate
+                        .as_ref()
+                        .map(|certificate| Bytes::from(certificate.canonical_bytes()));
+                    let state = match &record.body.outcome {
+                        TransferOutcome::Locked { .. } => "locked",
+                        TransferOutcome::Paid { .. } => "paid",
+                        TransferOutcome::Rejected { .. } => "rejected",
+                        TransferOutcome::Released { .. } => "released",
+                        TransferOutcome::Refunded { .. } => "refunded",
+                    };
+                    let response = FastTransferStatusResponse {
+                        transfer_id: record.body.transfer_id,
+                        intent_hash: record.body.intent_hash,
+                        block_height: U64::from(record.body.block_height),
+                        block_hash: record.body.block_hash,
+                        state_root: record.body.state_root,
+                        outcome: state.to_owned(),
+                        certificate,
+                    };
+                    break Some((to_raw(&response), subscription));
+                }
+            });
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
     fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             to_raw(&AuthorizationTokenInfoResponse {
@@ -1395,6 +1467,172 @@ where
             let key = encryption_key(self.config.zone_portal, &self.l1_provider).await?;
             to_raw(&key)
         })
+    }
+
+    fn zone_get_fast_transfer_status(&self, transfer_id: B256, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            if let Some(service) = &self.fast_service {
+                let status = service
+                    .status(&auth, transfer_id)
+                    .map_err(fast_service_rpc_error)?;
+                return status
+                    .as_ref()
+                    .map(|status| fast_status_response(status, None))
+                    .map_or_else(|| Ok(raw_null()), |status| to_raw(&status));
+            }
+            let Some(reader) = self.fast_transfers.as_ref() else {
+                return Err(JsonRpcError::method_disabled());
+            };
+            let Some(record) = reader.committed_transfer(transfer_id).map_err(internal)? else {
+                return Ok(raw_null());
+            };
+            let intent = &record.intent;
+            let caller = auth.caller;
+            if ![
+                intent.sender,
+                intent.recipient,
+                intent.destination_pool,
+                intent.reimbursement_account,
+            ]
+            .contains(&caller)
+            {
+                // Do not disclose transfer existence to unrelated authenticated accounts.
+                return Ok(raw_null());
+            }
+            let outcome = match &record.body.outcome {
+                TransferOutcome::Locked { .. } => "locked",
+                TransferOutcome::Paid { .. } => "paid",
+                TransferOutcome::Rejected { .. } => "rejected",
+                TransferOutcome::Released { .. } => "released",
+                TransferOutcome::Refunded { .. } => "refunded",
+            };
+            let certificate = record
+                .certificate
+                .as_ref()
+                .map(|certificate| Bytes::from(certificate.canonical_bytes()));
+            to_raw(&FastTransferStatusResponse {
+                transfer_id,
+                intent_hash: record.body.intent_hash,
+                block_height: U64::from(record.body.block_height),
+                block_hash: record.body.block_hash,
+                state_root: record.body.state_root,
+                outcome: outcome.to_owned(),
+                certificate,
+            })
+        })
+    }
+
+    fn zone_get_fast_transfer_receipt(&self, transfer_id: B256, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            if let Some(service) = &self.fast_service {
+                let receipt = service
+                    .payment_receipt(&auth, transfer_id)
+                    .map_err(fast_service_rpc_error)?;
+                return receipt.map_or_else(
+                    || Ok(raw_null()),
+                    |receipt| {
+                        to_raw(&fast_status_response(
+                            &receipt.status,
+                            Some(Bytes::from(receipt.certificate.canonical_bytes())),
+                        ))
+                    },
+                );
+            }
+            // A bare committed-state reader cannot independently validate the certificate
+            // against the exact installed historical roster. Do not expose a receipt through
+            // that compatibility path.
+            Err(JsonRpcError::method_disabled())
+        })
+    }
+
+    fn zone_submit_fast_transfer(
+        &self,
+        intent: Bytes,
+        quote: Bytes,
+        signed_transaction: Bytes,
+        auth: AuthContext,
+    ) -> BoxFut<'_> {
+        Box::pin(async move {
+            let service = self
+                .fast_service
+                .as_ref()
+                .ok_or_else(JsonRpcError::method_disabled)?;
+            let intent = TransferIntent::decode(&intent)
+                .map_err(|_| JsonRpcError::invalid_params("invalid canonical transfer intent"))?;
+            let quote = QuoteCertificate::decode(&quote)
+                .map_err(|_| JsonRpcError::invalid_params("invalid canonical quote certificate"))?;
+            let result = service
+                .submit(&auth, intent, quote, &signed_transaction)
+                .await
+                .map_err(fast_service_rpc_error)?;
+            #[derive(serde::Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Response {
+                transfer_id: B256,
+                transaction_hash: B256,
+                committed: Option<FastTransferStatusResponse>,
+            }
+            to_raw(&Response {
+                transfer_id: result.transfer_id,
+                transaction_hash: result.transaction_hash,
+                committed: result
+                    .committed
+                    .as_ref()
+                    .map(|status| fast_status_response(status, None)),
+            })
+        })
+    }
+
+    fn zone_cancel_fast_transfer(&self, cancellation: Bytes, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            let service = self
+                .fast_service
+                .as_ref()
+                .ok_or_else(JsonRpcError::method_disabled)?;
+            let cancellation = CancellationRequest::decode(&cancellation).map_err(|_| {
+                JsonRpcError::invalid_params("invalid canonical cancellation request")
+            })?;
+            service
+                .cancel(&auth, cancellation)
+                .await
+                .map_err(fast_service_rpc_error)?;
+            to_raw(&true)
+        })
+    }
+}
+
+fn fast_status_response(
+    status: &PrivateTransferStatus,
+    certificate: Option<Bytes>,
+) -> FastTransferStatusResponse {
+    let outcome = match status.state {
+        PrivateTransferState::Locked => "locked",
+        PrivateTransferState::Paid => "paid",
+        PrivateTransferState::Rejected => "rejected",
+        PrivateTransferState::Released => "released",
+        PrivateTransferState::Refunded => "refunded",
+    };
+    FastTransferStatusResponse {
+        transfer_id: status.transfer_id,
+        intent_hash: status.intent_hash,
+        block_height: U64::from(status.block_height),
+        block_hash: status.block_hash,
+        state_root: status.state_root,
+        outcome: outcome.to_owned(),
+        certificate,
+    }
+}
+
+fn fast_service_rpc_error(error: FastServiceError) -> JsonRpcError {
+    match error {
+        FastServiceError::InvalidConfiguration
+        | FastServiceError::InvalidRoute(_)
+        | FastServiceError::InvalidIntent(_)
+        | FastServiceError::InvalidCancellation
+        | FastServiceError::UnauthorizedPrincipal => {
+            JsonRpcError::invalid_params("fast transfer request is not authorized or valid")
+        }
+        _ => JsonRpcError::internal("fast transfer request could not be completed"),
     }
 }
 

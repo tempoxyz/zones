@@ -11,6 +11,7 @@ mod database;
 mod executor;
 mod fee_manager;
 pub mod precompiles;
+pub mod same_anchor;
 mod zone_evm;
 
 pub use database::{L1OverlayDB, ZoneDbError};

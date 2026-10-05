@@ -35,6 +35,15 @@ pub struct ZoneChainSpec {
 }
 
 impl ZoneChainSpec {
+    /// Returns whether same-anchor execution is active at the finalized Tempo anchor.
+    ///
+    /// The anchor timestamp, rather than the proposed Zone block timestamp, is consensus
+    /// critical: a same-anchor block must never activate semantics that its imported L1 view has
+    /// not finalized yet.
+    pub fn supports_same_anchor_at(&self, anchor_timestamp: u64) -> bool {
+        self.is_t14_active_at_timestamp(anchor_timestamp)
+    }
+
     /// Converts a genesis configuration into a Zone chain specification.
     ///
     /// Known public and local development chains inherit their parent schedule. Custom chains
@@ -268,6 +277,10 @@ mod tests {
     fn delegates_tempo_chain_behavior() {
         let zone = dev_zone_spec(1);
 
+        assert_eq!(
+            zone.supports_same_anchor_at(u64::MAX),
+            zone.is_t14_active_at_timestamp(u64::MAX)
+        );
         assert_eq!(zone.chain_id(), zone_chain_id(DEV.chain_id(), 1).unwrap());
         for &hardfork in TempoHardfork::VARIANTS {
             assert_eq!(
@@ -301,6 +314,17 @@ mod tests {
 
         assert_eq!(zone.tempo_hardfork_at(99), TempoHardfork::T12);
         assert_eq!(zone.tempo_hardfork_at(100), TempoHardfork::T13);
+    }
+
+    #[test]
+    fn same_anchor_activates_exactly_at_t14() {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(DEV.chain_id(), 6).unwrap();
+        test_utils::set_tempo_fork(&mut genesis, TempoHardfork::T14, 1_000);
+        let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
+
+        assert!(!zone.supports_same_anchor_at(999));
+        assert!(zone.supports_same_anchor_at(1_000));
     }
 
     #[test]
@@ -422,6 +446,7 @@ mod tests {
         assert_eq!(zone.genesis(), &genesis);
         assert_eq!(zone.genesis_hash(), expected.genesis_hash());
         assert_eq!(zone.tempo_hardfork_at(u64::MAX), TempoHardfork::T11);
+        assert!(!zone.supports_same_anchor_at(u64::MAX));
         assert_eq!(
             zone.tempo_fork_activation(TempoHardfork::T14),
             ForkCondition::Never

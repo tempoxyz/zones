@@ -54,6 +54,7 @@ pub use error::{Result, ZonePrecompileError, ZoneResult};
 mod aes_gcm;
 mod chaum_pedersen;
 pub mod ecies;
+pub mod fast_transfer;
 pub mod outbox;
 
 /// Zone dispatch helpers for generic typed operations.
@@ -106,7 +107,7 @@ use tempo_precompiles::{
 };
 #[cfg(feature = "std")]
 use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
+use tempo_zone_contracts::{FAST_TRANSFER_ADDRESS, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 
 /// Registers every precompile that is available to a Zone EVM.
 ///
@@ -133,7 +134,13 @@ pub fn extend_zone_precompiles<P>(
         }
 
         if is_tip20_prefix(*address) {
-            Some(create_tip20_precompile(*address, &env))
+            Some(create_tip20_precompile(*address, &env, l1.clone()))
+        } else if *address == FAST_TRANSFER_ADDRESS {
+            // Keep the reserved address installed on every fork. The FastTransfer call rules
+            // reject every selector before T14; leaving the address unregistered would make an
+            // EVM CALL to the empty account report success instead of the required fork-gate
+            // revert.
+            Some(fast_transfer::FastTransfer::create(l1.clone(), &env))
         } else if *address == TEMPO_STATE_ADDRESS {
             Some(TempoState::create(l1.clone(), &env))
         } else if *address == ZONE_INBOX_ADDRESS {
@@ -193,7 +200,14 @@ where
 }
 
 /// Creates upstream TIP-20 execution with zone rules and adapter-backed L1 policy reads.
-pub fn create_tip20_precompile(address: Address, env: &ZonePrecompileEnv) -> DynPrecompile {
+pub fn create_tip20_precompile<P>(
+    address: Address,
+    env: &ZonePrecompileEnv,
+    l1: L1State<P>,
+) -> DynPrecompile
+where
+    P: L1StorageReader,
+{
     // Redacts TIP20 transfer from reverts that reveal user balances to the spender.
     let redact = |mut res: revm::precompile::PrecompileOutput| {
         if res.is_revert() && res.bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) {
@@ -205,7 +219,7 @@ pub fn create_tip20_precompile(address: Address, env: &ZonePrecompileEnv) -> Dyn
     execution::create_precompile(
         "TIP20Token",
         env,
-        ztip20::TIP20Rules,
+        ztip20::TIP20Rules::new(l1),
         move |data, caller| {
             TIP20Token::from_address_unchecked(address)
                 .call(data, caller)

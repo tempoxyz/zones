@@ -228,6 +228,26 @@ pub struct ZoneInfoResponse {
     pub tempo_block_number: U64,
 }
 
+/// Authenticated view of one committed instant transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FastTransferStatusResponse {
+    /// Stable canonical transfer ID.
+    pub transfer_id: B256,
+    /// Hash of the complete immutable intent.
+    pub intent_hash: B256,
+    /// Committed block height containing the latest outcome.
+    pub block_height: U64,
+    /// Committed block and state roots.
+    pub block_hash: B256,
+    pub state_root: B256,
+    /// `locked`, `paid`, `rejected`, `released`, or `refunded`.
+    pub outcome: String,
+    /// Canonical certificate bytes once two durable signatures are assembled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<Bytes>,
+}
+
 /// Local view of one sequencer node for `zone_getSequencerInfo`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -459,6 +479,10 @@ define_methods! {
     ZoneGetAuthorizationTokenInfo => "zone_getAuthorizationTokenInfo",
     ZoneGetZoneInfo => "zone_getZoneInfo",
     ZoneGetEncryptionKey => "zone_getEncryptionKey",
+    ZoneGetFastTransferStatus => "zone_getFastTransferStatus",
+    ZoneGetFastTransferReceipt => "zone_getFastTransferReceipt",
+    ZoneSubmitFastTransfer => "zone_submitFastTransfer",
+    ZoneCancelFastTransfer => "zone_cancelFastTransfer",
     EthGetTransactionByHash => "eth_getTransactionByHash",
     EthGetTransactionReceipt => "eth_getTransactionReceipt",
     EthGetLogs => "eth_getLogs",

@@ -132,6 +132,18 @@ pub(crate) struct EventSinks {
 }
 
 impl EventSinks {
+    /// Install process-lifetime settlement and transaction streams for finalized T14 members.
+    pub(crate) fn install_fast_events(
+        &self,
+    ) -> (mpsc::Receiver<P2pEvent>, mpsc::Receiver<P2pEvent>) {
+        let (sync_sender, sync_receiver) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+        let (transaction_sender, transaction_receiver) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+        let mut sinks = self.inner.lock().expect("poisoned");
+        sinks.sync = Some(sync_sender);
+        sinks.transactions = Some(transaction_sender);
+        (sync_receiver, transaction_receiver)
+    }
+
     fn install(
         &self,
         sync: mpsc::Sender<P2pEvent>,

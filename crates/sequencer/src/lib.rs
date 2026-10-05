@@ -3,7 +3,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use alloy_chains::Chain;
 use alloy_primitives::Address;
@@ -23,6 +23,7 @@ pub mod abi {
 
 pub mod attestation;
 mod encryption_key;
+pub mod fast_replenishment;
 mod metrics;
 pub mod monitor;
 pub mod nonce_keys;
@@ -34,6 +35,7 @@ pub mod settlement;
 mod settlement_manager;
 pub mod withdrawals;
 
+pub use attestation::SettlementProofMode;
 pub use encryption_key::{
     EncryptionKeyProof, encryption_key_identity, prove_encryption_key_possession,
     register_encryption_key,
@@ -52,7 +54,7 @@ pub use settlement::{
     BatchAnchor, BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatch,
     SettlementAbi, resolve_portal_zone_anchor,
 };
-pub use settlement_manager::SettlementManager;
+pub use settlement_manager::{SettlementCommittedGuard, SettlementManager};
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
     MAX_WITHDRAWAL_BATCH_GAS, SharedWithdrawalStore, WithdrawalBatchLimits,
@@ -125,6 +127,11 @@ pub struct ZoneSequencerConfig {
     pub inbox_address: Address,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
+    /// Explicit settlement security mode. This must match historical fast enrollment; prover
+    /// presence never selects or downgrades it.
+    pub settlement_proof_mode: SettlementProofMode,
+    /// Fsync-backed settlement artifact directory.
+    pub settlement_store_path: PathBuf,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -194,6 +201,8 @@ where
         portal_address: config.portal_address,
         batch_anchor_config: config.batch_anchor_config,
         settlements,
+        proof_mode: config.settlement_proof_mode,
+        settlement_store_path: config.settlement_store_path,
     };
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,

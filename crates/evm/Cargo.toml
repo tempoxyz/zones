@@ -46,6 +46,11 @@ revm.workspace = true
 # misc
 thiserror.workspace = true
 tokio.workspace = true
+serde = { workspace = true, optional = true, features = ["derive"] }
+
+[features]
+default = []
+serde = ["dep:serde", "alloy-primitives/serde"]
 
 [dev-dependencies]
 alloy-genesis.workspace = true

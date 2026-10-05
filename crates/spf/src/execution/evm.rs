@@ -141,6 +141,12 @@ pub(crate) fn execute_zone_block(
         TempoImport::CheckpointOnly { headers_rlp } => transactions.push(
             execute_advance_tempo_headers(&mut executor, headers_rlp, zone_block_index, chain_id)?,
         ),
+        TempoImport::SameAnchor { opening } => transactions.push(execute_same_anchor(
+            &mut executor,
+            opening,
+            zone_block_index,
+            chain_id,
+        )?),
     }
     transactions.extend(execute_user_transactions(
         &mut executor,
@@ -301,6 +307,32 @@ where
         executor,
         recovered,
         Error::AdvanceTempoExecution { block_index },
+        true,
+    )?;
+    Ok(transaction)
+}
+
+fn execute_same_anchor<'a, 'db, I>(
+    executor: &mut WitnessExecutor<'a, 'db, I>,
+    opening: &zone_evm::same_anchor::SameAnchorOpening,
+    block_index: usize,
+    chain_id: u64,
+) -> Result<TempoTxEnvelope, Error>
+where
+    I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
+{
+    let recovered =
+        opening
+            .system_transaction(chain_id)
+            .map_err(|_| Error::UnsupportedSameAnchorFormat {
+                block_index,
+                format: opening.format,
+            })?;
+    let transaction = recovered.clone_inner();
+    execute_recovered_transaction(
+        executor,
+        recovered,
+        Error::SameAnchorExecution { block_index },
         true,
     )?;
     Ok(transaction)

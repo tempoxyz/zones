@@ -1381,6 +1381,14 @@ impl ZoneTestNode {
                     batch_anchor_config: Default::default(),
                     withdrawal_poll_interval: Duration::from_secs(5),
                     withdrawal_batch_limits: Default::default(),
+                    settlement_proof_mode: if prover_config.is_some() {
+                        zone_sequencer::SettlementProofMode::ProofRequired
+                    } else {
+                        zone_sequencer::SettlementProofMode::OperatorAttested
+                    },
+                    // Keep the test-owned journal through replica restart; the test process's
+                    // temporary filesystem owns cleanup, not this startup stack frame.
+                    settlement_store_path: tempfile::tempdir()?.keep(),
                 });
         }
         if let Some(config) = prover_config {
@@ -1501,6 +1509,8 @@ impl ZoneTestNode {
                     config,
                     enabled_tokens,
                     l1_provider,
+                    None,
+                    None,
                 )) as Arc<dyn zone_node::rpc::ZoneRpcApi>)
             })
                 as Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>>>>>
@@ -3591,6 +3601,9 @@ pub(crate) async fn spawn_sequencer_with_config(
         outbox_address: ZONE_OUTBOX_ADDRESS,
         inbox_address: ZONE_INBOX_ADDRESS,
         batch_anchor_config,
+        // This legacy helper intentionally runs without a proof-generation service.
+        settlement_proof_mode: zone_sequencer::SettlementProofMode::OperatorAttested,
+        settlement_store_path: zone.proof_directory().join("settlement"),
     };
 
     zone.spawn_sequencer(config, sequencer_signer).await

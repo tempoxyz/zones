@@ -8,18 +8,19 @@
 //! Zone-local while the EVM context's database adapter exposes selected policy values from the
 //! finalized Tempo L1 state.
 
+use alloc::rc::Rc;
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError, SolInterface};
 use tempo_precompiles::{
     dispatch::abi_decoder_config_for_spec,
     tip20::{IRolesAuth, ITIP20},
 };
-use tempo_zone_contracts::Unauthorized;
+use tempo_zone_contracts::{Unauthorized, ZonePortal};
 
 use crate::{
     execution::{CallCheck, CallRules},
     privacy::check_caller,
-    storage::StorageCtx,
+    storage::{L1State, L1StorageReader, StorageCtx},
 };
 
 alloy_sol_types::sol! {
@@ -44,7 +45,46 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
 
 /// Zone-specific rules applied before forwarding to upstream `TIP20Token`.
 #[derive(Clone)]
-pub(crate) struct TIP20Rules;
+pub(crate) struct TIP20Rules {
+    account_allowed: Rc<dyn Fn(Address) -> tempo_precompiles::Result<bool>>,
+}
+
+impl TIP20Rules {
+    pub(crate) fn new<P: L1StorageReader>(l1: L1State<P>) -> Self {
+        Self {
+            account_allowed: Rc::new(move |account| {
+                if !l1.read_portal(|portal| &portal.is_access_enforced)? {
+                    return Ok(true);
+                }
+                l1.has_portal_role(account, ZonePortal::Role::Account)
+            }),
+        }
+    }
+
+    fn admit_transfer_accounts(&self, accounts: &[Address]) -> CallCheck {
+        for &account in accounts {
+            match (self.account_allowed)(account) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return CallCheck::Revert(
+                        ZonePortal::AccountNotAllowed { account }
+                            .abi_encode()
+                            .into(),
+                    );
+                }
+                Err(error) => return CallCheck::Error(error),
+            }
+        }
+        CallCheck::Continue
+    }
+
+    #[cfg(test)]
+    fn all_accounts_allowed() -> Self {
+        Self {
+            account_allowed: Rc::new(|_| Ok(true)),
+        }
+    }
+}
 
 impl CallRules for TIP20Rules {
     fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
@@ -67,13 +107,33 @@ impl CallRules for TIP20Rules {
                 ITIP20::ITIP20Calls::nonces(call) => {
                     check_caller(caller, &[call.owner])
                 }
-                // Transfers are disabled during the initial permissioned Zone phase.
-                // Private asset movement is limited to the protocol-managed inbox and outbox paths.
-                ITIP20::ITIP20Calls::transferFrom(_)
-                | ITIP20::ITIP20Calls::transfer(_)
-                | ITIP20::ITIP20Calls::transferWithMemo(_)
-                | ITIP20::ITIP20Calls::transferFromWithMemo(_) => {
-                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                ITIP20::ITIP20Calls::transfer(call) => {
+                    if !StorageCtx::default().spec().is_t14() {
+                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    } else {
+                        self.admit_transfer_accounts(&[caller, call.to])
+                    }
+                }
+                ITIP20::ITIP20Calls::transferWithMemo(call) => {
+                    if !StorageCtx::default().spec().is_t14() {
+                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    } else {
+                        self.admit_transfer_accounts(&[caller, call.to])
+                    }
+                }
+                ITIP20::ITIP20Calls::transferFrom(call) => {
+                    if !StorageCtx::default().spec().is_t14() {
+                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    } else {
+                        self.admit_transfer_accounts(&[call.from, call.to])
+                    }
+                }
+                ITIP20::ITIP20Calls::transferFromWithMemo(call) => {
+                    if !StorageCtx::default().spec().is_t14() {
+                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    } else {
+                        self.admit_transfer_accounts(&[call.from, call.to])
+                    }
                 }
                 // Inbox/outbox call TIP20 internally; public mint/burn entry points stay disabled.
                 ITIP20::ITIP20Calls::mint(_)
@@ -183,7 +243,7 @@ mod tests {
     const PORTAL_ADDRESS: Address = address!("0x0000000000000000000000000000000000000b01");
 
     fn rules() -> TIP20Rules {
-        TIP20Rules
+        TIP20Rules::all_accounts_allowed()
     }
 
     fn admit_at(
@@ -261,7 +321,11 @@ mod tests {
             }
 
             let env = test_env(&ctx);
-            let precompile = crate::create_tip20_precompile(token, &env);
+            let precompile = crate::create_tip20_precompile(
+                token,
+                &env,
+                crate::L1State::new(l1_reader.clone(), PORTAL_ADDRESS),
+            );
 
             Ok(Self {
                 ctx,
@@ -317,7 +381,7 @@ mod tests {
         let spender = Address::repeat_byte(0x22);
         let sequencer = Address::repeat_byte(0x33);
         let outsider = Address::repeat_byte(0x44);
-        let rules = TIP20Rules;
+        let rules = rules();
         let balance = ITIP20::balanceOfCall { account: owner };
         assert_allowed(&rules, balance.clone(), owner);
         assert_unauthorized(&rules, balance.clone(), sequencer);
@@ -360,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn all_transfer_calls_are_disallowed() {
+    fn transfer_calls_activate_at_t14() {
         let rules = rules();
         let caller = Address::repeat_byte(0x11);
         let recipient = Address::repeat_byte(0x22);
@@ -398,7 +462,90 @@ mod tests {
                 admit_at(&rules, &call, caller, TempoHardfork::T8),
                 CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
             ));
+            assert!(matches!(
+                admit_at(&rules, &call, caller, TempoHardfork::T13),
+                CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+            ));
+            assert!(matches!(
+                admit_at(&rules, &call, caller, TempoHardfork::T14),
+                CallCheck::Continue
+            ));
         }
+    }
+
+    #[test]
+    fn t14_account_admission_checks_sender_and_recipient() {
+        let allowed = Address::repeat_byte(0x11);
+        let denied = Address::repeat_byte(0x22);
+        let rules = TIP20Rules {
+            account_allowed: Rc::new(move |account| Ok(account == allowed)),
+        };
+        let call = ITIP20::transferCall {
+            to: denied,
+            amount: U256::ONE,
+        }
+        .abi_encode();
+
+        assert!(matches!(
+            admit_at(&rules, &call, allowed, TempoHardfork::T14),
+            CallCheck::Revert(data)
+                if data == (tempo_zone_contracts::ZonePortal::AccountNotAllowed { account: denied }).abi_encode()
+        ));
+    }
+
+    #[test]
+    fn t14_executes_all_ordinary_transfer_variants() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new_at(TempoHardfork::T14)?;
+        let calls: Vec<(Address, Bytes)> = vec![
+            (
+                harness.alice,
+                ITIP20::transferCall {
+                    to: harness.bob,
+                    amount: U256::from(10u64),
+                }
+                .abi_encode()
+                .into(),
+            ),
+            (
+                harness.alice,
+                ITIP20::transferWithMemoCall {
+                    to: harness.bob,
+                    amount: U256::from(20u64),
+                    memo: B256::repeat_byte(0x11),
+                }
+                .abi_encode()
+                .into(),
+            ),
+            (
+                harness.spender,
+                ITIP20::transferFromCall {
+                    from: harness.alice,
+                    to: harness.bob,
+                    amount: U256::from(30u64),
+                }
+                .abi_encode()
+                .into(),
+            ),
+            (
+                harness.spender,
+                ITIP20::transferFromWithMemoCall {
+                    from: harness.alice,
+                    to: harness.bob,
+                    amount: U256::from(40u64),
+                    memo: B256::repeat_byte(0x22),
+                }
+                .abi_encode()
+                .into(),
+            ),
+        ];
+
+        for (caller, calldata) in calls {
+            let output = harness.call(caller, calldata, TIP20_FIXED_TRANSFER_GAS, false)?;
+            assert!(output.is_success());
+        }
+        assert_eq!(harness.balance_of(harness.bob)?, U256::from(100u64));
+        assert_eq!(harness.balance_of(harness.alice)?, U256::from(999_900u64));
+        Ok(())
     }
 
     #[test]
@@ -611,7 +758,11 @@ mod tests {
         let spender = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
         let env = test_env(&ctx);
-        let precompile = crate::create_tip20_precompile(token, &env);
+        let precompile = crate::create_tip20_precompile(
+            token,
+            &env,
+            crate::L1State::new(MockL1Reader::default(), PORTAL_ADDRESS),
+        );
         let calldata: Bytes = ITIP20::approveCall {
             spender,
             amount: U256::from(1u64),
@@ -716,9 +867,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: re-enable once zones allow user transfers"]
     fn transfer_from_insufficient_balance_does_not_reveal_the_source_balance() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new()?;
+        let mut harness = PrecompileHarness::new_at(TempoHardfork::T14)?;
         // Craft a successful allowance return whose first four bytes collide with the upstream
         // error selector, exercising the redaction filter's revert-status guard.
         let mut allowance_bytes = [0u8; 32];

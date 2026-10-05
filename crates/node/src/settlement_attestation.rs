@@ -2,16 +2,18 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use alloy_consensus::TxReceipt as _;
-use alloy_eips::BlockHashOrNumber;
+use alloy_consensus::{BlockHeader as _, TxReceipt as _};
+use alloy_eips::{BlockHashOrNumber, BlockNumberOrTag};
 use alloy_primitives::{B256, Sealable as _, U256};
 use alloy_provider::{DynProvider, Provider as _};
+use alloy_rpc_types_eth::BlockId;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolEvent as _, SolValue as _};
 use eyre::{OptionExt as _, WrapErr as _};
 use reth_provider::HeaderProvider;
-use reth_storage_api::ReceiptProvider;
+use reth_storage_api::{ReceiptProvider, StateProvider as _, StateProviderFactory};
 use tempo_alloy::TempoNetwork;
+use tempo_chainspec::TempoHardforks as _;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
     IZoneOutbox, LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
@@ -19,12 +21,73 @@ use tempo_zone_contracts::{
 };
 use tracing::info;
 use zone_chainspec::ZoneChainSpec;
+use zone_l1::TempoStateExt as _;
 use zone_prover::VerifierMode;
 
 use zone_sequencer::{
     BatchAnchorConfig, SettlementAbi,
-    attestation::{AttestationDomain, SettlementAttestation},
+    attestation::{AttestationDomain, SettlementAttestation, SignedSettlementAttestation},
 };
+
+pub(crate) enum ProposedVerifierConfig {
+    Hash(B256),
+}
+
+impl From<B256> for ProposedVerifierConfig {
+    fn from(value: B256) -> Self {
+        Self::Hash(value)
+    }
+}
+
+impl From<VerifierMode> for ProposedVerifierConfig {
+    fn from(value: VerifierMode) -> Self {
+        Self::Hash(value.config_hash())
+    }
+}
+
+/// Validate a fast settlement proposal against this replica's canonical state and durable Raft
+/// head, then return a signature only to the authenticated proposing peer.
+pub(crate) async fn sign_fast_settlement_proposal<P>(
+    provider: &P,
+    context: &AttestationContext,
+    leader: zone_p2p::P2pPeerId,
+    proposal: Vec<u8>,
+    commands: &tokio::sync::mpsc::Sender<zone_p2p::P2pCommand>,
+) -> eyre::Result<()>
+where
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider + StateProviderFactory,
+{
+    let proposal = SettlementAttestation::decode(&proposal)?;
+    let height: u64 = proposal
+        .zoneHeight
+        .try_into()
+        .wrap_err("settlement height does not fit in u64")?;
+    let expected = build_settlement_attestation(
+        provider,
+        height,
+        context,
+        (proposal.anchorBlockNumber, proposal.anchorBlockHash),
+        proposal.verifierConfigHash,
+    )
+    .await?
+    .ok_or_eyre("proposed block is not a batch boundary")?;
+    eyre::ensure!(
+        proposal == expected,
+        "settlement proposal does not match canonical replica state"
+    );
+    let signer = context
+        .signer
+        .as_ref()
+        .ok_or_eyre("fast replica has no settlement signing key")?;
+    let signed = SignedSettlementAttestation::sign(proposal, context.domain, signer)?;
+    commands
+        .send(zone_p2p::P2pCommand::SendSettlementSignature {
+            leader,
+            signature: signed.encode(),
+        })
+        .await
+        .wrap_err("P2P command channel closed")
+}
 
 /// Shared signing and L1-validation context for settlement attestations.
 #[derive(Clone)]
@@ -38,7 +101,13 @@ pub(crate) struct AttestationContext {
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
     pub(crate) chain_spec: Arc<ZoneChainSpec>,
     pub(crate) anchor_config: BatchAnchorConfig,
+    /// Runtime-owned guard over the durable Raft-applied prefix. Fast settlement refuses to sign
+    /// until the runtime installs this guard; a Reth persisted head is not a commitment oracle.
+    committed_guard: Option<SettlementCommittedGuard>,
 }
+
+/// Runtime hook that proves a proposed batch endpoint is the exact canonical Raft committed head.
+pub(crate) type SettlementCommittedGuard = Arc<dyn Fn(u64, B256) -> eyre::Result<()> + Send + Sync>;
 
 impl AttestationContext {
     pub(crate) fn new(
@@ -58,7 +127,14 @@ impl AttestationContext {
             l1_provider,
             chain_spec,
             anchor_config,
+            committed_guard: None,
         }
+    }
+
+    /// Install the runtime-owned durable committed-prefix guard used by T14 settlement signing.
+    pub(crate) fn with_committed_guard(mut self, guard: SettlementCommittedGuard) -> Self {
+        self.committed_guard = Some(guard);
+        self
     }
 }
 
@@ -162,7 +238,7 @@ struct BlockCommitments {
 /// Extract commitments produced by the deterministic system transactions in a zone block.
 fn block_commitments<P>(provider: &P, number: u64) -> eyre::Result<Option<BlockCommitments>>
 where
-    P: ReceiptProvider,
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider + StateProviderFactory,
 {
     let receipts = provider
         .receipts_by_block(BlockHashOrNumber::Number(number))?
@@ -217,18 +293,64 @@ where
     let Some(withdrawal) = withdrawal else {
         return Ok(None);
     };
+    if let (
+        Some(tempo_block_hash),
+        Some(tempo_block_number),
+        Some(processed_deposit_hash),
+        Some(processed_deposit_number),
+        Some(processed_token_count),
+    ) = (
+        anchor_hash,
+        tempo_block_number,
+        processed_deposit_hash,
+        processed_deposit_number,
+        processed_token_count,
+    ) {
+        return Ok(Some(BlockCommitments {
+            tempo_block_hash,
+            tempo_block_number,
+            processed_deposit_hash,
+            processed_deposit_number,
+            processed_token_count,
+            withdrawal: Some(withdrawal),
+        }));
+    }
 
+    // A same-anchor boundary may contain BatchFinalized without TempoAdvanced. In that case the
+    // exact canonical boundary state is the only authority for the retained import/cursors.
+    let block_hash = provider
+        .sealed_header(number)?
+        .map(|header| header.hash())
+        .ok_or_eyre(format!("missing canonical batch-boundary header {number}"))?;
+    let state = provider.state_by_block_hash(block_hash)?;
+    let imported_tempo = state.tempo_num_hash()?;
+    let state_processed_deposit_hash = state
+        .storage(
+            ZONE_INBOX_ADDRESS,
+            zone_precompiles::inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH.into(),
+        )?
+        .map(B256::from)
+        .unwrap_or_default();
+    let state_processed_deposit_number = state
+        .storage(
+            ZONE_INBOX_ADDRESS,
+            zone_precompiles::inbox::slots::PROCESSED_DEPOSIT_NUMBER.into(),
+        )?
+        .unwrap_or_default()
+        .to::<u64>();
+    let state_processed_token_count = state
+        .storage(
+            ZONE_INBOX_ADDRESS,
+            zone_precompiles::inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT.into(),
+        )?
+        .unwrap_or_default()
+        .to::<u64>();
     Ok(Some(BlockCommitments {
-        tempo_block_hash: anchor_hash
-            .ok_or_eyre(format!("block {number} is missing TempoAdvanced"))?,
-        tempo_block_number: tempo_block_number
-            .ok_or_eyre(format!("block {number} is missing its Tempo block number"))?,
-        processed_deposit_hash: processed_deposit_hash
-            .ok_or_eyre(format!("block {number} is missing its deposit commitment"))?,
-        processed_deposit_number: processed_deposit_number
-            .ok_or_eyre(format!("block {number} is missing its deposit number"))?,
-        processed_token_count: processed_token_count
-            .ok_or_eyre(format!("block {number} is missing its token cursor"))?,
+        tempo_block_hash: imported_tempo.hash,
+        tempo_block_number: imported_tempo.number,
+        processed_deposit_hash: state_processed_deposit_hash,
+        processed_deposit_number: state_processed_deposit_number,
+        processed_token_count: state_processed_token_count,
         withdrawal: Some(withdrawal),
     }))
 }
@@ -236,9 +358,9 @@ where
 /// Get the previous batch's (i.e the last block in the previous batch) block_hash,
 /// deposit_hash, processed_deposit_number, processed_token_count, and withdrawal batch index.
 /// These values identify the transition independently of L1 submission progress.
-fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(B256, B256, u64, u64, u64)>
+fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(u64, B256, B256, u64, u64, u64)>
 where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider + StateProviderFactory,
 {
     for candidate in (1..number).rev() {
         if let Some(commitments) = block_commitments(provider, candidate)? {
@@ -247,6 +369,7 @@ where
                 .map(|header| header.hash())
                 .ok_or_eyre(format!("missing prior batch-boundary header {candidate}"))?;
             return Ok((
+                candidate,
                 hash,
                 commitments.processed_deposit_hash,
                 commitments.processed_deposit_number,
@@ -260,22 +383,25 @@ where
     }
     // A fresh ZonePortal has not accepted any zone tip yet, so its blockHash is zero. The first
     // batch must extend that on-chain value rather than the local zone genesis hash.
-    Ok((B256::ZERO, B256::ZERO, 0, 0, 0))
+    Ok((0, B256::ZERO, B256::ZERO, 0, 0, 0))
 }
 
 /// Certify a zone batch transition independently of whether its predecessor has landed on L1.
 /// Live signer/verifier configuration and L1 anchors still apply; portal position is enforced
 /// when submitting the batch, not when collecting signatures for it.
-pub(crate) async fn build_settlement_attestation<P>(
+pub(crate) async fn build_settlement_attestation<P, V>(
     provider: &P,
     number: u64,
     context: &AttestationContext,
     anchor: (u64, B256),
-    verifier_mode: VerifierMode,
+    proposed_verifier_config: V,
 ) -> eyre::Result<Option<SettlementAttestation>>
 where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider + StateProviderFactory,
+    V: Into<ProposedVerifierConfig>,
 {
+    let ProposedVerifierConfig::Hash(proposed_verifier_config_hash) =
+        proposed_verifier_config.into();
     let Some(commitments) = block_commitments(provider, number)? else {
         return Ok(None);
     };
@@ -286,7 +412,45 @@ where
         .sealed_header(number)?
         .ok_or_eyre(format!("missing batch-tip header {number}"))?
         .hash();
+    let boundary_state = provider.state_by_block_hash(next_tip)?;
+    let imported_tempo = boundary_state
+        .tempo_num_hash()
+        .map_err(|error| eyre::eyre!(error))?;
+    let state_processed_deposit_hash = boundary_state
+        .storage(
+            ZONE_INBOX_ADDRESS,
+            zone_precompiles::inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH.into(),
+        )?
+        .map(B256::from)
+        .unwrap_or_default();
+    let state_processed_deposit_number = boundary_state
+        .storage(
+            ZONE_INBOX_ADDRESS,
+            zone_precompiles::inbox::slots::PROCESSED_DEPOSIT_NUMBER.into(),
+        )?
+        .unwrap_or_default()
+        .to::<u64>();
+    let state_processed_token_count = boundary_state
+        .storage(
+            ZONE_INBOX_ADDRESS,
+            zone_precompiles::inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT.into(),
+        )?
+        .unwrap_or_default()
+        .to::<u64>();
+    eyre::ensure!(
+        imported_tempo.number == commitments.tempo_block_number
+            && imported_tempo.hash == commitments.tempo_block_hash
+            && state_processed_deposit_hash == commitments.processed_deposit_hash
+            && state_processed_deposit_number == commitments.processed_deposit_number
+            && state_processed_token_count == commitments.processed_token_count,
+        "boundary event commitments do not match canonical Zone state at batch block {number}: event NumHash=({}, {}), state NumHash=({}, {})",
+        commitments.tempo_block_number,
+        commitments.tempo_block_hash,
+        imported_tempo.number,
+        imported_tempo.hash
+    );
     let (
+        previous_height,
         previous_tip,
         previous_deposit_hash,
         previous_deposit_number,
@@ -300,17 +464,172 @@ where
         withdrawal_batch_index == expected_batch_index,
         "zone withdrawal batch index {withdrawal_batch_index} does not follow previous zone batch index {previous_batch_index}"
     );
-    let settlement_abi = SettlementAbi::from_l1(&context.l1_provider, &context.chain_spec).await?;
-
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
-    let (set_version, verifier) = context
+    let finalized = context
         .l1_provider
-        .multicall()
-        .add(portal.sequencerSetVersion())
-        .add(portal.verifier())
-        .aggregate()
+        .get_header_by_number(BlockNumberOrTag::Finalized)
+        .await?
+        .ok_or_eyre("finalized L1 header is unavailable")?;
+    eyre::ensure!(
+        finalized.number() >= commitments.tempo_block_number,
+        "zone batch imported L1 block {}, but finalized head is {}",
+        commitments.tempo_block_number,
+        finalized.number()
+    );
+    let imported = context
+        .l1_provider
+        .get_header_by_number(commitments.tempo_block_number.into())
+        .await?
+        .ok_or_eyre(format!(
+            "imported L1 header {} is unavailable",
+            commitments.tempo_block_number
+        ))?;
+    eyre::ensure!(
+        imported.hash_slow() == commitments.tempo_block_hash,
+        "zone batch's imported L1 hash is not canonical"
+    );
+    let block = BlockId::hash_canonical(commitments.tempo_block_hash);
+    let live_header = context
+        .l1_provider
+        .get_header_by_number(BlockNumberOrTag::Latest)
+        .await?
+        .ok_or_eyre("latest L1 header is unavailable")?;
+    let live_block = BlockId::hash_canonical(live_header.hash_slow());
+    let settlement_abi =
+        SettlementAbi::from_hardfork(context.chain_spec.tempo_hardfork_at(imported.timestamp()));
+    let verifier = portal.verifier().block(block).call().await?;
+    let fast_epoch = portal.fastEpoch().block(block).call().await?;
+    let fast_active = portal.fastEpochActive().block(block).call().await?;
+    eyre::ensure!(
+        portal.fastEpoch().block(live_block).call().await? == fast_epoch
+            && portal.fastEpochActive().block(live_block).call().await? == fast_active,
+        "live fast authority does not match the batch's imported Tempo configuration"
+    );
+    let (
+        set_version,
+        fast_epoch,
+        roster_hash,
+        previous_zone_height,
+        previous_block_hash,
+        previous_withdrawal_batch_index,
+    ) = if fast_active {
+        eyre::ensure!(fast_epoch != 0, "active fast authority has epoch zero");
+        let config = zone_sequencer::attestation::read_historical_fast_epoch_config(
+            &context.l1_provider,
+            context.domain.portal_address,
+            fast_epoch,
+            block,
+        )
         .await?;
-    validate_sequencer_set_version(context.pinned_sequencer_set_version, set_version)?;
+        let live_config = zone_sequencer::attestation::read_historical_fast_epoch_config(
+            &context.l1_provider,
+            context.domain.portal_address,
+            fast_epoch,
+            live_block,
+        )
+        .await?;
+        eyre::ensure!(
+            live_config.finalSettlementHash.is_zero(),
+            "fast epoch recorded its final settlement; further settlement signing is fenced"
+        );
+        let proof_policy =
+            zone_sequencer::attestation::FastSettlementProofPolicy::from_config(&config)?;
+        let verifier_mode = proof_policy.mode.verifier_mode();
+        proof_policy.validate_mode(verifier_mode)?;
+        eyre::ensure!(
+            proposed_verifier_config_hash == proof_policy.expected_verifier_config_hash,
+            "settlement proposal verifier config hash does not match historical epoch enrollment"
+        );
+        let verifier_code = context
+            .l1_provider
+            .get_code_at(verifier)
+            .block_id(block)
+            .await?;
+        let live_verifier_code = context
+            .l1_provider
+            .get_code_at(verifier)
+            .block_id(live_block)
+            .await?;
+        eyre::ensure!(
+            alloy_primitives::keccak256(&verifier_code) == proof_policy.expected_verifier_code_hash
+                && alloy_primitives::keccak256(&live_verifier_code)
+                    == proof_policy.expected_verifier_code_hash,
+            "historical or live settlement verifier code does not match epoch enrollment"
+        );
+        eyre::ensure!(
+            portal.verifier().block(live_block).call().await? == verifier,
+            "live verifier changed from the batch's imported fast enrollment"
+        );
+        eyre::ensure!(
+            config.threshold == 2,
+            "fast epoch threshold is {}, expected exactly 2",
+            config.threshold
+        );
+        eyre::ensure!(
+            config.finalSettlementHash.is_zero(),
+            "fast epoch recorded its final settlement; further settlement is fenced"
+        );
+        let count = portal
+            .fastEpochMemberCount(fast_epoch)
+            .block(block)
+            .call()
+            .await?;
+        eyre::ensure!(
+            count == U256::from(3),
+            "fast epoch must contain exactly 3 members"
+        );
+        let mut members = Vec::with_capacity(3);
+        for index in 0..3 {
+            let member = portal
+                .fastEpochMemberAt(fast_epoch, U256::from(index))
+                .block(block)
+                .call()
+                .await?;
+            eyre::ensure!(
+                !member.is_zero() && !members.contains(&member),
+                "fast epoch roster contains a zero or duplicate member"
+            );
+            members.push(member);
+        }
+        if let Some(signer) = &context.signer {
+            eyre::ensure!(
+                members.contains(&signer.address()),
+                "local settlement signer is not a member of the imported fast roster"
+            );
+        }
+        let guard = context
+            .committed_guard
+            .as_ref()
+            .ok_or_eyre("T14 settlement signer has no runtime committed-prefix guard")?;
+        guard(number, next_tip)?;
+
+        let accepted_height = portal.zoneHeight().block(live_block).call().await?;
+        let accepted_hash = portal.blockHash().block(live_block).call().await?;
+        let accepted_withdrawal_index = portal
+            .withdrawalBatchIndex()
+            .block(live_block)
+            .call()
+            .await?;
+        eyre::ensure!(
+            accepted_height == U256::from(previous_height)
+                && accepted_hash == previous_tip
+                && accepted_withdrawal_index == previous_batch_index,
+            "fast settlement does not extend the exact Portal prefix at the imported L1 anchor"
+        );
+        (
+            0,
+            fast_epoch,
+            config.rosterHash,
+            accepted_height,
+            accepted_hash,
+            accepted_withdrawal_index,
+        )
+    } else {
+        VerifierMode::try_from(proposed_verifier_config_hash)?;
+        let set_version = portal.sequencerSetVersion().block(block).call().await?;
+        validate_sequencer_set_version(context.pinned_sequencer_set_version, set_version)?;
+        (set_version, 0, B256::ZERO, U256::ZERO, B256::ZERO, 0)
+    };
 
     let (anchor_block_number, anchor_block_hash) = anchor;
     validate_settlement_anchor(
@@ -325,6 +644,11 @@ where
     Ok(Some(SettlementAttestation {
         zoneId: context.domain.zone_id,
         sequencerSetVersion: set_version,
+        fastEpoch: fast_epoch,
+        rosterHash: roster_hash,
+        previousZoneHeight: previous_zone_height,
+        previousBlockHash: previous_block_hash,
+        previousWithdrawalBatchIndex: previous_withdrawal_batch_index,
         zoneHeight: U256::from(number),
         withdrawalBatchIndex: U256::from(withdrawal_batch_index),
         verifier,
@@ -344,7 +668,7 @@ where
         tokenEnablementTransitionHash: settlement_abi
             .token_transition_hash(previous_token_count, commitments.processed_token_count),
         withdrawalQueueHash: withdrawal_queue_hash,
-        verifierConfigHash: verifier_mode.config_hash(),
+        verifierConfigHash: proposed_verifier_config_hash,
     }))
 }
 
@@ -433,10 +757,50 @@ mod tests {
     use alloy_primitives::{Bytes, Log};
     use alloy_provider::{ProviderBuilder, mock::Asserter};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-    use reth_provider::test_utils::MockEthProvider;
+    use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use tempo_alloy::TempoNetwork;
     use tempo_primitives::{TempoPrimitives, TempoReceipt, TempoTxType};
     use zone_p2p::ZoneManifest;
+
+    fn set_boundary_state(
+        provider: &MockEthProvider<TempoPrimitives>,
+        tempo_hash: B256,
+        tempo_number: u64,
+        deposit_hash: B256,
+        deposit_number: u64,
+        token_count: u64,
+    ) {
+        provider.add_account(
+            tempo_zone_contracts::TEMPO_STATE_ADDRESS,
+            ExtendedAccount::new(0, U256::ZERO).extend_storage([
+                (
+                    zone_precompiles::tempo_state::slots::TEMPO_BLOCK_NUMBER.into(),
+                    U256::from(tempo_number),
+                ),
+                (
+                    zone_precompiles::tempo_state::slots::TEMPO_BLOCK_HASH.into(),
+                    tempo_hash.into(),
+                ),
+            ]),
+        );
+        provider.add_account(
+            ZONE_INBOX_ADDRESS,
+            ExtendedAccount::new(0, U256::ZERO).extend_storage([
+                (
+                    zone_precompiles::inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH.into(),
+                    deposit_hash.into(),
+                ),
+                (
+                    zone_precompiles::inbox::slots::PROCESSED_DEPOSIT_NUMBER.into(),
+                    U256::from(deposit_number),
+                ),
+                (
+                    zone_precompiles::inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT.into(),
+                    U256::from(token_count),
+                ),
+            ]),
+        );
+    }
 
     #[test]
     fn settlement_anchor_accepts_current_tip_and_rejects_future() {
@@ -454,6 +818,45 @@ mod tests {
         let provider = MockEthProvider::<TempoPrimitives>::new();
         provider.add_receipts(1, Vec::new());
         assert!(block_commitments(&provider, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn same_anchor_batch_boundary_uses_exact_canonical_zone_state() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let mut header = TempoHeader::default();
+        header.inner.number = 1;
+        provider.add_header(header.hash_slow(), header);
+        provider.add_receipts(
+            1,
+            vec![TempoReceipt {
+                tx_type: TempoTxType::Legacy,
+                success: true,
+                cumulative_gas_used: 0,
+                logs: vec![Log {
+                    address: ZONE_OUTBOX_ADDRESS,
+                    data: IZoneOutbox::BatchFinalized {
+                        withdrawalQueueHash: B256::repeat_byte(0x31),
+                        withdrawalBatchIndex: 1,
+                    }
+                    .encode_log_data(),
+                }],
+            }],
+        );
+        set_boundary_state(
+            &provider,
+            B256::repeat_byte(0x21),
+            101,
+            B256::repeat_byte(0x11),
+            7,
+            3,
+        );
+
+        let commitments = block_commitments(&provider, 1).unwrap().unwrap();
+        assert_eq!(commitments.tempo_block_number, 101);
+        assert_eq!(commitments.tempo_block_hash, B256::repeat_byte(0x21));
+        assert_eq!(commitments.processed_deposit_hash, B256::repeat_byte(0x11));
+        assert_eq!(commitments.processed_deposit_number, 7);
+        assert_eq!(commitments.processed_token_count, 3);
     }
 
     #[test]
@@ -577,9 +980,12 @@ mod tests {
         let commitments = block_commitments(&provider, 4).unwrap().unwrap();
         assert_eq!(commitments.processed_token_count, 15);
         let previous = previous_batch(&provider, 4).unwrap();
-        assert_eq!(previous, (first_boundary_hash, first_deposit_hash, 7, 0, 1));
         assert_eq!(
-            SettlementAbi::T13.token_transition_hash(previous.3, commitments.processed_token_count),
+            previous,
+            (1, first_boundary_hash, first_deposit_hash, 7, 0, 1)
+        );
+        assert_eq!(
+            SettlementAbi::T13.token_transition_hash(previous.4, commitments.processed_token_count),
             alloy_primitives::keccak256((0_u64, 15_u64).abi_encode())
         );
     }
@@ -658,16 +1064,29 @@ mod tests {
         let mut previous_tip = B256::ZERO;
         let mut previous_deposit = B256::ZERO;
         for number in 1_u64..=2 {
+            set_boundary_state(
+                &provider,
+                l1_header.hash_slow(),
+                104,
+                B256::repeat_byte(number as u8),
+                number * 10,
+                number * 3,
+            );
             let header = tempo_alloy::rpc::TempoHeaderResponse {
                 inner: alloy_rpc_types_eth::Header::new(l1_header.clone()),
                 timestamp_millis: 0,
             };
+            // Finalized and hash-canonical imported-anchor reads.
             l1.push_success(&header);
-            // The only portal values supplied are signing configuration. Neither the submitted
-            // zone tip nor the submitted batch index is read, even for the second boundary.
-            let metadata: Vec<Bytes> =
-                vec![1_u64.abi_encode().into(), verifier.abi_encode().into()];
-            l1.push_success(&Bytes::from((U256::ZERO, metadata).abi_encode_params()));
+            l1.push_success(&header);
+            l1.push_success(&header);
+            l1.push_success(&Bytes::from(verifier.abi_encode()));
+            l1.push_success(&Bytes::from(0_u64.abi_encode()));
+            l1.push_success(&Bytes::from(false.abi_encode()));
+            l1.push_success(&Bytes::from(0_u64.abi_encode()));
+            l1.push_success(&Bytes::from(false.abi_encode()));
+            l1.push_success(&Bytes::from(1_u64.abi_encode()));
+            // Canonical settlement-anchor validation.
             l1.push_success(&104_u64);
             l1.push_success(&header);
             l1.push_success(&header);
@@ -727,6 +1146,14 @@ mod tests {
             ),
         ] {
             let (provider, context, _, l1_header) = attestation_fixture(indices);
+            set_boundary_state(
+                &provider,
+                l1_header.hash_slow(),
+                104,
+                B256::repeat_byte(number as u8),
+                number * 10,
+                number * 3,
+            );
             let error = build_settlement_attestation(
                 &provider,
                 number,
