@@ -234,3 +234,39 @@ fn log_zone_action(action: &L2BridgeAction, context: &ActivityContext) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use metrics_util::layers::{Layer, PrefixLayer};
+
+    /// Metric names referenced by production alerts. Renaming any of these silently breaks
+    /// alerting, so the exported Prometheus names are pinned here.
+    ///
+    /// Zone nodes export metrics through reth's recorder, which prefixes every name with `reth`.
+    #[test]
+    fn alerted_metric_names() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&PrefixLayer::new("reth").layer(recorder), || {
+            CheckerMetrics::default();
+        });
+        let rendered = handle.render();
+
+        for name in [
+            "reth_tempo_zone_checker_disabled",
+            "reth_tempo_zone_checker_divergence_active",
+            "reth_tempo_zone_checker_observed_zone_height",
+            "reth_tempo_zone_checker_verification_lag_blocks",
+            "reth_tempo_zone_checker_verified_zone_height",
+        ] {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line.split([' ', '{']).next() == Some(name)),
+                "missing `{name}` in:\n{rendered}"
+            );
+        }
+    }
+}
