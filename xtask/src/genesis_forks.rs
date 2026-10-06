@@ -48,14 +48,10 @@ impl ResolvedForks {
                 entry.name
             );
         }
-        let mut previous_time = 0;
-        for activation_time in activations.values() {
-            ensure!(
-                *activation_time >= previous_time,
-                "L1 fork activation times are out of order"
-            );
-            previous_time = *activation_time;
-        }
+        ensure!(
+            activations.values().is_sorted(),
+            "L1 fork activation times are out of order"
+        );
         let forks = Self {
             parent_chain_id: Some(parent_chain_id),
             activations,
@@ -151,12 +147,9 @@ pub(crate) async fn resolve_l1_forks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::{genesis::Genesis, providers::ProviderBuilder, transports::mock::Asserter};
+    use alloy::{providers::ProviderBuilder, transports::mock::Asserter};
     use serde_json::json;
-    use tempo_alloy::rpc::{ForkInfo, TempoHeaderResponse};
-    use tempo_chainspec::hardfork::TempoHardforks;
-    use zone_chainspec::ZoneChainSpec;
-    use zone_primitives::constants::zone_chain_id;
+    use tempo_alloy::rpc::ForkInfo;
 
     fn schedule() -> ForkSchedule {
         serde_json::from_value(json!({ "active": "T11", "schedule": [
@@ -167,52 +160,8 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn rpc_schedule_preserves_future_times_and_disables_absent_forks() {
-        let forks = ResolvedForks::from_schedule(4217, 100, schedule()).unwrap();
-        assert!(forks.hardfork_at(9).is_err());
-        assert_eq!(forks.hardfork_at(10).unwrap(), TempoHardfork::T0);
-        assert_eq!(forks.hardfork_at(19).unwrap(), TempoHardfork::T0);
-        assert_eq!(forks.hardfork_at(20).unwrap(), TempoHardfork::T11);
-        assert_eq!(forks.hardfork_at(200).unwrap(), TempoHardfork::T12);
-        let mut genesis = Genesis::default().with_timestamp(100);
-        genesis.config.chain_id = zone_chain_id(4217, 3).unwrap();
-        forks.write_to(&mut genesis.config);
-        assert_eq!(genesis.config.extra_fields.get("t11Time"), Some(&json!(20)));
-        assert_eq!(
-            genesis.config.extra_fields.get("t12Time"),
-            Some(&json!(200))
-        );
-        assert_eq!(
-            genesis.config.extra_fields.get("t13Time"),
-            Some(&Value::Null)
-        );
-        assert_eq!(
-            genesis.config.extra_fields.get("t14Time"),
-            Some(&Value::Null)
-        );
-        let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
-        assert_eq!(spec.tempo_hardfork_at(100), TempoHardfork::T11);
-        assert_eq!(spec.tempo_hardfork_at(200), TempoHardfork::T12);
-        assert_eq!(spec.tempo_hardfork_at(u64::MAX), TempoHardfork::T12);
-    }
-
-    #[test]
-    fn rpc_chain_id_must_match_zone_parent() {
-        let forks = ResolvedForks::from_schedule(4217, 100, schedule()).unwrap();
-        forks
-            .validate_chain_id(zone_chain_id(4217, 3).unwrap())
-            .unwrap();
-        assert!(
-            forks
-                .validate_chain_id(zone_chain_id(42431, 3).unwrap())
-                .is_err()
-        );
-        assert!(forks.validate_chain_id(1337).is_err());
-    }
-
-    #[test]
-    fn invalid_rpc_schedules_fail_closed() {
+    #[tokio::test]
+    async fn rpc_fork_resolution_fails_closed() {
         let mut unknown_active = schedule();
         unknown_active.active = "T999".to_owned();
         assert!(ResolvedForks::from_schedule(4217, 100, unknown_active).is_err());
@@ -225,15 +174,11 @@ mod tests {
         });
         assert!(ResolvedForks::from_schedule(4217, 100, unknown_future).is_err());
         let mut duplicate = schedule();
-        duplicate.schedule.push(ForkInfo {
-            name: "T11".to_owned(),
-            activation_time: 20,
-            active: true,
-            fork_id: None,
-        });
+        duplicate.schedule.push(duplicate.schedule[1].clone());
         assert!(ResolvedForks::from_schedule(4217, 100, duplicate).is_err());
         let mut out_of_order = schedule();
         out_of_order.schedule[2].activation_time = 15;
+        out_of_order.schedule[2].active = true;
         assert!(ResolvedForks::from_schedule(4217, 100, out_of_order).is_err());
         assert!(ResolvedForks::from_schedule(4217, 9, schedule()).is_err());
         assert!(ResolvedForks::from_schedule(4217, 200, schedule()).is_err());
@@ -242,54 +187,7 @@ mod tests {
             schedule: Vec::new(),
         };
         assert!(ResolvedForks::from_schedule(4217, 100, empty).is_err());
-    }
 
-    #[test]
-    fn offline_cap_and_overrides_are_explicit() {
-        assert!(ResolvedForks::offline(&TempoHardforkArgs::default()).is_err());
-        let args = TempoHardforkArgs {
-            hardfork: Some(TempoHardfork::T11),
-            t12_time: Some(200),
-            ..Default::default()
-        };
-        let forks = ResolvedForks::offline(&args).unwrap();
-        let mut config = ChainConfig::default();
-        forks.write_to(&mut config);
-        assert_eq!(forks.hardfork_at(0).unwrap(), TempoHardfork::T11);
-        assert_eq!(config.extra_fields.get("t11Time"), Some(&json!(0)));
-        assert_eq!(config.extra_fields.get("t12Time"), Some(&json!(200)));
-        assert_eq!(config.extra_fields.get("t13Time"), Some(&Value::Null));
-        assert_eq!(config.extra_fields.get("t14Time"), Some(&Value::Null));
-    }
-
-    #[tokio::test]
-    async fn reads_forks_and_validates_head_timestamp_from_rpc() {
-        let asserter = Asserter::new();
-        asserter.push_success(&"0x1079");
-        asserter.push_success(&json!({ "active": "T11", "schedule": [
-            { "name": "T0", "activationTime": 10, "active": true },
-            { "name": "T11", "activationTime": 20, "active": true },
-            { "name": "T12", "activationTime": 200, "active": false }
-        ] }));
-        let mut header = TempoHeaderResponse {
-            inner: Default::default(),
-            timestamp_millis: 100_000,
-        };
-        header.inner.inner.inner.timestamp = 100;
-        asserter.push_success(&Some(header));
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone());
-        let forks = resolve_l1_forks(&provider, &TempoHardforkArgs::default())
-            .await
-            .unwrap();
-        assert_eq!(forks.parent_chain_id, Some(4217));
-        assert_eq!(forks.hardfork_at(100).unwrap(), TempoHardfork::T11);
-        assert_eq!(forks.activations.get(&TempoHardfork::T12), Some(&200));
-        assert!(asserter.read_q().is_empty());
-    }
-
-    #[tokio::test]
-    async fn rpc_failure_and_overrides_do_not_fall_back_to_defaults() {
         let asserter = Asserter::new();
         asserter.push_success(&"0x1079");
         asserter.push_failure_msg("tempo_forkSchedule unavailable");

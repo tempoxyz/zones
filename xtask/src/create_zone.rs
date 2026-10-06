@@ -540,17 +540,15 @@ impl CreateZone {
             anchor.block_number, anchor.hash
         );
 
-        let header_rlp_hex = const_hex::encode(&anchor.rlp);
-
         let genesis_cmd = crate::generate_zone_genesis::GenerateZoneGenesis {
             output: self.output.clone(),
             chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
             tempo_portal: None,
-            l1_rpc_url: Some(self.l1_rpc_url.clone()),
+            l1_rpc_url: None,
             default_fee_token: self.initial_token,
-            tempo_genesis_header_rlp: Some(header_rlp_hex),
+            tempo_genesis_header_rlp: None,
             admin: self.admin,
             sequencer: Some(leader),
             with_createx: true,
@@ -558,7 +556,7 @@ impl CreateZone {
             with_create2_factory: true,
             forks: self.forks,
         };
-        genesis_cmd.run_with_forks(forks).await?;
+        genesis_cmd.generate(forks, anchor.rlp).await?;
 
         // Write zone.json with deployment metadata for downstream tooling (e.g. `just zone-up`).
         let zone_json = serde_json::json!({
