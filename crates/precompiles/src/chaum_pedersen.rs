@@ -105,7 +105,7 @@ pub(crate) fn challenge_hash(
     r1: &AffinePoint,
     r2: &AffinePoint,
 ) -> Scalar {
-    let g_affine = AffinePoint::from(ProjectivePoint::GENERATOR);
+    let g_affine = AffinePoint::GENERATOR;
 
     let mut hasher = Keccak256::new();
     for point in [
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_recover_point_generator() {
-        let g = AffinePoint::from(ProjectivePoint::GENERATOR);
+        let g = AffinePoint::GENERATOR;
         let encoded = g.to_encoded_point(true);
         let x: [u8; 32] = encoded.x().unwrap().as_slice().try_into().unwrap();
         let parity = encoded.as_bytes()[0];
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_recover_point_invalid_parity() {
-        let g = AffinePoint::from(ProjectivePoint::GENERATOR);
+        let g = AffinePoint::GENERATOR;
         let encoded = g.to_encoded_point(true);
         let x: [u8; 32] = encoded.x().unwrap().as_slice().try_into().unwrap();
 
