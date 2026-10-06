@@ -4,13 +4,14 @@
 
 use alloy::{
     network::primitives::ReceiptResponse,
-    primitives::Address,
-    providers::{Provider, ProviderBuilder},
+    primitives::{Address, TxHash},
+    providers::{DynProvider, Provider, ProviderBuilder},
+    sol_types::{SolCall as _, SolEvent as _},
 };
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
-use tempo_alloy::TempoNetwork;
+use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
 use tempo_chainspec::{cli::TempoHardforkArgs, spec::TEMPO_T0_BASE_FEE};
 use tempo_contracts::precompiles::ITIP403Registry;
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
@@ -21,6 +22,7 @@ use zone_primitives::constants::zone_chain_id;
 
 use crate::{
     generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
+    safe::{SafeProposal, verify_safe, write_safe_proposal},
     zone_utils::{MODERATO_ZONE_FACTORY, parse_private_key, write_owner_only},
 };
 
@@ -30,7 +32,8 @@ pub(crate) struct CreateZone {
     #[arg(short, long)]
     output: PathBuf,
 
-    /// Tempo L1 HTTP RPC URL used to fetch headers and send the createZone transaction.
+    /// Tempo L1 HTTP RPC URL used to fetch headers and send or simulate the createZone
+    /// transaction.
     #[arg(long, default_value = "https://rpc.moderato.tempo.xyz")]
     l1_rpc_url: String,
 
@@ -83,10 +86,38 @@ pub(crate) struct CreateZone {
     rpc_url: String,
 
     /// ZoneFactory owner private key (hex) for signing the createZone transaction on L1.
-    /// Prefer the ZONE_FACTORY_OWNER_KEY environment variable so the key is not exposed in the
-    /// process argument list.
-    #[arg(long, env = "ZONE_FACTORY_OWNER_KEY", hide_env_values = true)]
-    private_key: String,
+    /// Required unless --safe-address or --creation-tx is used. Prefer the
+    /// ZONE_FACTORY_OWNER_KEY environment variable so the key is not exposed in the process
+    /// argument list.
+    #[arg(
+        long,
+        env = "ZONE_FACTORY_OWNER_KEY",
+        hide_env_values = true,
+        required_unless_present_any = ["safe_address", "creation_tx"],
+        conflicts_with_all = ["safe_address", "creation_tx"]
+    )]
+    private_key: Option<String>,
+
+    /// Safe contract that owns the ZoneFactory. Simulates createZone from the Safe and writes
+    /// an unsigned Safe Transaction Builder proposal instead of sending a transaction. After the
+    /// Safe executes it, rerun with --creation-tx to write genesis.json and zone.json.
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        requires = "safe_output",
+        conflicts_with = "creation_tx"
+    )]
+    safe_address: Option<Address>,
+
+    /// New Safe Transaction Builder JSON file to create.
+    #[arg(long, value_name = "PATH", requires = "safe_address")]
+    safe_output: Option<PathBuf>,
+
+    /// Hash of an already executed createZone transaction, such as the Safe execution of a
+    /// --safe-address proposal. Verifies its ZoneCreated event against the other arguments and
+    /// writes genesis.json and zone.json without sending a transaction.
+    #[arg(long, value_name = "TX_HASH")]
+    creation_tx: Option<TxHash>,
 
     /// Base fee per gas for the zone L2.
     #[arg(long, default_value_t = TEMPO_T0_BASE_FEE.into())]
@@ -115,7 +146,18 @@ impl CreateZone {
         }
     }
 
-    pub(crate) async fn run(self) -> eyre::Result<()> {
+    fn safe_proposal(&self) -> Option<SafeProposal> {
+        self.safe_address.map(|safe| SafeProposal {
+            safe,
+            output: self
+                .safe_output
+                .clone()
+                .expect("clap requires --safe-output with --safe-address"),
+        })
+    }
+
+    /// Validates the requested sequencer set and returns its initial leader.
+    fn validate_sequencer_set(&self) -> eyre::Result<Address> {
         let leader = *self
             .sequencers
             .first()
@@ -152,19 +194,123 @@ impl CreateZone {
                  threshold of at least 2"
             );
         }
+        Ok(leader)
+    }
 
-        let signer = parse_private_key(&self.private_key)?;
+    fn print_requested_zone(&self) {
+        println!("Initial token: {}", self.initial_token);
+        println!("Access enforcement: {}", self.access_mode);
+        println!("Gateway enforcement: {}", self.gateway_mode);
+        println!("Admin: {}", self.admin);
+        println!("Sequencers: {:?}", self.sequencers);
+        println!("Threshold: {}", self.threshold);
+    }
+
+    /// Simulates createZone from the Safe that owns the ZoneFactory and writes an unsigned
+    /// Transaction Builder proposal for it.
+    async fn propose_to_safe(&self, proposal: &SafeProposal) -> eyre::Result<()> {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(signer)
             .connect(&self.l1_rpc_url)
-            .await?;
-
+            .await
+            .wrap_err("failed connecting to Tempo L1 RPC")?;
         let factory = ZoneFactory::new(self.zone_factory, &provider);
+        let owner = factory
+            .owner()
+            .call()
+            .await
+            .wrap_err("failed reading ZoneFactory owner")?;
+        ensure!(
+            proposal.safe == owner,
+            "Safe {} is not ZoneFactory owner {owner}",
+            proposal.safe
+        );
+        verify_safe(&provider, proposal.safe).await?;
+
+        // createZone requires a TIP-403 binding for the initial token. The migration is
+        // permissionless, so it is not bundled into the Safe proposal, where it would prevent
+        // simulating createZone before signers review it.
+        let policy = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider)
+            .tokenTransferPolicyId(self.initial_token)
+            .call()
+            .await?;
+        ensure!(
+            policy.isSet,
+            "transfer policy is not set for initial token {token}; call the permissionless \
+             TIP-403 registry ({TIP403_REGISTRY_ADDRESS}) migrateTransferPolicyIds([{token}]) \
+             from any funded account, then rerun",
+            token = self.initial_token
+        );
+
+        self.print_requested_zone();
+        let simulated = factory
+            .createZone(self.factory_params())
+            .from(proposal.safe)
+            .call()
+            .await
+            .wrap_err("ZoneFactory.createZone Safe simulation failed")?;
+        println!(
+            "Simulated createZone: zone {} with portal {} (changes if another zone is created first)",
+            simulated.zoneId, simulated.portal
+        );
+
+        let calldata = ZoneFactory::createZoneCall {
+            params: self.factory_params(),
+        }
+        .abi_encode();
+        write_safe_proposal(
+            &provider,
+            proposal,
+            "ZoneFactory.createZone",
+            self.zone_factory,
+            calldata,
+        )
+        .await?;
+        println!();
+        println!(
+            "genesis.json and zone.json are not written yet: they depend on the zone ID, portal, \
+             and L1 anchor block that only exist once the Safe executes the proposal."
+        );
+        println!("After execution, finish with the execution transaction hash:");
+        println!("  {}", finish_command(std::env::args()));
+        Ok(())
+    }
+
+    /// Migrates the initial token's transfer policy if needed and sends createZone with the
+    /// ZoneFactory owner key.
+    async fn send_create_zone(
+        &self,
+        provider: &DynProvider<TempoNetwork>,
+        signer: Address,
+    ) -> eyre::Result<TempoTransactionReceipt> {
+        let factory = ZoneFactory::new(self.zone_factory, provider);
+        let owner = factory
+            .owner()
+            .call()
+            .await
+            .wrap_err("failed reading ZoneFactory owner")?;
+        if owner != signer {
+            let owner_is_contract = !provider
+                .get_code_at(owner)
+                .await
+                .wrap_err("failed reading ZoneFactory owner bytecode")?
+                .is_empty();
+            let hint = if owner_is_contract {
+                format!(
+                    "; the owner is a contract, so if it is a Safe use --safe-address {owner} \
+                     --safe-output <path> instead of ZONE_FACTORY_OWNER_KEY"
+                )
+            } else {
+                String::new()
+            };
+            return Err(eyre!(
+                "ZONE_FACTORY_OWNER_KEY signer {signer} is not ZoneFactory owner {owner}{hint}"
+            ));
+        }
 
         println!("Verifier: {ZONE_VERIFIER_ADDRESS}");
         println!("Messenger: {ZONE_MESSENGER_ADDRESS}");
 
-        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, provider);
         let mut policy = registry
             .tokenTransferPolicyId(self.initial_token)
             .call()
@@ -197,9 +343,7 @@ impl CreateZone {
             ));
         }
 
-        println!("Admin: {}", self.admin);
-        println!("Sequencers: {:?}", self.sequencers);
-        println!("Threshold: {}", self.threshold);
+        self.print_requested_zone();
 
         println!(
             "Creating zone on L1 via ZoneFactory at {}...",
@@ -211,10 +355,123 @@ impl CreateZone {
         // The portal bootstraps the first sequencer as the initial
         // block-production leader (leaderEpoch 1); later transfers go through
         // setLeader. The factory-installed set starts at version 0.
-        let receipt = factory
+        Ok(factory
             .createZone(self.factory_params())
             .send_sync()
-            .await?;
+            .await?)
+    }
+
+    /// Returns the single ZoneCreated event emitted by the configured ZoneFactory, checked
+    /// against the requested parameters so genesis matches the zone that was actually created.
+    fn zone_created_event(
+        &self,
+        receipt: &TempoTransactionReceipt,
+    ) -> eyre::Result<ZoneFactory::ZoneCreated> {
+        let tx_hash = receipt.transaction_hash;
+        let mut events = receipt
+            .logs()
+            .iter()
+            .filter(|log| log.address() == self.zone_factory)
+            .filter_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok());
+        let event = events
+            .next()
+            .ok_or_else(|| {
+                eyre!(
+                    "transaction {tx_hash} emitted no ZoneCreated event from ZoneFactory {}",
+                    self.zone_factory
+                )
+            })?
+            .data;
+        ensure!(
+            events.next().is_none(),
+            "transaction {tx_hash} emitted more than one ZoneCreated event"
+        );
+        self.ensure_requested_zone(&event)
+            .wrap_err_with(|| format!("transaction {tx_hash} did not create the requested zone"))?;
+        Ok(event)
+    }
+
+    fn ensure_requested_zone(&self, event: &ZoneFactory::ZoneCreated) -> eyre::Result<()> {
+        let mut mismatches = Vec::new();
+        if event.initialToken != self.initial_token {
+            mismatches.push(format!(
+                "initial token {} (expected {})",
+                event.initialToken, self.initial_token
+            ));
+        }
+        if event.accessMode != self.access_mode {
+            mismatches.push(format!(
+                "access mode {} (expected {})",
+                event.accessMode, self.access_mode
+            ));
+        }
+        if event.gatewayMode != self.gateway_mode {
+            mismatches.push(format!(
+                "gateway mode {} (expected {})",
+                event.gatewayMode, self.gateway_mode
+            ));
+        }
+        if event.admin != self.admin {
+            mismatches.push(format!("admin {} (expected {})", event.admin, self.admin));
+        }
+        if event.sequencers != self.sequencers {
+            mismatches.push(format!(
+                "sequencers {:?} (expected {:?})",
+                event.sequencers, self.sequencers
+            ));
+        }
+        if event.threshold != self.threshold {
+            mismatches.push(format!(
+                "threshold {} (expected {})",
+                event.threshold, self.threshold
+            ));
+        }
+        ensure!(
+            mismatches.is_empty(),
+            "ZoneCreated reports {}",
+            mismatches.join(", ")
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn run(self) -> eyre::Result<()> {
+        let leader = self.validate_sequencer_set()?;
+
+        if let Some(proposal) = self.safe_proposal() {
+            return self.propose_to_safe(&proposal).await;
+        }
+
+        let (provider, receipt) = if let Some(tx_hash) = self.creation_tx {
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect(&self.l1_rpc_url)
+                .await
+                .wrap_err("failed connecting to Tempo L1 RPC")?
+                .erased();
+            println!("Reading createZone transaction {tx_hash}...");
+            let receipt = provider
+                .get_transaction_receipt(tx_hash)
+                .await
+                .wrap_err_with(|| format!("failed fetching receipt for {tx_hash}"))?
+                .ok_or_else(|| {
+                    eyre!("transaction {tx_hash} has no receipt yet; rerun once it is mined")
+                })?;
+            (provider, receipt)
+        } else {
+            let private_key = self
+                .private_key
+                .as_deref()
+                .ok_or_else(|| eyre!("ZONE_FACTORY_OWNER_KEY is required to send createZone"))?;
+            let signer = parse_private_key(private_key)?;
+            let signer_address = signer.address();
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .wallet(signer)
+                .connect(&self.l1_rpc_url)
+                .await
+                .wrap_err("failed connecting to Tempo L1 RPC")?
+                .erased();
+            let receipt = self.send_create_zone(&provider, signer_address).await?;
+            (provider, receipt)
+        };
         println!("Transaction confirmed in block {:?}", receipt.block_number);
         println!("Status: {}", receipt.status());
         println!("Gas used: {:?}", receipt.gas_used);
@@ -229,9 +486,7 @@ impl CreateZone {
             .block_number
             .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
 
-        let event = receipt
-            .decoded_log::<ZoneFactory::ZoneCreated>()
-            .ok_or_else(|| eyre!("no ZoneCreated event in receipt"))?;
+        let event = self.zone_created_event(&receipt)?;
 
         let zone_id = event.zoneId;
         let portal = event.portal;
@@ -355,20 +610,48 @@ impl CreateZone {
     }
 }
 
+/// Rewrites a `--safe-address` invocation into the `--creation-tx` invocation that finishes it.
+fn finish_command(args: impl IntoIterator<Item = String>) -> String {
+    const SAFE_FLAGS: [&str; 2] = ["--safe-address", "--safe-output"];
+    let mut command = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if SAFE_FLAGS.contains(&arg.as_str()) {
+            args.next();
+            continue;
+        }
+        if SAFE_FLAGS.iter().any(|flag| {
+            arg.strip_prefix(flag)
+                .is_some_and(|rest| rest.starts_with('='))
+        }) {
+            continue;
+        }
+        command.push(shell_quote(&arg));
+    }
+    command.push("--creation-tx <EXECUTION_TX_HASH>".to_owned());
+    command.join(" ")
+}
+
+fn shell_quote(arg: &str) -> String {
+    let is_plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c));
+    if is_plain {
+        arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::primitives::address;
     use clap::Parser;
 
-    #[test]
-    fn factory_params_install_the_requested_quorum_atomically() {
-        let sequencers = vec![
-            address!("0x1000000000000000000000000000000000000001"),
-            address!("0x2000000000000000000000000000000000000002"),
-            address!("0x3000000000000000000000000000000000000003"),
-        ];
-        let command = CreateZone {
+    fn test_command() -> CreateZone {
+        CreateZone {
             output: PathBuf::new(),
             l1_rpc_url: String::new(),
             zone_factory: Address::ZERO,
@@ -377,19 +660,145 @@ mod tests {
             gateway_mode: true,
             zone_gateways: Vec::new(),
             allowed_accounts: Vec::new(),
-            sequencers: sequencers.clone(),
+            sequencers: vec![
+                address!("0x1000000000000000000000000000000000000001"),
+                address!("0x2000000000000000000000000000000000000002"),
+                address!("0x3000000000000000000000000000000000000003"),
+            ],
             threshold: 2,
             admin: address!("0x5000000000000000000000000000000000000005"),
             rpc_url: String::new(),
-            private_key: String::new(),
+            private_key: None,
+            safe_address: None,
+            safe_output: None,
+            creation_tx: None,
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
             forks: TempoHardforkArgs::default(),
-        };
+        }
+    }
+
+    fn created_event(command: &CreateZone) -> ZoneFactory::ZoneCreated {
+        ZoneFactory::ZoneCreated {
+            zoneId: 7,
+            portal: address!("0x6000000000000000000000000000000000000006"),
+            initialToken: command.initial_token,
+            accessMode: command.access_mode,
+            gatewayMode: command.gateway_mode,
+            admin: command.admin,
+            sequencers: command.sequencers.clone(),
+            threshold: command.threshold,
+            verifier: ZONE_VERIFIER_ADDRESS,
+        }
+    }
+
+    const BASE_ARGS: [&str; 6] = [
+        "create-zone",
+        "--output",
+        "/tmp/zone",
+        "--admin",
+        "0x1000000000000000000000000000000000000001",
+        "--sequencer=0x1000000000000000000000000000000000000001",
+    ];
+
+    fn parse(extra: &[&str]) -> Result<CreateZone, clap::Error> {
+        CreateZone::try_parse_from(BASE_ARGS.iter().chain(extra))
+    }
+
+    #[test]
+    fn factory_params_install_the_requested_quorum_atomically() {
+        let command = test_command();
 
         let params = command.factory_params();
-        assert_eq!(params.sequencers, sequencers);
+        assert_eq!(params.sequencers, command.sequencers);
         assert_eq!(params.threshold, 2);
+    }
+
+    #[test]
+    fn signing_modes_are_mutually_exclusive() {
+        let safe = "0x7000000000000000000000000000000000000007";
+        let tx = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+        assert!(parse(&["--private-key", "unused"]).is_ok());
+        let proposal = parse(&["--safe-address", safe, "--safe-output", "/tmp/safe.json"]).unwrap();
+        assert!(proposal.private_key.is_none());
+        assert!(proposal.safe_proposal().is_some());
+        let finish = parse(&["--creation-tx", tx]).unwrap();
+        assert!(finish.private_key.is_none());
+        assert!(finish.safe_proposal().is_none());
+
+        assert!(parse(&[]).is_err(), "a signing mode is required");
+        assert!(
+            parse(&["--safe-address", safe]).is_err(),
+            "Safe mode needs an output"
+        );
+        assert!(parse(&["--safe-output", "/tmp/safe.json"]).is_err());
+        assert!(
+            parse(&[
+                "--private-key",
+                "unused",
+                "--safe-address",
+                safe,
+                "--safe-output",
+                "/tmp/safe.json",
+            ])
+            .is_err()
+        );
+        assert!(parse(&["--private-key", "unused", "--creation-tx", tx]).is_err());
+        assert!(
+            parse(&[
+                "--safe-address",
+                safe,
+                "--safe-output",
+                "/tmp/safe.json",
+                "--creation-tx",
+                tx,
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn finish_command_replaces_safe_flags_with_creation_tx() {
+        let args = [
+            "./target/debug/tempo-xtask",
+            "create-zone",
+            "--safe-address",
+            "0x7000000000000000000000000000000000000007",
+            "--safe-output=proposal.json",
+            "--output",
+            "generated/zone a",
+            "--sequencer",
+            "0x1000000000000000000000000000000000000001",
+        ]
+        .map(String::from);
+
+        assert_eq!(
+            finish_command(args),
+            "./target/debug/tempo-xtask create-zone --output 'generated/zone a' \
+             --sequencer 0x1000000000000000000000000000000000000001 \
+             --creation-tx <EXECUTION_TX_HASH>"
+        );
+    }
+
+    #[test]
+    fn created_zone_must_match_the_requested_parameters() {
+        let command = test_command();
+        command
+            .ensure_requested_zone(&created_event(&command))
+            .unwrap();
+
+        let mut event = created_event(&command);
+        event.admin = Address::repeat_byte(0x99);
+        event.threshold = 3;
+        let error = command.ensure_requested_zone(&event).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("admin"), "{message}");
+        assert!(message.contains("threshold 3 (expected 2)"), "{message}");
+
+        let mut event = created_event(&command);
+        event.sequencers.reverse();
+        assert!(command.ensure_requested_zone(&event).is_err());
     }
 
     #[test]

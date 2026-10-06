@@ -39,6 +39,7 @@ mod generate_zone_genesis;
 mod install_reference_zone_factory;
 mod portal_access;
 mod portal_pause;
+mod safe;
 mod set_encryption_key;
 mod spam_deposits;
 mod verify_closed_loop;

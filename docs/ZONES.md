@@ -205,6 +205,50 @@ ZONE_FACTORY_OWNER_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- create-zone 
 available for admin-only portal calls such as changing either mode or account roles,
 enabling tokens, and pausing or resuming deposits.
 
+#### Safe-owned ZoneFactory
+
+When the ZoneFactory owner is a Safe (as on mainnet), creation takes two runs of the same
+command. First, replace `ZONE_FACTORY_OWNER_KEY` with `--safe-address` and `--safe-output`:
+
+```bash
+unset ZONE_FACTORY_OWNER_KEY
+cargo run -p tempo-xtask -- create-zone \
+  --output generated/my-zone \
+  --l1-rpc-url https://rpc.tempo.xyz \
+  --zone-factory 0x5aF2000000000000000000000000000000000000 \
+  --initial-token 0x20c0000000000000000000000000000000000000 \
+  --admin "$ADMIN_ADDR" \
+  --threshold 2 \
+  --sequencer "$SEQUENCER_1" --sequencer "$SEQUENCER_2" --sequencer "$SEQUENCER_3" \
+  --safe-address 0x<factory-owner-safe> \
+  --safe-output create-zone.json
+```
+
+This run never signs or broadcasts. It requires the Safe to be the current ZoneFactory owner
+and to report a nonzero `getThreshold()`, simulates `createZone` from the Safe, and writes an
+unsigned Transaction Builder file. It refuses to overwrite an existing output file. The initial
+token must already have a TIP-403 transfer policy binding; `migrateTransferPolicyIds` is
+permissionless, so any funded account can migrate a legacy token first.
+
+Import the file in Safe's Transaction Builder, check the calldata printed by the command
+against what signers see, collect approvals, and execute. `genesis.json` and `zone.json` are
+not written yet, because the zone ID, portal, and genesis anchor block only exist once the
+transaction executes. After execution, rerun the same command with the execution transaction
+hash in place of the Safe options (the first run prints this command):
+
+```bash
+cargo run -p tempo-xtask -- create-zone \
+  --output generated/my-zone \
+  ...same zone arguments... \
+  --creation-tx 0x<execution-tx-hash>
+```
+
+`--creation-tx` works for any already-mined `createZone` transaction, including a direct-key
+run that was interrupted before genesis was written. It requires exactly one `ZoneCreated`
+event from `--zone-factory` and fails unless its initial token, modes, admin, sequencers, and
+threshold match the arguments. Allowed accounts, gateways, and the RPC URL are not in that
+event, so pass the same values as the proposal for an accurate `zone.json`.
+
 ### Updating closed-loop access
 
 Configure memberships before enabling their corresponding enforcement mode so existing
