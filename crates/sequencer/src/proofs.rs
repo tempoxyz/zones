@@ -546,7 +546,8 @@ fn sync_directory(directory: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Bytes, b256};
+
+    use alloy_primitives::Bytes;
 
     use super::*;
 
@@ -636,7 +637,7 @@ mod tests {
     #[test]
     fn persists_loads_and_prunes_json_proofs() {
         let directory = tempfile::tempdir().unwrap();
-        let hash = b256!("0101010101010101010101010101010101010101010101010101010101010101");
+        let hash = B256::repeat_byte(1);
         let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
         store.insert(proof(1, hash)).unwrap();
         assert_eq!(store.snapshot(1, 1).unwrap()[0].witness.block_hash, hash);

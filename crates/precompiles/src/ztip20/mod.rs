@@ -230,12 +230,12 @@ mod tests {
 
         fn new_at(spec: TempoHardfork) -> eyre::Result<Self> {
             let token = PATH_USD_ADDRESS;
-            let admin = address!("0x00000000000000000000000000000000000000a1");
-            let alice = address!("0x00000000000000000000000000000000000000a2");
-            let bob = address!("0x00000000000000000000000000000000000000a3");
-            let spender = address!("0x00000000000000000000000000000000000000a4");
-            let issuer = address!("0x00000000000000000000000000000000000000a5");
-            let sequencer = address!("0x00000000000000000000000000000000000000a6");
+            let admin = Address::with_last_byte(0xa1);
+            let alice = Address::with_last_byte(0xa2);
+            let bob = Address::with_last_byte(0xa3);
+            let spender = Address::with_last_byte(0xa4);
+            let issuer = Address::with_last_byte(0xa5);
+            let sequencer = Address::with_last_byte(0xa6);
             let l1_reader = MockL1Reader::default();
             l1_reader.seed_active_sequencer(PORTAL_ADDRESS, TEMPO_BLOCK_NUMBER, sequencer);
             let mut ctx = test_context();
@@ -364,7 +364,7 @@ mod tests {
         let rules = rules();
         let caller = Address::repeat_byte(0x11);
         let recipient = Address::repeat_byte(0x22);
-        let amount = U256::from(1);
+        let amount = U256::ONE;
         let memo = B256::repeat_byte(0x33);
         let calls = [
             ITIP20::transferCall {
@@ -607,14 +607,14 @@ mod tests {
     #[test]
     fn uninitialized_token_rejects_before_policy_read() -> eyre::Result<()> {
         let token = address!("20C0000000000000000000000000000000000999");
-        let caller = address!("0x00000000000000000000000000000000000000a2");
-        let spender = address!("0x00000000000000000000000000000000000000a3");
+        let caller = Address::with_last_byte(0xa2);
+        let spender = Address::with_last_byte(0xa3);
         let mut ctx = test_context();
         let env = test_env(&ctx);
         let precompile = crate::create_tip20_precompile(token, &env);
         let calldata: Bytes = ITIP20::approveCall {
             spender,
-            amount: U256::from(1u64),
+            amount: U256::ONE,
         }
         .abi_encode()
         .into();

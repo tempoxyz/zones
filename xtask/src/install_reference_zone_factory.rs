@@ -68,7 +68,7 @@ struct DeployedBytecode {
 impl InstallReferenceZoneFactory {
     pub(crate) fn run(self) -> eyre::Result<()> {
         ensure!(
-            self.owner != Address::ZERO,
+            !self.owner.is_zero(),
             "--owner must not be the zero address"
         );
         ensure!(
@@ -191,7 +191,7 @@ fn install_native_zone_factory(
     owner: Address,
     artifacts: NativeArtifacts,
 ) -> eyre::Result<()> {
-    ensure!(owner != Address::ZERO, "ZoneFactory owner must not be zero");
+    ensure!(!owner.is_zero(), "ZoneFactory owner must not be zero");
     let canonical_factory = native_factory_account(INITIAL_FACTORY_OWNER);
     let benchmark_factory = native_factory_account(owner);
     match genesis.alloc.get(&ZONE_FACTORY_ADDRESS) {
@@ -306,7 +306,7 @@ mod tests {
     }
 
     fn assert_validates_shared_runtimes([portal, verifier, messenger]: [Bytes; 3]) {
-        let owner = address!("0x0000000000000000000000000000000000000001");
+        let owner = Address::with_last_byte(1);
         let mut genesis = Genesis::default();
         genesis.alloc.insert(
             ZONE_FACTORY_ADDRESS,
@@ -361,7 +361,7 @@ mod tests {
     }
 
     fn assert_rejects_shared_runtime(address: Address, account: GenesisAccount) {
-        let owner = address!("0x0000000000000000000000000000000000000001");
+        let owner = Address::with_last_byte(1);
         let mut genesis = Genesis::default();
         genesis.alloc.insert(address, account.clone());
 

@@ -794,7 +794,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     // Find the event for our deposit block (should have depositsProcessed == 1)
     let deposit_event = tempo_advanced_events
         .iter()
-        .find(|(e, _)| e.depositsProcessed == U256::from(1));
+        .find(|(e, _)| e.depositsProcessed == U256::ONE);
     assert!(
         deposit_event.is_some(),
         "should have a TempoAdvanced event with depositsProcessed == 1"
@@ -1123,7 +1123,7 @@ async fn test_withdrawal_request_finalizes_same_block() -> eyre::Result<()> {
         IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
     assert_eq!(
         finalize_call.count,
-        U256::from(1),
+        U256::ONE,
         "builder should finalize exactly the current withdrawal"
     );
     assert_eq!(finalize_call.blockNumber, withdrawal_block);
@@ -1378,7 +1378,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
         .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
     let finalize_call =
         IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
-    assert_eq!(finalize_call.count, U256::from(1));
+    assert_eq!(finalize_call.count, U256::ONE);
 
     Ok(())
 }

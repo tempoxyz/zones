@@ -1647,7 +1647,7 @@ pub(crate) fn find_processed_offset(
     withdrawals: &[abi::Withdrawal],
     current_slot_hash: B256,
 ) -> Option<usize> {
-    if current_slot_hash == B256::ZERO {
+    if current_slot_hash.is_zero() {
         return Some(withdrawals.len());
     }
 
@@ -2150,7 +2150,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_zero_portal_hash_at_nonzero_height() {
-        for zone_height in [U256::from(1), U256::from(15_552_000), U256::MAX] {
+        for zone_height in [U256::ONE, U256::from(15_552_000), U256::MAX] {
             let l1 = Asserter::new();
             l1.push_success(&abi_encode_multicall(vec![
                 abi_word(B256::ZERO),
@@ -2752,7 +2752,7 @@ mod tests {
         asserter.push_success(&abi_encode_multicall(vec![
             abi_word(7_u64),
             abi_word(11_u64),
-            abi_word(U256::from(1)),
+            abi_word(U256::ONE),
             abi_word(true),
             abi_word(verifier),
             abi_word(42_u32),
@@ -2770,7 +2770,7 @@ mod tests {
         asserter.push_success(&abi_encode_multicall(vec![
             abi_word(8_u64),
             abi_word(12_u64),
-            abi_word(U256::from(1)),
+            abi_word(U256::ONE),
             abi_word(false),
             abi_word(next_verifier),
         ]));
@@ -2862,9 +2862,9 @@ mod tests {
     #[test]
     fn finds_processed_withdrawal_offset() {
         let withdrawals = vec![
-            test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100),
-            test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200),
-            test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300),
+            test_withdrawal(Address::with_last_byte(1), 100),
+            test_withdrawal(Address::with_last_byte(2), 200),
+            test_withdrawal(Address::with_last_byte(3), 300),
         ];
         let cases = [
             (
@@ -3045,8 +3045,8 @@ mod tests {
 
     #[test]
     fn resolve_single_slot_unprocessed() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let w0 = test_withdrawal(Address::with_last_byte(1), 100);
+        let w1 = test_withdrawal(Address::with_last_byte(2), 200);
         let withdrawals = vec![w0, w1];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
 
@@ -3063,9 +3063,9 @@ mod tests {
 
     #[test]
     fn resolve_single_slot_partially_processed() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
-        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+        let w0 = test_withdrawal(Address::with_last_byte(1), 100);
+        let w1 = test_withdrawal(Address::with_last_byte(2), 200);
+        let w2 = test_withdrawal(Address::with_last_byte(3), 300);
         let withdrawals = vec![w0, w1, w2];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
         // head_slot_hash reflects that w0 has been processed (hash of remaining [w1, w2])
@@ -3085,7 +3085,7 @@ mod tests {
 
     #[test]
     fn resolve_single_pending_slot_rejects_zero_hash() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w0 = test_withdrawal(Address::with_last_byte(1), 100);
         let withdrawals = vec![w0];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
 
@@ -3101,9 +3101,9 @@ mod tests {
 
     #[test]
     fn resolve_multiple_slots() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
-        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+        let w0 = test_withdrawal(Address::with_last_byte(1), 100);
+        let w1 = test_withdrawal(Address::with_last_byte(2), 200);
+        let w2 = test_withdrawal(Address::with_last_byte(3), 300);
 
         let head_withdrawals = vec![w0];
         let tail_withdrawals = vec![w1, w2];
@@ -3131,7 +3131,7 @@ mod tests {
 
     #[test]
     fn resolve_hash_mismatch_skipped() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w0 = test_withdrawal(Address::with_last_byte(1), 100);
         let withdrawals = vec![w0];
         let wrong_hash = B256::repeat_byte(0xab);
 
@@ -3146,7 +3146,7 @@ mod tests {
 
     #[test]
     fn resolve_missing_event_skipped() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w0 = test_withdrawal(Address::with_last_byte(1), 100);
         let withdrawals = vec![w0];
 
         let mut slot_withdrawals = BTreeMap::new();
@@ -3159,9 +3159,9 @@ mod tests {
 
     #[test]
     fn resolve_head_partial_with_non_head_slot() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
-        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+        let w0 = test_withdrawal(Address::with_last_byte(1), 100);
+        let w1 = test_withdrawal(Address::with_last_byte(2), 200);
+        let w2 = test_withdrawal(Address::with_last_byte(3), 300);
 
         let head_withdrawals = vec![w0, w1];
         let non_head_withdrawals = vec![w2];
@@ -3209,7 +3209,7 @@ mod tests {
 
     #[test]
     fn resolve_missing_withdrawals_data_skipped() {
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w = test_withdrawal(Address::with_last_byte(1), 100);
         let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
 
         let mut events = BTreeMap::new();
@@ -3223,7 +3223,7 @@ mod tests {
 
     #[test]
     fn resolve_head_slot_corrupted_hash_skipped() {
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w = test_withdrawal(Address::with_last_byte(1), 100);
         let withdrawals = vec![w];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
         // head_slot_hash doesn't match any tail of the withdrawal list

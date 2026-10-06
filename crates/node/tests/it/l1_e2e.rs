@@ -1502,7 +1502,7 @@ async fn test_cross_zone_router_tempo_refund_recipient() -> eyre::Result<()> {
         .wait_for_balance(
             PATH_USD_ADDRESS,
             refund_burner,
-            refund_before + U256::from(1u64),
+            refund_before + U256::ONE,
             Duration::from_secs(90),
         )
         .await?;
@@ -1886,10 +1886,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
     let l1 = L1TestNode::start().await?;
 
     // --- Step 2: Create a second TIP-20 token on L1 ---
-    let zone_usd_salt = B256::new([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 42,
-    ]);
+    let zone_usd_salt = B256::with_last_byte(0x2a);
     let l1_zone_usd = l1.create_tip20("ZoneUSD", "zUSD", zone_usd_salt).await?;
 
     // Mint ZoneUSD to the dev account so we can fund the user

@@ -112,7 +112,7 @@ pub(crate) struct GenerateZoneGenesis {
 
 impl GenerateZoneGenesis {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        if self.admin == Address::ZERO {
+        if self.admin.is_zero() {
             return Err(eyre!("--admin must not be the zero address"));
         }
 

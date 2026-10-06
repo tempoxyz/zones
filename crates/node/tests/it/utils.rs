@@ -2435,7 +2435,7 @@ impl L1TestNode {
             key_count > U256::ZERO,
             "no encryption key registered on portal"
         );
-        let key_index = key_count - U256::from(1);
+        let key_index = key_count - U256::ONE;
 
         let enc = ecies::encrypt_deposit(
             &key_result.x,
@@ -2762,7 +2762,7 @@ async fn patch_clean_portal_snapshot<P: Provider<TempoNetwork>>(
     let block_id = BlockId::number(block_number);
     let portal = ZonePortal::new(portal_address, provider);
     eyre::ensure!(
-        portal.enabledTokenCount().block(block_id).call().await? == U256::from(1)
+        portal.enabledTokenCount().block(block_id).call().await? == U256::ONE
             && portal
                 .currentDepositQueueHash()
                 .block(block_id)
@@ -3331,7 +3331,7 @@ impl ZoneAccount {
             key_count > U256::ZERO,
             "no encryption key registered on portal"
         );
-        let key_index = key_count - U256::from(1);
+        let key_index = key_count - U256::ONE;
         let enc = ecies::encrypt_deposit(
             &key_result.x,
             key_result.yParity,

@@ -172,10 +172,7 @@ mod tests {
         ring.apply_rotation(&rotation(&current, 1, 20)).unwrap();
 
         assert_eq!(ring.key(U256::ZERO).unwrap().to_bytes(), old.to_bytes());
-        assert_eq!(
-            ring.key(U256::from(1)).unwrap().to_bytes(),
-            current.to_bytes()
-        );
+        assert_eq!(ring.key(U256::ONE).unwrap().to_bytes(), current.to_bytes());
     }
 
     #[test]

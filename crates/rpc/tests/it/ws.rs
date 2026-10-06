@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use alloy_primitives::{Address, b256};
+use alloy_primitives::{Address, B256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use futures::{SinkExt, StreamExt, stream};
@@ -184,18 +184,16 @@ impl ZoneRpcApi for MockZoneRpcApi {
             }
 
             let stream = stream::iter(vec![zone_rpc::types::to_raw(&json!({
-                "hash": format!(
-                    "{:#x}",
-                    b256!("0x4444444444444444444444444444444444444444444444444444444444444444")
-                ),
+                "hash": B256::repeat_byte(0x44)
+                    .to_string(),
                 "number": "0x42",
-                "parentHash": format!("{:#x}", alloy_primitives::B256::ZERO),
+                "parentHash": alloy_primitives::B256::ZERO.to_string(),
                 "logsBloom": format!("{:#x}", alloy_primitives::Bloom::ZERO),
                 "gasUsed": "0x0",
                 "size": "0x0",
-                "transactionsRoot": format!("{:#x}", alloy_primitives::B256::ZERO),
-                "receiptsRoot": format!("{:#x}", alloy_primitives::B256::ZERO),
-                "stateRoot": format!("{:#x}", alloy_primitives::B256::ZERO),
+                "transactionsRoot": alloy_primitives::B256::ZERO.to_string(),
+                "receiptsRoot": alloy_primitives::B256::ZERO.to_string(),
+                "stateRoot": alloy_primitives::B256::ZERO.to_string(),
                 "extraData": "0x",
             }))]);
             let stream: WsSubscriptionStream = Box::pin(stream);
@@ -216,20 +214,16 @@ impl ZoneRpcApi for MockZoneRpcApi {
 
             let stream = stream::iter(vec![zone_rpc::types::to_raw(&json!({
                 "address": format!("{:#x}", Address::ZERO),
-                "topics": [format!(
-                    "{:#x}",
-                    b256!("0x1111111111111111111111111111111111111111111111111111111111111111")
-                )],
+                "topics": [
+                    B256::repeat_byte(0x11)
+                        .to_string()
+                ],
                 "data": "0x",
-                "blockHash": format!(
-                    "{:#x}",
-                    b256!("0x2222222222222222222222222222222222222222222222222222222222222222")
-                ),
+                "blockHash": B256::repeat_byte(0x22)
+                .to_string(),
                 "blockNumber": "0x42",
-                "transactionHash": format!(
-                    "{:#x}",
-                    b256!("0x3333333333333333333333333333333333333333333333333333333333333333")
-                ),
+                "transactionHash": B256::repeat_byte(0x33)
+                .to_string(),
                 "transactionIndex": "0x0",
                 "logIndex": "0x0",
                 "removed": false
@@ -605,14 +599,11 @@ async fn ws_subscribe_new_heads_emits_redacted_headers() {
     assert_eq!(notification["params"]["subscription"], subscription_id);
     assert_eq!(
         notification["params"]["result"]["hash"],
-        format!(
-            "{:#x}",
-            b256!("0x4444444444444444444444444444444444444444444444444444444444444444")
-        )
+        B256::repeat_byte(0x44).to_string()
     );
     assert_eq!(
         notification["params"]["result"]["logsBloom"],
-        format!("0x{}", "0".repeat(512))
+        alloy_primitives::Bloom::ZERO.to_string()
     );
     assert!(
         notification["params"]["result"]

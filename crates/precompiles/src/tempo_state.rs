@@ -208,6 +208,7 @@ impl TempoState {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     use crate::test_utils::{
@@ -217,7 +218,7 @@ mod tests {
     use alloc::{vec, vec::Vec};
     use alloy_consensus::Sealable as _;
     use alloy_evm::precompiles::DynPrecompile;
-    use alloy_primitives::{address, b256};
+    use alloy_primitives::address;
     use alloy_sol_types::SolCall;
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_precompiles::storage::StorageCtx;
@@ -367,22 +368,14 @@ mod tests {
             inner: alloy_consensus::Header {
                 parent_hash,
                 beneficiary: address!("0x000000000000000000000000000000000000bEEF"),
-                state_root: b256!(
-                    "0x1111111111111111111111111111111111111111111111111111111111111111"
-                ),
-                transactions_root: b256!(
-                    "0x2222222222222222222222222222222222222222222222222222222222222222"
-                ),
-                receipts_root: b256!(
-                    "0x3333333333333333333333333333333333333333333333333333333333333333"
-                ),
+                state_root: B256::repeat_byte(0x11),
+                transactions_root: B256::repeat_byte(0x22),
+                receipts_root: B256::repeat_byte(0x33),
                 number,
                 gas_limit: 30_000_000,
                 gas_used: 21_000,
                 timestamp: 1_700_000_000,
-                mix_hash: b256!(
-                    "0x4444444444444444444444444444444444444444444444444444444444444444"
-                ),
+                mix_hash: B256::repeat_byte(0x44),
                 ..Default::default()
             },
             ..Default::default()
