@@ -21,6 +21,7 @@ use zone_primitives::constants::zone_chain_id;
 
 use crate::{
     generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
+    genesis_forks::resolve_l1_forks,
     zone_utils::{MODERATO_ZONE_FACTORY, parse_private_key, write_owner_only},
 };
 
@@ -158,6 +159,7 @@ impl CreateZone {
             .wallet(signer)
             .connect(&self.l1_rpc_url)
             .await?;
+        let forks = resolve_l1_forks(&provider, &self.forks).await?;
 
         let factory = ZoneFactory::new(self.zone_factory, &provider);
 
@@ -289,7 +291,7 @@ impl CreateZone {
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
             tempo_portal: None,
-            l1_rpc_url: None,
+            l1_rpc_url: Some(self.l1_rpc_url.clone()),
             default_fee_token: self.initial_token,
             tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
@@ -299,7 +301,7 @@ impl CreateZone {
             with_create2_factory: true,
             forks: self.forks,
         };
-        genesis_cmd.run().await?;
+        genesis_cmd.run_with_forks(forks).await?;
 
         // Write zone.json with deployment metadata for downstream tooling (e.g. `just zone-up`).
         let zone_json = serde_json::json!({

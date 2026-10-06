@@ -10,11 +10,26 @@ Subcommands currently supported:
 - `generate-zone-genesis`: generates a Zone L2 genesis file.
 - `pause-portal`: pauses new deposits, Zone block production, and L1 withdrawal processing for 30 days.
 
-`create-zone` and `generate-zone-genesis` explicitly write every supported Tempo
-fork (T0 through T14, including T1A/T1B/T1C) into Zone genesis, defaulting each
-activation timestamp to `0`. Override individual timestamps with `--t0-time`,
-`--t1-time`, `--t1a-time`, etc. through `--t14-time` to match the parent L1.
-For example, a T12-only devnet can pass `--hardfork T12`, which writes explicit
-`null`s for T13 and later forks; explicit `--t*-time` flags still take precedence. Omitting a flag
-activates that fork at genesis, even when another fork is delayed explicitly.
-These flags configure Zone genesis only; they do not change the parent L1 schedule.
+`create-zone` derives Tempo fork activations from its L1 RPC before sending any
+transactions. `generate-zone-genesis` requires either `--l1-rpc-url <url>` or an
+explicit offline `--hardfork <fork>` cap; there is no implicit all-forks-at-genesis
+default.
+
+RPC mode reads `eth_chainId`, `tempo_forkSchedule`, and the latest L1 header. The
+RPC chain ID must match the parent encoded in the Zone chain ID. Genesis preserves
+activation timestamps, including scheduled future upgrades, and writes absent
+supported forks as `null` so node startup cannot inherit a different schedule.
+Its timestamp and initialization EVM match the sampled L1 head. RPC failures,
+unsupported forks, inconsistent schedules, or fork overrides abort generation.
+If an upgrade occurs between the schedule and head reads, retry generation.
+`--l1-rpc-url` can also be combined with `--tempo-portal` to derive a pre-creation
+anchor, or with `--tempo-genesis-header-rlp` to supply the anchor explicitly.
+
+Fork settings are persisted in `genesis.json`; restarting nodes does not fetch
+a new schedule. L1 upgrades not present in the snapshot require a coordinated
+configuration update. Existing Zone databases are not modified by generation.
+
+For offline development or tests, `--hardfork T11` enables forks through T11 at
+timestamp zero and disables T12/T13/T14. Individual `--t*-time` flags still take
+precedence in offline mode, but cannot be combined with RPC-derived schedules.
+The bundled dev genesis regeneration recipe explicitly selects T14.

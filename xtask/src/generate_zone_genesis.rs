@@ -43,7 +43,10 @@ use zone_precompiles::{
     ZoneOutbox as NativeZoneOutbox,
 };
 
-use crate::zone_utils::find_zone_deployment_block;
+use crate::{
+    genesis_forks::{ResolvedForks, resolve_l1_forks},
+    zone_utils::find_zone_deployment_block,
+};
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
@@ -69,12 +72,8 @@ pub(crate) struct GenerateZoneGenesis {
     )]
     pub(crate) tempo_portal: Option<Address>,
 
-    /// Tempo L1 HTTP RPC URL used to derive the pre-creation genesis anchor.
-    #[arg(
-        long,
-        requires = "tempo_portal",
-        conflicts_with = "tempo_genesis_header_rlp"
-    )]
+    /// Tempo L1 RPC URL used to inherit fork activations and optionally derive the anchor.
+    #[arg(long, required_unless_present = "hardfork")]
     pub(crate) l1_rpc_url: Option<String>,
 
     /// Canonical fee token used when a zone transaction omits `fee_token`.
@@ -112,26 +111,39 @@ pub(crate) struct GenerateZoneGenesis {
 
 impl GenerateZoneGenesis {
     pub(crate) async fn run(self) -> eyre::Result<()> {
+        let forks = if let Some(url) = &self.l1_rpc_url {
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect(url)
+                .await?;
+            resolve_l1_forks(&provider, &self.forks).await?
+        } else {
+            ResolvedForks::offline(&self.forks)?
+        };
+        self.run_with_forks(forks).await
+    }
+
+    pub(crate) async fn run_with_forks(self, forks: ResolvedForks) -> eyre::Result<()> {
         if self.admin.is_zero() {
             return Err(eyre!("--admin must not be the zero address"));
         }
+        forks.validate_chain_id(self.chain_id)?;
 
         let header_rlp = match (
             &self.tempo_genesis_header_rlp,
             self.tempo_portal,
             self.l1_rpc_url.as_deref(),
         ) {
-            (Some(header_rlp), None, None) => {
+            (Some(header_rlp), None, _) => {
                 const_hex::decode(header_rlp).wrap_err("failed to decode hex string")?
             }
             (None, Some(portal), Some(l1_rpc_url)) => {
                 derive_pre_creation_anchor(l1_rpc_url, portal).await?.rlp
             }
-            (None, None, None) => alloy_rlp::encode(TempoHeader::default()),
+            (None, None, _) => alloy_rlp::encode(TempoHeader::default()),
             _ => unreachable!("clap validates genesis anchor arguments"),
         };
 
-        let mut evm = setup_zone_evm(self.chain_id, self.gas_limit);
+        let mut evm = setup_zone_evm(self.chain_id, self.gas_limit, &forks);
 
         evm.db_mut().insert_account_info(
             DEPLOYER,
@@ -245,9 +257,10 @@ impl GenerateZoneGenesis {
         }
 
         let mut chain_config = ethereum_chain_config(self.chain_id);
-        self.forks.write_to(&mut chain_config);
+        forks.write_to(&mut chain_config);
 
         let mut genesis = Genesis::default()
+            .with_timestamp(forks.timestamp)
             .with_gas_limit(self.gas_limit)
             .with_base_fee(Some(self.base_fee_per_gas))
             .with_nonce(0x42)
@@ -424,8 +437,10 @@ pub(crate) async fn wait_for_finalized_pre_creation_anchor<P: Provider<TempoNetw
     ))
 }
 
-fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> GenesisEvm {
+fn setup_zone_evm(chain_id: u64, gas_limit: u64, forks: &ResolvedForks) -> GenesisEvm {
     let mut env = genesis_evm_env(chain_id);
+    env.cfg_env.spec = forks.active;
+    env.block_env.inner.timestamp = U256::from(forks.timestamp);
     env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
     env.block_env.inner.gas_limit = gas_limit;
     create_genesis_evm(env)
@@ -469,7 +484,9 @@ fn create_path_usd_token() -> tempo_precompiles::error::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::transports::mock::Asserter;
     use clap::Parser;
+    use tempo_alloy::rpc::{ForkInfo, ForkSchedule, TempoHeaderResponse};
     use tempo_chainspec::{TempoHardfork, TempoHardforks};
     use zone_chainspec::ZoneChainSpec;
 
@@ -492,6 +509,8 @@ mod tests {
                 "134509785776129".to_owned(),
                 "--admin".to_owned(),
                 "0x1000000000000000000000000000000000000001".to_owned(),
+                "--hardfork".to_owned(),
+                "T14".to_owned(),
             ];
             for (flag, timestamp) in [
                 ("--t12-time", t12),
@@ -558,6 +577,8 @@ mod tests {
                 "0x1000000000000000000000000000000000000001",
                 &flag,
                 "12345",
+                "--hardfork",
+                "T14",
             ])
             .unwrap();
             let mut genesis = Genesis::default();
@@ -609,5 +630,111 @@ mod tests {
         let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
         assert_eq!(spec.tempo_hardfork_at(99), TempoHardfork::T12);
         assert_eq!(spec.tempo_hardfork_at(u64::MAX), TempoHardfork::T13);
+    }
+
+    #[test]
+    fn genesis_requires_rpc_or_explicit_offline_cap() {
+        let args = [
+            "generate-zone-genesis",
+            "--output",
+            "/tmp/zone",
+            "--chain-id",
+            "134509785776129",
+            "--admin",
+            "0x1000000000000000000000000000000000000001",
+        ];
+        assert!(GenerateZoneGenesis::try_parse_from(args).is_err());
+        assert!(
+            GenerateZoneGenesis::try_parse_from(
+                args.into_iter()
+                    .chain(["--l1-rpc-url", "http://localhost:8545",])
+            )
+            .is_ok()
+        );
+        assert!(
+            GenerateZoneGenesis::try_parse_from(args.into_iter().chain([
+                "--l1-rpc-url",
+                "http://localhost:8545",
+                "--tempo-genesis-header-rlp",
+                "0x00",
+            ]))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn initialization_uses_the_resolved_fork() {
+        let args = TempoHardforkArgs {
+            hardfork: Some(TempoHardfork::T11),
+            ..Default::default()
+        };
+        let forks = ResolvedForks::offline(&args).unwrap();
+        let evm = setup_zone_evm(1337, 30_000_000, &forks);
+        assert_eq!(evm.ctx().cfg.spec, TempoHardfork::T11);
+        assert_eq!(evm.ctx().block.inner.timestamp, U256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn generated_genesis_persists_rpc_snapshot() {
+        let output = tempfile::tempdir().unwrap();
+        let chain_id = zone_primitives::constants::zone_chain_id(4217, 3)
+            .unwrap()
+            .to_string();
+        let asserter = Asserter::new();
+        asserter.push_success(&"0x1079");
+        asserter.push_success(&ForkSchedule {
+            active: "T11".to_owned(),
+            schedule: TempoHardfork::VARIANTS
+                .iter()
+                .copied()
+                .filter(|&fork| fork != TempoHardfork::Genesis && fork <= TempoHardfork::T11)
+                .map(|fork| ForkInfo {
+                    name: fork.to_string(),
+                    activation_time: u64::from(fork.variant_index()),
+                    active: true,
+                    fork_id: None,
+                })
+                .collect(),
+        });
+        let mut header = TempoHeaderResponse {
+            inner: Default::default(),
+            timestamp_millis: 100_000,
+        };
+        header.inner.inner.inner.timestamp = 100;
+        asserter.push_success(&Some(header));
+        let provider =
+            ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter);
+        let command = GenerateZoneGenesis::try_parse_from([
+            "generate-zone-genesis",
+            "--output",
+            output.path().to_str().unwrap(),
+            "--chain-id",
+            &chain_id,
+            "--admin",
+            "0x1000000000000000000000000000000000000001",
+            "--l1-rpc-url",
+            "http://unused.example",
+        ])
+        .unwrap();
+        let forks = resolve_l1_forks(&provider, &command.forks).await.unwrap();
+        let evm = setup_zone_evm(command.chain_id, command.gas_limit, &forks);
+        assert_eq!(evm.ctx().cfg.spec, TempoHardfork::T11);
+        assert_eq!(evm.ctx().block.inner.timestamp, U256::from(100));
+        command.run_with_forks(forks).await.unwrap();
+        let genesis: Genesis =
+            serde_json::from_slice(&std::fs::read(output.path().join("genesis.json")).unwrap())
+                .unwrap();
+        assert_eq!(genesis.timestamp, 100);
+        assert_eq!(
+            genesis.config.extra_fields.get("t13Time"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            genesis.config.extra_fields.get("t14Time"),
+            Some(&serde_json::Value::Null)
+        );
+        let spec = ZoneChainSpec::from_genesis(genesis).unwrap();
+        assert_eq!(spec.tempo_hardfork_at(100), TempoHardfork::T11);
+        assert_eq!(spec.tempo_hardfork_at(u64::MAX), TempoHardfork::T11);
     }
 }
