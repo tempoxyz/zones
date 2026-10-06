@@ -1,4 +1,5 @@
 use super::*;
+use eyre::OptionExt;
 use std::time::Duration;
 
 /// How often finalized Portal pause state is polled.
@@ -23,7 +24,7 @@ pub async fn refresh_portal_pause(
     let header = l1_provider
         .get_header_by_number(BlockNumberOrTag::Finalized)
         .await?
-        .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))?;
+        .ok_or_eyre("L1 finalized block is not available")?;
     let block = header.num_hash();
     tracker.observe_finalized_l1_timestamp(header.timestamp());
     if tracker.portal_pause_block() == Some(block) {

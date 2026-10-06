@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     EncryptionKeyRing, L1StateCache, metrics::L1SubscriberMetrics, state::EnabledTokenRegistry,
 };
-use eyre::{OptionExt as _, WrapErr as _};
+use eyre::{OptionExt as _, WrapErr as _, ensure};
 use futures::stream;
 use std::{collections::HashSet, ops::RangeInclusive};
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
@@ -257,7 +257,7 @@ impl L1BlockTracker {
         let target = state
             .finalized_target
             .as_mut()
-            .ok_or_else(|| eyre::eyre!("cannot mark an unannounced finalized target ready"))?;
+            .ok_or_eyre("cannot mark an unannounced finalized target ready")?;
         eyre::ensure!(
             target.number == number,
             "cannot mark finalized target {number} ready; latest announced target is {}",
@@ -1317,19 +1317,17 @@ pub fn verify_receipts_against_header(
         })
         .collect::<Vec<_>>();
     let computed_receipts_root = alloy_consensus::proofs::calculate_receipt_root(&receipts);
-    if computed_receipts_root != expected_receipts_root {
-        eyre::bail!(
-            "receipt root mismatch for L1 block {block_number} ({block_hash}): expected {expected_receipts_root}, got {computed_receipts_root}"
-        );
-    }
+    ensure!(
+        computed_receipts_root == expected_receipts_root,
+        "receipt root mismatch for L1 block {block_number} ({block_hash}): expected {expected_receipts_root}, got {computed_receipts_root}"
+    );
     let computed_logs_bloom = receipts
         .iter()
         .fold(Bloom::ZERO, |bloom, receipt| bloom | receipt.bloom_ref());
-    if computed_logs_bloom != expected_logs_bloom {
-        eyre::bail!(
-            "logs bloom mismatch for L1 block {block_number} ({block_hash}): expected {expected_logs_bloom}, got {computed_logs_bloom}"
-        );
-    }
+    ensure!(
+        computed_logs_bloom == expected_logs_bloom,
+        "logs bloom mismatch for L1 block {block_number} ({block_hash}): expected {expected_logs_bloom}, got {computed_logs_bloom}"
+    );
     Ok(())
 }
 

@@ -34,24 +34,24 @@ pub(crate) fn write_secret_file(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
-    if output.file_name().is_none() {
-        eyre::bail!("secret destination `{}` must name a file", output.display());
-    }
+    eyre::ensure!(
+        output.file_name().is_some(),
+        "secret destination `{}` must name a file",
+        output.display()
+    );
 
     match fs::symlink_metadata(output) {
         Ok(metadata) => {
-            if !metadata.file_type().is_file() {
-                eyre::bail!(
-                    "refusing to replace non-regular secret destination `{}`",
-                    output.display()
-                );
-            }
-            if !options.overwrite {
-                eyre::bail!(
-                    "secret destination `{}` already exists; pass --force to replace it",
-                    output.display()
-                );
-            }
+            eyre::ensure!(
+                metadata.file_type().is_file(),
+                "refusing to replace non-regular secret destination `{}`",
+                output.display()
+            );
+            eyre::ensure!(
+                options.overwrite,
+                "secret destination `{}` already exists; pass --force to replace it",
+                output.display()
+            );
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => {

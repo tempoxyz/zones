@@ -49,12 +49,11 @@ pub(super) async fn run(args: VerifyArgs) -> Result<()> {
     let started = start_phase("connect to L1");
     let provider = connect(&args.rpc_url, "L1 verifier").await?;
     let chain_id = provider.get_chain_id().await.context("read L1 chain ID")?;
-    if request.chain_id != chain_id {
-        bail!(
-            "L1 RPC chain ID {chain_id} does not match witness parent chain ID {}",
-            request.chain_id
-        );
-    }
+    eyre::ensure!(
+        request.chain_id == chain_id,
+        "L1 RPC chain ID {chain_id} does not match witness parent chain ID {}",
+        request.chain_id
+    );
     info!(chain_id, "connected to witness parent chain");
     timings.record("connect to L1", started, ());
 
@@ -79,9 +78,10 @@ async fn call_verifier(
         .raw_request("eth_call".into(), params)
         .await
         .context("native verifier eth_call failed")?;
-    if result.as_ref() != B256::with_last_byte(1) {
-        bail!("native verifier did not return ABI-encoded true: {result}");
-    }
+    eyre::ensure!(
+        result.as_ref() == B256::with_last_byte(1),
+        "native verifier did not return ABI-encoded true: {result}"
+    );
     Ok(())
 }
 

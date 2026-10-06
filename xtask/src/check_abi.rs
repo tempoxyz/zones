@@ -195,9 +195,7 @@ impl CheckAbi {
                 eprintln!("    {error}");
             }
         }
-        if failed {
-            bail!("Zone ABI compatibility check found differences");
-        }
+        ensure!(!failed, "Zone ABI compatibility check found differences");
         Ok(())
     }
 }

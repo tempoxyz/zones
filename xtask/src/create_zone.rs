@@ -9,7 +9,7 @@ use alloy::{
     sol_types::{SolCall as _, SolEvent as _},
 };
 use alloy_rpc_types_eth::BlockId;
-use eyre::{WrapErr as _, ensure, eyre};
+use eyre::{OptionExt, WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
 use tempo_chainspec::{cli::TempoHardforkArgs, spec::TEMPO_T0_BASE_FEE};
@@ -161,7 +161,7 @@ impl CreateZone {
         let leader = *self
             .sequencers
             .first()
-            .ok_or_else(|| eyre!("at least one --sequencer is required"))?;
+            .ok_or_eyre("at least one --sequencer is required")?;
         if self.sequencers.len() > MAX_SEQUENCERS {
             return Err(eyre!(
                 "at most {MAX_SEQUENCERS} sequencers are supported, got {}",
@@ -484,7 +484,7 @@ impl CreateZone {
         }
         let creation_block = receipt
             .block_number
-            .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
+            .ok_or_eyre("createZone receipt is missing its block number")?;
 
         let event = self.zone_created_event(&receipt)?;
 

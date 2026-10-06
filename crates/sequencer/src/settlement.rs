@@ -54,7 +54,7 @@ use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
-use eyre::{OptionExt as _, Result, WrapErr as _};
+use eyre::{OptionExt as _, Result, WrapErr as _, ensure};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
@@ -709,7 +709,7 @@ impl BatchSubmitter {
         let expected_l2_index = metadata
             .withdrawal_batch_index
             .checked_add(1)
-            .ok_or_else(|| eyre::eyre!("portal withdrawal batch index overflow"))?;
+            .ok_or_eyre("portal withdrawal batch index overflow")?;
         eyre::ensure!(
             batch.withdrawal_batch_index == expected_l2_index,
             "withdrawal batch index mismatch for zone block {}: L2 finalized index {}, expected portal index + 1 ({expected_l2_index})",
@@ -736,9 +736,7 @@ impl BatchSubmitter {
             .filter(|log| log.address() == self.portal_address)
             .find_map(|log| decode_batch_submitted_log(&log.inner))
             .transpose()?
-            .ok_or_else(|| {
-                eyre::eyre!("confirmed submitBatch receipt is missing the BatchSubmitted event")
-            })
+            .ok_or_eyre("confirmed submitBatch receipt is missing the BatchSubmitted event")
     }
 
     /// Validate that a collected certificate commits to the exact calldata this submitter will
@@ -1150,15 +1148,14 @@ impl BatchSubmitter {
         // Guard: verify the queue didn't change during the multi-RPC replay.
         let (head2, tail2) = self.read_portal_withdrawal_queue_bounds().await?;
 
-        if head2 != head || tail2 < page_tail {
-            eyre::bail!(
-                "withdrawal queue changed during page restore ({}..{} -> {}..{}), retry from the current head",
-                head,
-                tail,
-                head2,
-                tail2
-            );
-        }
+        ensure!(
+            head2 == head && tail2 >= page_tail,
+            "withdrawal queue changed during page restore ({}..{} -> {}..{}), retry from the current head",
+            head,
+            tail,
+            head2,
+            tail2
+        );
 
         // Step 6: resolve all fetched data into verified withdrawal sets.
         resolve_pending_slots(head, page_tail, &events, &slot_withdrawals, head_slot_hash).map(
@@ -1209,13 +1206,14 @@ impl BatchSubmitter {
             for log in events {
                 let event = decode_batch_submitted_log(&log.inner)
                     .transpose()?
-                    .ok_or_else(|| eyre::eyre!("unexpected event in BatchSubmitted query"))?;
+                    .ok_or_eyre("unexpected event in BatchSubmitted query")?;
                 let index: u64 = event.withdrawalQueueIndex.try_into().map_err(|_| {
                     eyre::eyre!("withdrawal queue index overflow in BatchSubmitted")
                 })?;
-                if found.insert(index, event).is_some() {
-                    eyre::bail!("duplicate BatchSubmitted event for portal queue index {index}");
-                }
+                ensure!(
+                    found.insert(index, event).is_none(),
+                    "duplicate BatchSubmitted event for portal queue index {index}"
+                );
             }
 
             if lo == 0 {
@@ -1599,9 +1597,10 @@ fn resolve_pending_slots(
     slot_withdrawals: &BTreeMap<u64, Vec<abi::Withdrawal>>,
     head_slot_hash: B256,
 ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
-    if head < tail && head_slot_hash.is_zero() {
-        eyre::bail!("pending withdrawal head slot {head} is zero for queue range {head}..{tail}");
-    }
+    ensure!(
+        head >= tail || !head_slot_hash.is_zero(),
+        "pending withdrawal head slot {head} is zero for queue range {head}..{tail}"
+    );
 
     let mut result: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
 
@@ -1614,11 +1613,11 @@ fn resolve_pending_slots(
             eyre::bail!("no withdrawal data fetched for pending portal slot {portal_slot}");
         };
 
-        if withdrawals.is_empty()
-            || abi::Withdrawal::queue_hash(withdrawals) != event.withdrawalQueueHash
-        {
-            eyre::bail!("withdrawal hash mismatch or empty for portal slot {portal_slot}");
-        }
+        ensure!(
+            !withdrawals.is_empty()
+                && abi::Withdrawal::queue_hash(withdrawals) == event.withdrawalQueueHash,
+            "withdrawal hash mismatch or empty for portal slot {portal_slot}"
+        );
 
         if portal_slot == head {
             match find_processed_offset(withdrawals, head_slot_hash) {

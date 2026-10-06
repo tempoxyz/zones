@@ -8,7 +8,7 @@ use commonware_cryptography::{
 use commonware_p2p::{AddressableTrackedPeers, authenticated::lookup};
 use commonware_runtime::{Quota, Supervisor as _};
 use commonware_utils::{NZU32, NZUsize, ordered::Map};
-use eyre::WrapErr as _;
+use eyre::{OptionExt, WrapErr as _};
 
 use crate::ZoneManifest;
 
@@ -124,7 +124,7 @@ pub(crate) fn instantiate(
     tracing::info!(target: "zone::p2p", membership_digest = %manifest.membership_digest(), "Zone P2P membership");
     let local_ed25519_public_key = ed25519_private_key.public_key();
     let max_peers = NonZeroUsize::new(manifest.nodes().len())
-        .ok_or_else(|| eyre::eyre!("P2P manifest must contain at least one node"))?;
+        .ok_or_eyre("P2P manifest must contain at least one node")?;
     let config = setup_commonware_config(
         ed25519_private_key,
         &namespace,

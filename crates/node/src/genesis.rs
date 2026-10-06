@@ -7,6 +7,7 @@
 use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, U256};
+use eyre::OptionExt;
 use tempo_primitives::TempoHeader;
 use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, tempo_state, zone_fee_manager};
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
@@ -45,7 +46,7 @@ pub fn l1_anchored_genesis(
     let tempo_state_account = genesis
         .alloc
         .get_mut(&TEMPO_STATE_ADDRESS)
-        .ok_or_else(|| eyre::eyre!("TempoState not found in genesis alloc"))?;
+        .ok_or_eyre("TempoState not found in genesis alloc")?;
     let storage = tempo_state_account
         .storage
         .get_or_insert_with(Default::default);
@@ -59,7 +60,7 @@ pub fn l1_anchored_genesis(
     let fee_manager_account = genesis
         .alloc
         .get_mut(&ZONE_FEE_MANAGER_ADDRESS)
-        .ok_or_else(|| eyre::eyre!("ZoneFeeManager not found in genesis alloc"))?;
+        .ok_or_eyre("ZoneFeeManager not found in genesis alloc")?;
     fee_manager_account
         .storage
         .get_or_insert_with(Default::default)

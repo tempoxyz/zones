@@ -12,7 +12,7 @@ use std::{
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
 use alloy_rpc_types_eth::BlockId;
-use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
+use eyre::{Context as _, OptionExt as _, Result, ensure};
 use futures::StreamExt as _;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -363,12 +363,13 @@ impl ProofStore {
                     .wrap_err_with(|| format!("remove settled proof {}", path.display()))?;
                 continue;
             }
-            if proofs
-                .insert(proof.witness.block_number, Arc::new(proof))
-                .is_some()
-            {
-                bail!("duplicate stored proof height in {}", directory.display());
-            }
+            ensure!(
+                proofs
+                    .insert(proof.witness.block_number, Arc::new(proof))
+                    .is_none(),
+                "duplicate stored proof height in {}",
+                directory.display()
+            );
         }
         sync_directory(&directory)?;
 
@@ -385,12 +386,11 @@ impl ProofStore {
         proof.validate()?;
         {
             let state = self.state.read();
-            if proof.witness.block_number <= state.pruned_through {
-                bail!(
-                    "cannot store proof for settled Zone block {}",
-                    proof.witness.block_number
-                );
-            }
+            ensure!(
+                proof.witness.block_number > state.pruned_through,
+                "cannot store proof for settled Zone block {}",
+                proof.witness.block_number
+            );
             if let Some(existing) = state.proofs.get(&proof.witness.block_number) {
                 ensure!(
                     existing.witness.block_hash == proof.witness.block_hash,
