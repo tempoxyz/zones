@@ -19,7 +19,10 @@ RPC mode reads `eth_chainId`, `tempo_forkSchedule`, and the latest L1 header. Th
 RPC chain ID must match the parent encoded in the Zone chain ID. Genesis preserves
 activation timestamps, including scheduled future upgrades, and writes absent
 supported forks as `null` so node startup cannot inherit a different schedule.
-Its timestamp and initialization EVM match the sampled L1 head. RPC failures,
+The latest L1 head is used only to validate the reported schedule. The genesis
+timestamp comes from the anchor header, and the initialization EVM uses the fork
+active at that timestamp. With the same anchor, schedule, and generation parameters,
+regeneration produces identical genesis even as the L1 head advances. RPC failures,
 unsupported forks, inconsistent schedules, or fork overrides abort generation.
 If an upgrade occurs between the schedule and head reads, retry generation.
 `--l1-rpc-url` can also be combined with `--tempo-portal` to derive a pre-creation

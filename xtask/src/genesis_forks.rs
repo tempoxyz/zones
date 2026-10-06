@@ -13,8 +13,6 @@ use zone_primitives::constants::decode_l1_chain_id;
 #[derive(Debug)]
 pub(crate) struct ResolvedForks {
     parent_chain_id: Option<u64>,
-    pub(crate) timestamp: u64,
-    pub(crate) active: TempoHardfork,
     activations: BTreeMap<TempoHardfork, u64>,
 }
 
@@ -58,20 +56,15 @@ impl ResolvedForks {
             );
             previous_time = *activation_time;
         }
-        let resolved_active = activations
-            .iter()
-            .rev()
-            .find_map(|(&fork, &time)| (time <= timestamp).then_some(fork));
+        let forks = Self {
+            parent_chain_id: Some(parent_chain_id),
+            activations,
+        };
         ensure!(
-            resolved_active == Some(active),
+            forks.hardfork_at(timestamp).ok() == Some(active),
             "L1 fork schedule does not match the sampled head; retry genesis generation"
         );
-        Ok(Self {
-            parent_chain_id: Some(parent_chain_id),
-            timestamp,
-            active,
-            activations,
-        })
+        Ok(forks)
     }
 
     pub(crate) fn offline(args: &TempoHardforkArgs) -> eyre::Result<Self> {
@@ -85,17 +78,22 @@ impl ResolvedForks {
             .filter(|&fork| fork != TempoHardfork::Genesis)
             .filter_map(|fork| args.fork_time(fork).map(|time| (fork, time)))
             .collect::<BTreeMap<_, _>>();
-        let active = activations
+        let forks = Self {
+            parent_chain_id: None,
+            activations,
+        };
+        forks
+            .hardfork_at(0)
+            .wrap_err("offline genesis must enable at least T0 at timestamp zero")?;
+        Ok(forks)
+    }
+
+    pub(crate) fn hardfork_at(&self, timestamp: u64) -> eyre::Result<TempoHardfork> {
+        self.activations
             .iter()
             .rev()
-            .find_map(|(&fork, &time)| (time == 0).then_some(fork))
-            .ok_or_else(|| eyre!("offline genesis must enable at least T0 at timestamp zero"))?;
-        Ok(Self {
-            parent_chain_id: None,
-            timestamp: 0,
-            active,
-            activations,
-        })
+            .find_map(|(&fork, &time)| (time <= timestamp).then_some(fork))
+            .ok_or_else(|| eyre!("no Tempo fork is active at genesis anchor timestamp {timestamp}"))
     }
 
     pub(crate) fn validate_chain_id(&self, chain_id: u64) -> eyre::Result<()> {
@@ -172,7 +170,12 @@ mod tests {
     #[test]
     fn rpc_schedule_preserves_future_times_and_disables_absent_forks() {
         let forks = ResolvedForks::from_schedule(4217, 100, schedule()).unwrap();
-        let mut genesis = Genesis::default().with_timestamp(forks.timestamp);
+        assert!(forks.hardfork_at(9).is_err());
+        assert_eq!(forks.hardfork_at(10).unwrap(), TempoHardfork::T0);
+        assert_eq!(forks.hardfork_at(19).unwrap(), TempoHardfork::T0);
+        assert_eq!(forks.hardfork_at(20).unwrap(), TempoHardfork::T11);
+        assert_eq!(forks.hardfork_at(200).unwrap(), TempoHardfork::T12);
+        let mut genesis = Genesis::default().with_timestamp(100);
         genesis.config.chain_id = zone_chain_id(4217, 3).unwrap();
         forks.write_to(&mut genesis.config);
         assert_eq!(genesis.config.extra_fields.get("t11Time"), Some(&json!(20)));
@@ -252,7 +255,7 @@ mod tests {
         let forks = ResolvedForks::offline(&args).unwrap();
         let mut config = ChainConfig::default();
         forks.write_to(&mut config);
-        assert_eq!(forks.active, TempoHardfork::T11);
+        assert_eq!(forks.hardfork_at(0).unwrap(), TempoHardfork::T11);
         assert_eq!(config.extra_fields.get("t11Time"), Some(&json!(0)));
         assert_eq!(config.extra_fields.get("t12Time"), Some(&json!(200)));
         assert_eq!(config.extra_fields.get("t13Time"), Some(&Value::Null));
@@ -260,7 +263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_forks_and_timestamp_from_rpc() {
+    async fn reads_forks_and_validates_head_timestamp_from_rpc() {
         let asserter = Asserter::new();
         asserter.push_success(&"0x1079");
         asserter.push_success(&json!({ "active": "T11", "schedule": [
@@ -280,8 +283,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(forks.parent_chain_id, Some(4217));
-        assert_eq!(forks.timestamp, 100);
-        assert_eq!(forks.active, TempoHardfork::T11);
+        assert_eq!(forks.hardfork_at(100).unwrap(), TempoHardfork::T11);
         assert_eq!(forks.activations.get(&TempoHardfork::T12), Some(&200));
         assert!(asserter.read_q().is_empty());
     }
