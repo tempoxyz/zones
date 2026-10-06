@@ -39,6 +39,9 @@ Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/
 
 ### Local Development with Anvil
 
+For the experimental QMDB single-node test Zone (mock L1, no settlement), see
+[the QMDB testnet guide](docs/QMDB-TESTNET.md).
+
 Use Foundry 1.8 or newer, or a nightly build from July 11, 2026 or later,
 then run Anvil in Tempo mode:
 

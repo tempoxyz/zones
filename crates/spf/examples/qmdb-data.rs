@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 key,
                 present: proof.value.is_some(),
                 proof_bytes: proof.proof.len(),
-                value_bytes: proof.value.as_ref().map_or(0, Bytes::len),
+                value_bytes: proof.value.as_ref().map_or(0, |value| value.len()),
                 verified,
             })
         })

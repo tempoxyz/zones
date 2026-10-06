@@ -176,12 +176,14 @@ mod tests {
             version: PROTOCOL_VERSION,
             request_id: "round-trip".into(),
             witness: empty_witness(),
+            qmdb_state_witness: None,
         };
         let sent_bytes = client.send(request).await.unwrap();
         let received: VerifyRequest = server.receive().await.unwrap().unwrap();
 
         assert_eq!(received.version, PROTOCOL_VERSION);
         assert_eq!(received.request_id, "round-trip");
+        assert!(received.qmdb_state_witness.is_none());
         assert_eq!(server.last_received_bytes(), Some(sent_bytes));
 
         let response = VerifyResponse::Error {
@@ -210,6 +212,7 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 request_id: "strict".into(),
                 witness: empty_witness(),
+                qmdb_state_witness: None,
             };
             let mut encoded = minicbor_serde::to_vec(&request).unwrap();
             assert_eq!(
@@ -225,6 +228,20 @@ mod tests {
                 Err(ProverConnectionError::CborDecode(_))
             ));
         }
+    }
+
+    #[test]
+    fn request_cbor_preserves_explicit_qmdb_history() {
+        let request = VerifyRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "qmdb".into(),
+            witness: empty_witness(),
+            qmdb_state_witness: Some(zone_spf::QmdbStateWitness::default()),
+        };
+        let encoded = minicbor_serde::to_vec(&request).unwrap();
+        assert_eq!(encoded[0], 0xa4);
+        let decoded: VerifyRequest = minicbor_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.qmdb_state_witness, request.qmdb_state_witness);
     }
 
     #[test]

@@ -12226,6 +12226,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempo-zone-qmdb"
+version = "0.3.4"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-genesis",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-signer",
+ "alloy-signer-local",
+ "clap",
+ "eyre",
+ "jsonrpsee",
+ "reth-chainspec",
+ "reth-evm",
+ "reth-trie-common",
+ "revm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tempo-precompiles",
+ "tempo-primitives",
+ "tempo-revm",
+ "tokio",
+ "zone-chainspec",
+ "zone-precompiles",
+ "zone-primitives",
+ "zone-spf",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"

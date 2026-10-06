@@ -12,7 +12,7 @@ use alloy_rlp::Decodable as _;
 use commonware_codec::{Decode as _, Encode as _};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Runner as _, deterministic};
+use commonware_runtime::{Runner as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable,
     merkle::full::Config as MerkleConfig,
@@ -29,29 +29,18 @@ use commonware_storage::{
     },
     translator::OneCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, buffer::paged::CacheRef};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use reth_trie_common::{EMPTY_ROOT_HASH, HashedPostState, Nibbles, TrieAccount, TrieNode};
+use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxEnvelope};
 
 use crate::{BatchOutput, BatchWitness, Error, SpfConfig, ZoneStateBackendWitness};
+
+pub use crate::{QmdbKey, QmdbMutation, QmdbStateWitness};
 
 type Database =
     Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, OneCap, 32, Sequential>;
 type Inclusion = KeyValueProof<mmr::Family, Digest, Digest, 32>;
 type Exclusion = ExclusionProof<mmr::Family, Digest, VariableEncoding<Vec<u8>>, Digest, 32>;
-
-/// A domain-separated flat state key. Both components use Ethereum's hashed keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(
-    feature = "serde",
-    serde(rename_all = "camelCase", deny_unknown_fields)
-)]
-pub struct QmdbKey {
-    /// Keccak-256 of the account address.
-    pub account: B256,
-    /// Keccak-256 of the 32-byte storage slot, or `None` for account metadata.
-    pub slot: Option<B256>,
-}
 
 impl QmdbKey {
     /// An account metadata key.
@@ -79,28 +68,6 @@ impl QmdbKey {
         }
         Digest::from(keccak256(encoded).0)
     }
-}
-
-/// One canonical mutation. Account values are RLP `TrieAccount`s with an empty
-/// storage root; storage values are nonzero, 32-byte, big-endian words.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
-pub struct QmdbMutation {
-    /// The state key.
-    pub key: QmdbKey,
-    /// New value, or `None` to remove the key.
-    pub value: Option<Bytes>,
-}
-
-/// Complete mutation history from an empty database, preserving commit boundaries.
-/// Each batch is strictly sorted by `QmdbKey`, without duplicate keys.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
-pub struct QmdbStateWitness {
-    /// Initial snapshot import followed by one mutation batch per Zone block.
-    pub batches: Vec<Vec<QmdbMutation>>,
 }
 
 /// A succinct read proof against the Current root, including absence proofs.
@@ -149,6 +116,50 @@ pub fn prove_qmdb_zone_batch(
     history: QmdbStateWitness,
 ) -> Result<BatchOutput, Error> {
     crate::prove_zone_batch_with_backend(config, witness, ZoneStateBackendWitness::Qmdb(history))
+        .map(|executed| executed.output)
+}
+
+/// Executed block artifacts, including Zone system transactions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReplayBlock {
+    pub header: TempoHeader,
+    pub transactions: Vec<TempoTxEnvelope>,
+    pub receipts: Vec<TempoReceipt>,
+    /// Revert/halt diagnostics for user transactions; system transactions are excluded.
+    pub user_execution_errors: Vec<Option<String>>,
+}
+
+/// Native execution artifacts for the experimental single-node QMDB test runner.
+#[derive(Debug, Clone)]
+pub struct QmdbReplay {
+    pub output: crate::BatchOutput,
+    pub blocks: Vec<ReplayBlock>,
+    pub history: QmdbStateWitness,
+    pub state_witness: crate::ZoneStateWitness,
+}
+
+/// Execute and return the updated state and blocks, using the same validation as the prover.
+pub fn execute_qmdb_zone_batch(
+    config: &SpfConfig,
+    witness: BatchWitness,
+    history: QmdbStateWitness,
+) -> Result<QmdbReplay, Error> {
+    let executed = crate::prove_zone_batch_with_backend(
+        config,
+        witness,
+        ZoneStateBackendWitness::Qmdb(history),
+    )?;
+    let (history, state_witness) = executed
+        .database
+        .qmdb_witness()
+        .expect("QMDB execution always returns a QMDB database");
+    Ok(QmdbReplay {
+        output: executed.output,
+        blocks: executed.blocks,
+        history,
+        state_witness,
+    })
 }
 
 /// Compute the Current QMDB root, including operation activity, not only the ops root.
@@ -367,6 +378,10 @@ impl QmdbState {
             .values
             .get(&QmdbKey::storage(address, slot))
             .map_or(U256::ZERO, |value| U256::from_be_slice(value)))
+    }
+
+    pub(crate) fn witness(&self) -> &QmdbStateWitness {
+        &self.witness
     }
 
     pub(crate) fn apply_state(

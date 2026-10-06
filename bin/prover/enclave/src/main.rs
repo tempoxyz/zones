@@ -361,7 +361,25 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
     let config = SpfConfig::new(Arc::new(zone_spec));
 
     let public_inputs = request.witness.public_inputs.clone();
-    match prove_zone_batch(&config, request.witness) {
+    let result = if let Some(history) = request.qmdb_state_witness {
+        #[cfg(feature = "qmdb")]
+        {
+            zone_spf::qmdb::prove_qmdb_zone_batch(&config, request.witness, history)
+        }
+        #[cfg(not(feature = "qmdb"))]
+        {
+            let _ = history;
+            return VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                code: ErrorCode::VerificationFailed,
+                message: "QMDB replay is not enabled in this prover build".into(),
+            };
+        }
+    } else {
+        prove_zone_batch(&config, request.witness)
+    };
+    match result {
         Ok(output) => match build_proof_bundle(&public_inputs, &output, |digest| {
             nitro_attestation(digest.as_slice(), None)
         }) {
@@ -455,6 +473,7 @@ mod tests {
             version: PROTOCOL_VERSION + 1,
             request_id: "version-test".into(),
             witness: empty_witness(),
+            qmdb_state_witness: None,
         };
         let response = process_request(request, &TrustedChainSpecs::default());
 
@@ -476,6 +495,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             request_id: "chain-test".into(),
             witness,
+            qmdb_state_witness: None,
         };
         let response = process_request(request, &TrustedChainSpecs::default());
 
@@ -540,6 +560,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             request_id: "spf-test".into(),
             witness: empty_witness(),
+            qmdb_state_witness: None,
         };
         let response = process_request(request, &TrustedChainSpecs::default());
 
@@ -566,6 +587,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             request_id: "custom-chain-test".into(),
             witness: empty_witness(),
+            qmdb_state_witness: None,
         };
 
         let response = process_request(request, &specs);
@@ -577,6 +599,58 @@ mod tests {
                 code: ErrorCode::VerificationFailed,
                 ..
             } if id == "custom-chain-test"
+        ));
+    }
+
+    #[cfg(not(feature = "qmdb"))]
+    #[test]
+    fn rejects_qmdb_requests_without_backend_support() {
+        let request = VerifyRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "qmdb-disabled".into(),
+            witness: empty_witness(),
+            qmdb_state_witness: Some(zone_spf::QmdbStateWitness::default()),
+        };
+        assert!(matches!(
+            process_request(request, &TrustedChainSpecs::default()),
+            VerifyResponse::Error { code: ErrorCode::VerificationFailed, message, .. }
+                if message == "QMDB replay is not enabled in this prover build"
+        ));
+    }
+
+    #[cfg(feature = "qmdb")]
+    #[test]
+    fn dispatches_qmdb_requests_to_root_bound_replay() {
+        let history = zone_spf::QmdbStateWitness::default();
+        let mut witness = empty_witness();
+        witness.zone_blocks.push(zone_spf::ZoneBlock {
+            number: 1,
+            parent_hash: B256::ZERO,
+            timestamp: 0,
+            timestamp_millis_part: 0,
+            beneficiary: alloy_primitives::Address::ZERO,
+            tempo_import: zone_spf::TempoImport::CheckpointOnly {
+                headers_rlp: Vec::new(),
+            },
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        });
+        let expected = zone_spf::qmdb::QmdbError::RootMismatch {
+            expected: witness.parent_header.inner.state_root,
+            actual: zone_spf::qmdb::state_root(&history).unwrap(),
+        }
+        .to_string();
+        let request = VerifyRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "qmdb-root".into(),
+            witness,
+            qmdb_state_witness: Some(history),
+        };
+        assert!(matches!(
+            process_request(request, &TrustedChainSpecs::default()),
+            VerifyResponse::Error { code: ErrorCode::VerificationFailed, message, .. }
+                if message == expected
         ));
     }
 

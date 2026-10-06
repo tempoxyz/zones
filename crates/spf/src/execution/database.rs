@@ -127,7 +127,29 @@ impl WitnessDatabase {
             }
         }
 
+        // Newly deployed bytecode must survive the next block and node restart.
+        self.code_by_hash.extend(bundle_state.contracts);
+
         Ok(state_root)
+    }
+
+    #[cfg(feature = "qmdb")]
+    pub(crate) fn qmdb_witness(&self) -> Option<(crate::QmdbStateWitness, ZoneStateWitness)> {
+        let WitnessState::Qmdb(state) = &self.state else {
+            return None;
+        };
+        let mut bytecodes = self.code_by_hash.iter().collect::<Vec<_>>();
+        bytecodes.sort_unstable_by_key(|(hash, _)| **hash);
+        Some((
+            state.witness().clone(),
+            ZoneStateWitness {
+                node_pool: Vec::new(),
+                bytecodes: bytecodes
+                    .into_iter()
+                    .map(|(_, code)| code.original_bytes())
+                    .collect(),
+            },
+        ))
     }
 }
 

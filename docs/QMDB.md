@@ -2,8 +2,14 @@
 
 This draft adds an opt-in Commonware **Current, ordered, variable-value QMDB**
 backend to the Zone stateless proof function. It does not switch a running Zone
-node, the production prover protocol, or settlement to QMDB. MPT remains the default.
+node or settlement to QMDB. MPT remains the default; the prover request has an
+optional experimental QMDB history field.
 The QMDB implementation matches the workspace's Commonware `2026.9.0` version.
+
+For an isolated runnable single-node Zone using the real executor, QMDB roots,
+signed transactions, RPC, restart and proof replay, see [QMDB-TESTNET.md](QMDB-TESTNET.md).
+That runner uses a mock Tempo L1 and a full-history journal, not the production
+node's storage/provider integration.
 
 ## Execution and commitments
 
@@ -16,6 +22,10 @@ The QMDB parent header must contain a **trusted QMDB pre-state root**. Existing
 MPT parent headers cannot be passed unchanged. The resulting Zone headers have
 different hashes, so successors and settlement commitments must also be rebuilt.
 This API is an ordinary Rust SPF, not a new zk circuit or a deployed Nitro image.
+The enclave service can opt in at build time with its `qmdb` feature. An explicit
+`qmdbStateWitness` request selects QMDB replay; builds without support reject it
+instead of silently using MPT. MPT requests omit the field and preserve the prior
+three-field CBOR encoding. The normal sequencer continues sending MPT requests.
 
 The initial witness contains the complete unpruned semantic mutation history,
 preserving batch boundaries. Its first batch imports a checkpoint; subsequent
@@ -72,6 +82,10 @@ The demo explicitly labels its synthetic input: 256 accounts with eight storage
 slots each. It emits the Current root, full-history JSON size, encoded inclusion
 and exclusion proof sizes, and verification results. Its wall-clock root time
 includes reconstruction and is not a production benchmark or an MPT comparison.
+The measured development-build run in `qmdb-synthetic-sample.json` has 2,304 rows,
+561,933 bytes of full-history JSON, 519-byte inclusion proofs and 584–585-byte
+exclusion proofs. All four sampled proofs verified. These sizes do not include
+the separate inclusion value, framing, attestation or an authenticated update proof.
 
 For an externally authenticated complete MPT snapshot, supply JSON with
 `stateRoot`, `state` (the hex RLP nodes) and `readKeys` (hashed account/slot pairs):
@@ -91,6 +105,20 @@ cargo run -p zone-spf --features qmdb --example qmdb-data -- \
 pool and the necessary bytecode preimages. `history.json` is `QmdbStateWitness`.
 The supplied genesis is verifier-selected configuration, not prover-controlled
 configuration. Do not patch an old MPT batch's roots and call that a verified replay.
+
+For the existing attested service transport, build the enclave binary with
+`--features qmdb`, approve its new measurements in the normal attestation policy,
+and use the saved QMDB-rooted batch plus complete history:
+
+```sh
+cargo run -p tempo-zone-prover-utils -- prove \
+  --input batch.json --qmdb-history history.json \
+  --target "$PROVER_TARGET" --attestation-policy qmdb-measurements.json \
+  --output qmdb-proof.json
+```
+
+Only the replay/dispatch and wire paths are tested locally. No live Nitro image,
+NSM attestation or on-chain QMDB settlement was exercised for this draft.
 
 ## Live baseline and access gap
 
@@ -116,8 +144,8 @@ replay; a complete checkpoint is additionally required for safe root migration.
 Before a Zone can actually run QMDB instead of MPT, integrate a persistent database
 with payload construction, execution validation, genesis, historical state queries,
 reorg/rewind, snapshot/state sync, RPC proof schemas and witness generation. Specify
-the activation checkpoint and update the prover request/policy and node consensus
-together. Replace full-history reconstruction with an authenticated update witness,
+the activation checkpoint, finalize the QMDB witness/attestation policy and update
+node consensus together. Replace full-history reconstruction with an authenticated update witness,
 then compare live workloads with MPT using matching hardware and checkpoint data.
 The draft deliberately leaves those paths unchanged rather than producing QMDB
 headers from a node whose verifier and historical state remain MPT-only.
