@@ -3,7 +3,7 @@ use alloy_sol_types::{SolStruct as _, sol};
 use keccak_const::Keccak256;
 use serde::{Deserialize, Serialize};
 use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
-use zone_spf::{BatchOutput, BatchWitness, PublicInputs};
+use zone_spf::{BatchOutput, BatchWitness, PublicInputs, QmdbStateWitness};
 
 /// Current version of the prover request and response wire format.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -150,6 +150,10 @@ pub struct VerifyRequest {
     pub request_id: String,
     /// Complete input to the Zone stateless proof function.
     pub witness: BatchWitness,
+    /// Experimental QMDB history. Absent requests retain the MPT wire format.
+    /// Provers without the QMDB feature reject QMDB replay rather than downgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qmdb_state_witness: Option<QmdbStateWitness>,
 }
 
 /// Result of processing a [`VerifyRequest`].

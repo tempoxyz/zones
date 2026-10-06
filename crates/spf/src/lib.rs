@@ -27,6 +27,9 @@ pub use execution::database::{TempoWitnessDatabase, WitnessDatabase, WitnessData
 pub use mpt::StatelessSparseTrieError;
 pub use types::*;
 
+#[cfg(feature = "qmdb")]
+pub mod qmdb;
+
 /// Execute a Zone batch witness and return its public commitments.
 ///
 /// `config` is trusted network configuration chosen by the verifier. Every
@@ -34,6 +37,29 @@ pub use types::*;
 /// execution. The prover launches with TIP-1096, so every batch must end at a full
 /// block's withdrawal finalization boundary.
 pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<BatchOutput, Error> {
+    prove_zone_batch_with_backend(config, witness, ZoneStateBackendWitness::Mpt)
+        .map(|executed| executed.output)
+}
+
+struct BatchExecution {
+    output: BatchOutput,
+    #[cfg(feature = "qmdb")]
+    blocks: Vec<qmdb::ReplayBlock>,
+    #[cfg(feature = "qmdb")]
+    database: WitnessDatabase,
+}
+
+enum ZoneStateBackendWitness {
+    Mpt,
+    #[cfg(feature = "qmdb")]
+    Qmdb(qmdb::QmdbStateWitness),
+}
+
+fn prove_zone_batch_with_backend(
+    config: &SpfConfig,
+    witness: BatchWitness,
+    backend: ZoneStateBackendWitness,
+) -> Result<BatchExecution, Error> {
     // The parent header is the committed starting point for this batch. Its
     // hash binds the witness to the previously submitted Zone block, and its
     // state root selects the initial Zone state.
@@ -55,10 +81,18 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // The Zone database is backed by the parent state root and the supplied
     // trie nodes. Reads performed during execution are therefore limited to
     // state proven by the witness, while writes remain in REVM's overlay.
-    let zone_database = WitnessDatabase::from_zone_state_witness(
-        witness.zone_state_witness,
-        witness.parent_header.state_root(),
-    )?;
+    let zone_database = match backend {
+        ZoneStateBackendWitness::Mpt => WitnessDatabase::from_zone_state_witness(
+            witness.zone_state_witness,
+            witness.parent_header.state_root(),
+        )?,
+        #[cfg(feature = "qmdb")]
+        ZoneStateBackendWitness::Qmdb(history) => WitnessDatabase::from_qmdb_state_witness(
+            history,
+            witness.zone_state_witness,
+            witness.parent_header.state_root(),
+        )?,
+    };
     let mut zone_state = State::builder()
         .with_database(zone_database)
         .with_bundle_update()
@@ -126,6 +160,8 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         initial_parent_hash
     };
     let mut previous_header = witness.parent_header.clone();
+    #[cfg(feature = "qmdb")]
+    let mut replayed_blocks = Vec::new();
     for (block_index, block) in witness.zone_blocks.iter().enumerate() {
         let expected_parent_hash = previous_header.hash_slow();
         if block.parent_hash != expected_parent_hash {
@@ -194,6 +230,10 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             config.chain_spec().inner.clone(),
         );
         let sealed_parent = SealedHeader::new_unhashed(previous_header.clone());
+        #[cfg(feature = "qmdb")]
+        let transactions = executed_block.transactions.clone();
+        #[cfg(feature = "qmdb")]
+        let receipts = executed_block.output.receipts.clone();
         let assembled = TempoBlockAssembler::new(config.chain_spec().inner.clone())
             .assemble_block(
                 BlockAssemblerInput::<TempoEvmConfig, TempoHeader>::new(
@@ -213,6 +253,13 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             )
             .map_err(|_| Error::BlockAssembly { block_index })?;
         previous_header = assembled.header;
+        #[cfg(feature = "qmdb")]
+        replayed_blocks.push(qmdb::ReplayBlock {
+            header: previous_header.clone(),
+            transactions,
+            receipts,
+            user_execution_errors: executed_block.user_execution_errors,
+        });
     }
 
     // These reads see the final execution overlay rather than just the parent
@@ -295,25 +342,31 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             actual: withdrawal_batch_index,
         });
     }
-    Ok(BatchOutput {
-        next_zone_height: previous_header.number(),
-        block_transition: BlockTransition {
-            prevBlockHash: output_parent_hash,
-            nextBlockHash: previous_header.hash_slow(),
-        },
-        deposit_queue_transition: DepositQueueTransition {
-            prevProcessedHash: previous_processed_hash,
-            nextProcessedHash: next_processed_hash,
-            prevDepositNumber: previous_processed_number,
-            nextDepositNumber: next_processed_number,
-        },
-        token_enablement_transition: TokenEnablementTransition {
-            prevProcessedTokenCount: previous_processed_token_count,
-            nextProcessedTokenCount: next_processed_token_count,
-        },
-        withdrawal_queue_hash,
-        last_batch_commitment: LastBatchCommitment {
-            withdrawal_batch_index,
+    Ok(BatchExecution {
+        #[cfg(feature = "qmdb")]
+        blocks: replayed_blocks,
+        #[cfg(feature = "qmdb")]
+        database: zone_state.database,
+        output: BatchOutput {
+            next_zone_height: previous_header.number(),
+            block_transition: BlockTransition {
+                prevBlockHash: output_parent_hash,
+                nextBlockHash: previous_header.hash_slow(),
+            },
+            deposit_queue_transition: DepositQueueTransition {
+                prevProcessedHash: previous_processed_hash,
+                nextProcessedHash: next_processed_hash,
+                prevDepositNumber: previous_processed_number,
+                nextDepositNumber: next_processed_number,
+            },
+            token_enablement_transition: TokenEnablementTransition {
+                prevProcessedTokenCount: previous_processed_token_count,
+                nextProcessedTokenCount: next_processed_token_count,
+            },
+            withdrawal_queue_hash,
+            last_batch_commitment: LastBatchCommitment {
+                withdrawal_batch_index,
+            },
         },
     })
 }

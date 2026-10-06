@@ -213,3 +213,39 @@ pub struct BatchOutput {
 pub struct LastBatchCommitment {
     pub withdrawal_batch_index: u64,
 }
+
+/// A domain-separated flat QMDB state key, retaining Ethereum's hashed keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
+pub struct QmdbKey {
+    /// Keccak-256 of the account address.
+    pub account: B256,
+    /// Keccak-256 of the 32-byte slot, or `None` for account metadata.
+    pub slot: Option<B256>,
+}
+
+/// One canonical QMDB mutation. Account values are RLP `TrieAccount`s with an
+/// empty storage root; storage values are nonzero, 32-byte, big-endian words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
+pub struct QmdbMutation {
+    /// The state key.
+    pub key: QmdbKey,
+    /// New value, or `None` to remove the key.
+    pub value: Option<Bytes>,
+}
+
+/// Complete QMDB mutation history from an empty database, preserving commit
+/// boundaries. Each batch is strictly sorted by `QmdbKey`, without duplicates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
+pub struct QmdbStateWitness {
+    /// Initial snapshot import followed by one mutation batch per Zone block.
+    pub batches: Vec<Vec<QmdbMutation>>,
+}
