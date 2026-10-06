@@ -337,8 +337,16 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
         .wrap_err_with(|| {
             format!("failed to read Zone ID from portal {portal} at block {finalized_block}")
         })?;
-    let creation_block =
-        find_zone_deployment_block(provider, zone_id, portal, finalized_block).await?;
+    // A known creation block bounds the scan; the code checks below still prove that the
+    // portal was deployed in exactly that block.
+    let creation_block = find_zone_deployment_block(
+        provider,
+        zone_id,
+        portal,
+        expected_creation_block.unwrap_or(0),
+        finalized_block,
+    )
+    .await?;
     if let Some(expected) = expected_creation_block {
         ensure!(
             creation_block == expected,

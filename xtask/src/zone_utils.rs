@@ -58,17 +58,23 @@ const DEFAULT_WAIT_ATTEMPTS: usize = 120;
 const DEFAULT_WAIT_POLL: Duration = Duration::from_millis(500);
 const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
 
+/// Finds the block of the single ZoneCreated event for `zone_id` and `portal` in
+/// `from_block..=snapshot_block`.
+///
+/// Pass `0` when the creation block is unknown. Scanning from genesis issues one log query
+/// per 5,000 blocks, so callers that already know the creation block should start there.
 pub(crate) async fn find_zone_deployment_block<P: Provider<TempoNetwork>>(
     provider: &P,
     zone_id: u32,
     portal: Address,
+    from_block: u64,
     snapshot_block: u64,
 ) -> eyre::Result<u64> {
     let events = ZoneFactory::new(ZONE_FACTORY_ADDRESS, provider)
         .ZoneCreated_filter()
         .topic1(U256::from(zone_id))
         .topic2(portal)
-        .from_block(0)
+        .from_block(from_block)
         .to_block(snapshot_block)
         .chunked()
         .chunk_size(LOG_QUERY_BLOCK_CHUNK)
