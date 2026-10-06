@@ -44,6 +44,7 @@ import { ZonePortal } from "../../src/runtime/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { PortalRuntimeTest } from "../PortalRuntimeTest.sol";
 import { MockRevertingReceiver } from "../mocks/MockCallbackReceivers.sol";
+import { MockVerifier } from "../mocks/MockVerifier.sol";
 import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/MockZoneGateway.sol";
 import { Vm } from "forge-std/Vm.sol";
 
@@ -2999,6 +3000,36 @@ contract ZonePortalTest is BaseTest {
             "",
             ""
         );
+    }
+
+    function test_submitBatch_allowsVerifierToEmitEvents() public {
+        // An emitting verifier reverts under STATICCALL, so this pins a regular CALL.
+        vm.etch(ZONE_VERIFIER_ADDRESS, address(new MockVerifier()).code);
+        vm.store(ZONE_VERIFIER_ADDRESS, bytes32(0), bytes32(uint256(1)));
+
+        // Advance a block so the history precompile can return a hash
+        vm.roll(block.number + 1);
+
+        vm.expectEmit(ZONE_VERIFIER_ADDRESS);
+        emit MockVerifier.Verified();
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: bytes32(0),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+            bytes32(0),
+            "",
+            ""
+        );
+        assertEq(portal.withdrawalBatchIndex(), 1);
     }
 
     function test_submitBatch_revertsOnInvalidProof() public {
