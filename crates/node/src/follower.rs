@@ -7,6 +7,7 @@ use alloy_rlp::Decodable as _;
 use alloy_rpc_types_engine::ForkchoiceState;
 use alloy_sol_types::SolCall as _;
 use eyre::{OptionExt as _, WrapErr as _};
+use reth_consensus_common::validation::validate_body_against_header;
 use reth_node_api::{ConsensusEngineHandle, PayloadTypes as _};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use reth_provider::HeaderProvider;
@@ -468,7 +469,15 @@ where
             }
             return true;
         }
-        if let Err(err) = validate_peer_block_body(&peer_block.block.block) {
+        let block = &peer_block.block.block;
+        if let Err(err) =
+            validate_body_against_header(block.body(), block.header()).map_err(|err| {
+                eyre::eyre!(
+                    "zone block body does not match hashed header {}: {err}",
+                    block.hash()
+                )
+            })
+        {
             tracing::error!(target: "zone::p2p", %err, "Rejected peer block before buffering");
             self.backfill.needed = true;
             return true;
@@ -539,7 +548,12 @@ where
             if existing.hash() == hash {
                 // This path bypasses `new_payload`, so verify the peer-supplied body against the
                 // canonical header before deriving queue mutations from it.
-                validate_peer_block_body(&block)?;
+                validate_body_against_header(block.body(), block.header()).map_err(|err| {
+                    eyre::eyre!(
+                        "zone block body does not match hashed header {}: {err}",
+                        block.hash()
+                    )
+                })?;
                 let tempo_import = decode_advance_tempo(&block)?;
                 reconcile_canonical_import(&self.context.deposit_queue, &tempo_import)
                     .wrap_err_with(|| {
@@ -721,16 +735,6 @@ where
         info!(target: "zone::p2p", block_number, ?hash, "Imported canonical peer block");
         Ok(PeerBlockImportOutcome::Imported)
     }
-}
-
-fn validate_peer_block_body(block: &SealedBlock<Block>) -> eyre::Result<()> {
-    reth_consensus_common::validation::validate_body_against_header(block.body(), block.header())
-        .map_err(|err| {
-            eyre::eyre!(
-                "zone block body does not match hashed header {}: {err}",
-                block.hash()
-            )
-        })
 }
 
 fn head_advanced(previous: Option<u64>, current: Option<u64>) -> bool {
@@ -1653,7 +1657,7 @@ mod tests {
             ..Default::default()
         };
         let block = decode_peer_block(&alloy_rlp::encode(Block { header, body })).unwrap();
-        validate_peer_block_body(&block.block).unwrap();
+        validate_body_against_header(block.block.body(), block.block.header()).unwrap();
         let mut pending = PendingBlocks::default();
         assert_eq!(
             pending.insert(
@@ -1713,14 +1717,16 @@ mod tests {
         };
         let valid = Block { header, body };
         let received = decode_peer_block(&alloy_rlp::encode(&valid)).unwrap();
-        validate_peer_block_body(&received.block).unwrap();
+        validate_body_against_header(received.block.body(), received.block.header()).unwrap();
         let valid_hash = received.block.hash();
 
         let mut mismatched = valid;
         mismatched.body.withdrawals = None;
         let received = decode_peer_block(&alloy_rlp::encode(&mismatched)).unwrap();
         assert_eq!(received.block.hash(), valid_hash);
-        assert!(validate_peer_block_body(&received.block).is_err());
+        assert!(
+            validate_body_against_header(received.block.body(), received.block.header()).is_err()
+        );
     }
     #[test]
     fn full_import_validates_deferred_and_current_portal_events() {
