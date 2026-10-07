@@ -231,10 +231,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     let l1 = L1TestNode::start().await?;
 
     // --- Step 2: Create AlphaUSD on L1 ---
-    let alpha_salt = B256::new([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 99,
-    ]);
+    let alpha_salt = B256::with_last_byte(0x63);
     let l1_alpha_usd = l1.create_tip20("AlphaUSD", "aUSD", alpha_salt).await?;
 
     // --- Step 3: Mint AlphaUSD to the dev account ---

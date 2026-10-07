@@ -1369,7 +1369,7 @@ mod tests {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
         let mint = transfer(token, Address::ZERO, recipient, U256::from(10));
-        let unrelated = transfer(token, recipient, Address::repeat_byte(3), U256::from(1));
+        let unrelated = transfer(token, recipient, Address::repeat_byte(3), U256::ONE);
         let outcome = ReceiptEvent::Action(L2BridgeAction::Deposit {
             token,
             amount: U256::from(10),
@@ -1500,7 +1500,7 @@ mod tests {
         events.push(ReceiptEvent::Action(L2BridgeAction::RefundClaimed {
             recipient: sender,
             token,
-            amount: U256::from(1),
+            amount: U256::ONE,
         }));
         events.push(withdrawal(token, sender, 100, 0));
 

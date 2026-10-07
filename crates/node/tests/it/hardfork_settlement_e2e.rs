@@ -8,7 +8,6 @@ use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rlp::Decodable;
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
-use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolError};
 use reth_chainspec::EthChainSpec;
 use tempo_alloy::TempoNetwork;
@@ -34,8 +33,8 @@ use zone_spf::{
 };
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, L1TestNode, TEST_MNEMONIC, TcpChaosProxy, ZoneAccount, ZoneTestNode, now_secs,
-    poll_until,
+    DEFAULT_TIMEOUT, L1TestNode, TcpChaosProxy, ZoneAccount, ZoneTestNode, now_secs, poll_until,
+    signer_at,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -126,7 +125,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     .await;
     proxy.pause_upstream_to_client(true);
     let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(alloy_network::EthereumWallet::from(l1.dev_signer()))
+        .wallet(l1.dev_signer())
         .connect_http(l1.http_url().clone())
         .erased();
     let submitter = BatchSubmitter::with_signer_and_anchor_config(
@@ -349,15 +348,9 @@ fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result
         ZoneFactory, ZoneInfoStorageHandler, ZonePortalStorage, slots,
     };
 
-    let signer_at = |index| {
-        MnemonicBuilder::<English>::default()
-            .phrase(TEST_MNEMONIC)
-            .index(index)?
-            .build()
-    };
-    let signer = signer_at(0)?;
-    let admin = signer_at(2)?.address();
-    let user = signer_at(1)?.address();
+    let signer = signer_at(0);
+    let admin = signer_at(2).address();
+    let user = signer_at(1).address();
     set_tempo_fork(genesis, TempoHardfork::T13, activation);
     for account in initial_zone_factory_state(signer.address()) {
         genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
@@ -560,7 +553,7 @@ async fn recovery_witness(
             anchor_block_hash: alloy_consensus::Sealable::hash_slow(&final_header),
             expected_withdrawal_batch_index: 3,
         },
-        parent_header: parent.header.as_ref().clone(),
+        parent_header: parent.header.inner.into_consensus(),
         zone_blocks: blocks,
         zone_state_witness: ZoneStateWitness {
             node_pool: zone_nodes.into_values().collect(),

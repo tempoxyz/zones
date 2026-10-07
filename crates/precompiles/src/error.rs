@@ -75,11 +75,11 @@ mod tests {
             ),
             (
                 ZoneOutboxError::InvalidWithdrawalCount(IZoneOutbox::InvalidWithdrawalCount {
-                    actual: U256::from(1),
+                    actual: U256::ONE,
                     expected: U256::from(2),
                 }),
                 IZoneOutbox::InvalidWithdrawalCount {
-                    actual: U256::from(1),
+                    actual: U256::ONE,
                     expected: U256::from(2),
                 }
                 .abi_encode(),

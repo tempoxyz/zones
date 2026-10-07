@@ -5,7 +5,7 @@
 //! same block.
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
+    network::primitives::ReceiptResponse,
     primitives::{Address, B256, Bytes, TxKind, U256},
     providers::{Provider, ProviderBuilder},
     signers::{SignerSync, local::PrivateKeySigner},
@@ -16,12 +16,12 @@ use eyre::{Context as _, eyre};
 use std::{collections::BTreeMap, num::NonZeroU64, time::Instant};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20;
-use tempo_primitives::{
-    TempoSignature,
-    transaction::{Call, PrimitiveSignature},
-};
+use tempo_precompiles::PATH_USD_ADDRESS;
+use tempo_primitives::transaction::Call;
 use tempo_zone_contracts::ZonePortal;
 use zone_precompiles::ecies::encrypt_deposit;
+
+use crate::zone_utils::parse_private_key;
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct SpamDeposits {
@@ -50,7 +50,7 @@ pub(crate) struct SpamDeposits {
     amount: u128,
 
     /// TIP-20 token address to deposit.
-    #[arg(long, default_value = "0x20C0000000000000000000000000000000000000")]
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     token: Address,
 
     /// Seconds into the future for the valid_after timestamp.
@@ -67,15 +67,10 @@ impl SpamDeposits {
         let start = Instant::now();
 
         // Parse whale key & create provider
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let whale: PrivateKeySigner = key_str.parse()?;
+        let whale = parse_private_key(&self.private_key)?;
         let whale_addr = whale.address();
-        let wallet = EthereumWallet::from(whale);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(whale)
             .connect(&self.l1_rpc_url)
             .await?;
 
@@ -121,9 +116,8 @@ impl SpamDeposits {
 
         println!("Approving portal for all signers...");
         for (i, signer) in signers.iter().enumerate() {
-            let w = EthereumWallet::from(signer.clone());
             let p = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .wallet(w)
+                .wallet(signer.clone())
                 .connect(&self.l1_rpc_url)
                 .await?;
             let token = ITIP20::new(self.token, &p);
@@ -207,9 +201,7 @@ impl SpamDeposits {
 
                 let sig_hash = tx.signature_hash();
                 let sig = signer.sign_hash_sync(&sig_hash)?;
-                let tempo_sig = TempoSignature::Primitive(PrimitiveSignature::Secp256k1(sig));
-                let signed = tx.into_signed(tempo_sig);
-                encoded_txs.push(signed.encoded_2718());
+                encoded_txs.push(tx.into_signed(sig.into()).encoded_2718());
             }
 
             // Send all deposits concurrently (returns receipts directly)

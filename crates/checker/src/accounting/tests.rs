@@ -42,11 +42,11 @@ fn applies_transfers_exactly() {
         .apply(&[
             Effect::Account {
                 key: alice,
-                change: BalanceChange::Debit(U256::from(1)),
+                change: BalanceChange::Debit(U256::ONE),
             },
             Effect::Account {
                 key: bob,
-                change: BalanceChange::Credit(U256::from(1)),
+                change: BalanceChange::Credit(U256::ONE),
             },
         ])
         .unwrap();
@@ -55,8 +55,8 @@ fn applies_transfers_exactly() {
             token,
             U256::MAX,
             &[
-                (alice.account, U256::MAX - U256::from(1)),
-                (bob.account, U256::from(1)),
+                (alice.account, U256::MAX - U256::ONE),
+                (bob.account, U256::ONE),
             ],
         )])
         .unwrap();
@@ -178,7 +178,7 @@ fn rejects_unbacked_debits_without_mutating_state() {
     assert_eq!(
         state.apply(&[Effect::Account {
             key,
-            change: BalanceChange::Debit(U256::from(1)),
+            change: BalanceChange::Debit(U256::ONE),
         }]),
         Err(AccountingError::Underflow)
     );
@@ -263,12 +263,12 @@ fn rejects_unknown_token_changes_without_mutating_state() {
     let effects = [
         Effect::Account {
             key: AccountKey::new(token, address(2)),
-            change: BalanceChange::Credit(U256::from(1)),
+            change: BalanceChange::Credit(U256::ONE),
         },
         Effect::Liability {
             token,
             kind: LiabilityKind::Deposit,
-            change: BalanceChange::Credit(U256::from(1)),
+            change: BalanceChange::Credit(U256::ONE),
         },
     ];
 
@@ -288,7 +288,7 @@ fn rejects_account_rows_for_unknown_tokens() {
     let key = AccountKey::new(token, address(2));
 
     assert_eq!(
-        State::from_rows([(key, U256::from(1))], []),
+        State::from_rows([(key, U256::ONE)], []),
         Err(AccountingError::UnknownToken { token })
     );
 }
@@ -303,11 +303,11 @@ fn retains_enabled_token_after_balance_returns_to_zero() {
         .apply(&[
             Effect::Account {
                 key,
-                change: BalanceChange::Credit(U256::from(1)),
+                change: BalanceChange::Credit(U256::ONE),
             },
             Effect::Account {
                 key,
-                change: BalanceChange::Debit(U256::from(1)),
+                change: BalanceChange::Debit(U256::ONE),
             },
         ])
         .unwrap();

@@ -104,14 +104,14 @@ impl VerifyClosedLoop {
             .await
             .wrap_err("failed resolving Zone through ZoneFactory")?;
         ensure!(
-            zone.portal != Address::ZERO,
+            !zone.portal.is_zero(),
             "router targets unknown Zone {zone_id}"
         );
         ensure_has_code(&provider, zone.portal, "ZonePortal", snapshot_block_id).await?;
         ensure_has_code(&provider, earn_vault, "EarnVault", snapshot_block_id).await?;
 
         let deployment_block =
-            find_zone_deployment_block(&provider, zone_id, zone.portal, snapshot_block).await?;
+            find_zone_deployment_block(&provider, zone_id, zone.portal, 0, snapshot_block).await?;
         let portal = ZonePortal::new(zone.portal, &provider);
         let portal_admin = portal
             .admin()
@@ -148,7 +148,7 @@ impl VerifyClosedLoop {
                 .call()
                 .await
             {
-                Ok(threshold) if threshold <= U256::from(1) => println!(
+                Ok(threshold) if threshold <= U256::ONE => println!(
                     "  WARNING: admin contract reports a low Safe-compatible threshold \
                      ({threshold}; expected greater than 1)"
                 ),
@@ -335,7 +335,7 @@ async fn ensure_has_code<P: Provider<TempoNetwork>>(
     label: &str,
     block_id: BlockId,
 ) -> eyre::Result<()> {
-    ensure!(address != Address::ZERO, "{label} address is zero");
+    ensure!(!address.is_zero(), "{label} address is zero");
     ensure!(
         !provider
             .get_code_at(address)

@@ -205,6 +205,50 @@ ZONE_FACTORY_OWNER_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- create-zone 
 available for admin-only portal calls such as changing either mode or account roles,
 enabling tokens, and pausing or resuming deposits.
 
+#### Safe-owned ZoneFactory
+
+When the ZoneFactory owner is a Safe (as on mainnet), creation takes two runs of the same
+command. First, replace `ZONE_FACTORY_OWNER_KEY` with `--safe-address` and `--safe-output`:
+
+```bash
+unset ZONE_FACTORY_OWNER_KEY
+cargo run -p tempo-xtask -- create-zone \
+  --output generated/my-zone \
+  --l1-rpc-url https://rpc.tempo.xyz \
+  --zone-factory 0x5aF2000000000000000000000000000000000000 \
+  --initial-token 0x20c0000000000000000000000000000000000000 \
+  --admin "$ADMIN_ADDR" \
+  --threshold 2 \
+  --sequencer "$SEQUENCER_1" --sequencer "$SEQUENCER_2" --sequencer "$SEQUENCER_3" \
+  --safe-address 0x<factory-owner-safe> \
+  --safe-output create-zone.json
+```
+
+This run never signs or broadcasts. It requires the Safe to be the current ZoneFactory owner
+and to report a nonzero `getThreshold()`, simulates `createZone` from the Safe, and writes an
+unsigned Transaction Builder file. It refuses to overwrite an existing output file. The initial
+token must already have a TIP-403 transfer policy binding; `migrateTransferPolicyIds` is
+permissionless, so any funded account can migrate a legacy token first.
+
+Import the file in Safe's Transaction Builder, check the calldata printed by the command
+against what signers see, collect approvals, and execute. `genesis.json` and `zone.json` are
+not written yet, because the zone ID, portal, and genesis anchor block only exist once the
+transaction executes. After execution, rerun the same command with the execution transaction
+hash in place of the Safe options (the first run prints this command):
+
+```bash
+cargo run -p tempo-xtask -- create-zone \
+  --output generated/my-zone \
+  ...same zone arguments... \
+  --creation-tx 0x<execution-tx-hash>
+```
+
+`--creation-tx` works for any already-mined `createZone` transaction, including a direct-key
+run that was interrupted before genesis was written. It requires exactly one `ZoneCreated`
+event from `--zone-factory` and fails unless its initial token, modes, admin, sequencers, and
+threshold match the arguments. Allowed accounts, gateways, and the RPC URL are not in that
+event, so pass the same values as the proposal for an accurate `zone.json`.
+
 ### Updating closed-loop access
 
 Configure memberships before enabling their corresponding enforcement mode so existing
@@ -220,6 +264,34 @@ just set-gateway 0x<gateway> true
 just set-access-mode true
 just set-gateway-mode true
 ```
+
+If the portal admin is a Safe, have `tempo-xtask` simulate each call from the Safe and
+create an unsigned Safe Transaction Builder file instead of setting `ADMIN_KEY`:
+
+```bash
+export L1_RPC_URL=https://...
+export L1_PORTAL_ADDRESS=0x<portal>
+export SAFE_ADDRESS=0x<safe>
+unset ADMIN_KEY
+
+cargo run -p tempo-xtask -- set-allowed-account 0x<account> --allowed \
+  --safe-address "$SAFE_ADDRESS" \
+  --safe-output allow-account.json
+
+cargo run -p tempo-xtask -- set-gateway 0x<gateway> --allowed \
+  --safe-address "$SAFE_ADDRESS" \
+  --safe-output allow-gateway.json
+```
+
+Import each JSON file in Safe's Transaction Builder, collect the configured approvals,
+and execute it. Safe proposal mode requires the supplied Safe to equal the current portal
+admin, requires deployed bytecode at that address, and simulates the portal call before
+creating the file. The admin contract must also expose Safe's `getThreshold()` view and
+report a nonzero threshold. Proposal mode never signs or broadcasts a transaction, and it
+refuses to overwrite an existing output file. Omit `--allowed` to create a role-revocation
+proposal. The same `--safe-address` and `--safe-output` options work with
+`set-access-mode` and `set-gateway-mode`; omit `--enforced` to disable the corresponding
+mode.
 
 Account and gateway roles are mutually exclusive. To move an address between roles,
 remove its current role before adding the new one. Disabling enforcement leaves stored
@@ -237,8 +309,10 @@ and gateways that have been revoked bounce back; revoked refund recipients canno
 parked refunds until their account role is restored. Before closing access or removing a
 role, confirm that affected deposits, withdrawals, callbacks, and refunds have completed.
 
-Each command verifies the signer is the current portal admin, waits for the transaction,
-and reads the resulting mode or role back from the portal.
+Direct-key mode verifies the signer is the current portal admin, waits for the transaction,
+and reads the resulting mode or role back from the portal. Safe proposal mode stops after
+simulation and file creation, so verify the resulting role or mode after the Safe executes
+the imported transaction.
 
 ### 5. Start the Zone Node
 
@@ -490,6 +564,24 @@ just enable-token alphausd
 
 If `ZONE_RPC_URL` is set (defaults to `http://localhost:8546`), the command waits for the zone to process the L1 block and confirms the token is available on L2.
 
+To perform only the L1 portal update through `tempo-xtask`, use the same address or alias:
+
+```bash
+cargo run -p tempo-xtask -- enable-token <token-address>
+cargo run -p tempo-xtask -- enable-token alphausd
+```
+
+The xtask waits for the L1 receipt and verifies `ZonePortal.isTokenEnabled`, but unlike the
+Justfile recipe it does not wait for a running zone node to ingest the enablement. If the
+portal admin is a Safe, create an unsigned Transaction Builder proposal instead:
+
+```bash
+unset ADMIN_KEY
+cargo run -p tempo-xtask -- enable-token <token-address> \
+  --safe-address 0x<safe> \
+  --safe-output enable-token.json
+```
+
 The portal admin can also pause and resume deposits for an enabled token (withdrawals are unaffected). These calls are `onlyAdmin`, so they use the same `ADMIN_KEY` as `enable-token`:
 
 ```bash
@@ -687,7 +779,8 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
 | `--sequencer-key-file` | (required for sequencing) | Owner-readable file or FIFO containing the sequencer private key |
 | `--sequencer.enable-prover` | false | Run detached SPF validation; supported by sequencers and `rpc_only` P2P followers |
-| `--sequencer.prover-address` | (optional) | Repeatable `HARDFORK=HOST:PORT` assignment selected by the live L1 fork; startup requires current and next-72-hour forks; missing forks stop proving |
+| `--sequencer.prover-address` | (optional) | Repeatable `HARDFORK=HOST:PORT` assignment selected by the live L1 fork; missing forks stop proving and the readiness gauge flags current/next-72-hour gaps |
+| `--sequencer.prover-attestation-policy` | (required for remote proving) | JSON PCR0–2 allowlist shared by all endpoints; authenticates the transport and controls evidence freshness without changing L1 verifier policy |
 | `--shadow-prover.pcrs` | (optional) | Pin PCR0,PCR1,PCR2 (three comma-separated, nonzero 48-byte hex measurements) to authenticate remote Nitro proofs on an RPC follower |
 | `--deposit-decryption-keys-file` | (optional) | File containing additional historical or pre-provisioned deposit decryption keys, one hex key per line |
 | `--zone.batch-interval-blocks` | 120 | Zone blocks between empty withdrawal batch boundaries / L1 submissions (~1 minute at Tempo's 500 ms block time) |
@@ -708,6 +801,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `SEQUENCER_KEY_FILE` | For sequencing | Owner-readable file or FIFO containing the sequencer private key |
 | `SEQUENCER_ENABLE_PROVER` | No | Enable detached SPF validation, including on an `rpc_only` P2P follower |
 | `SEQUENCER_PROVER_ADDRESS` | No | Comma-separated `HARDFORK=HOST:PORT` assignments; see the [prover upgrade runbook](../bin/prover/enclave/README.md#upgrading-across-an-l1-hardfork) |
+| `SEQUENCER_PROVER_ATTESTATION_POLICY` | For remote proving | JSON PCR0–2 allowlist and evidence-freshness policy path shared by the configured endpoints |
 | `SHADOW_PROVER_PCRS` | No | Three comma-separated 48-byte enclave measurements for local shadow verification |
 | `DEPOSIT_DECRYPTION_KEYS_FILE` | During encryption-key rotation | Additional historical or pre-provisioned deposit decryption keys, one hex key per line |
 | `ADMIN_KEY` | For portal governance | Portal admin private key for `enableToken` / deposit pause controls. `SEQUENCER_KEY` only works for legacy zones where admin == sequencer. |

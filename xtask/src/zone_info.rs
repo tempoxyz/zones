@@ -51,7 +51,7 @@ impl ZoneInfoCmd {
         };
 
         let info = factory.zones(zone_id).call().await?;
-        if info.portal == Address::ZERO {
+        if info.portal.is_zero() {
             return Err(eyre!("zone {zone_id} does not exist"));
         }
         println!("Zone {}", info.zoneId);

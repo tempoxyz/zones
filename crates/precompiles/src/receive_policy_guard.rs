@@ -48,7 +48,7 @@ impl CallRules for ReceivePolicyGuardRules {
         };
 
         if caller == receipt.originator
-            || (receipt.recoveryAuthority != Address::ZERO && caller == receipt.recoveryAuthority)
+            || (!receipt.recoveryAuthority.is_zero() && caller == receipt.recoveryAuthority)
         {
             return CallCheck::Continue;
         }
@@ -63,10 +63,11 @@ impl CallRules for ReceivePolicyGuardRules {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     use alloy_evm::precompiles::DynPrecompile;
-    use alloy_primitives::{B256, Bytes, U256, address};
+    use alloy_primitives::{B256, Bytes, U256};
     use alloy_sol_types::SolValue;
     use revm::precompile::{PrecompileOutput, PrecompileResult};
     use tempo_chainspec::hardfork::TempoHardfork;
@@ -84,11 +85,11 @@ mod tests {
         TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
 
-    const ADMIN: Address = address!("0x00000000000000000000000000000000000000a1");
-    const ORIGINATOR: Address = address!("0x00000000000000000000000000000000000000a2");
-    const RECEIVER: Address = address!("0x00000000000000000000000000000000000000a3");
-    const RECOVERY: Address = address!("0x00000000000000000000000000000000000000a4");
-    const OUTSIDER: Address = address!("0x00000000000000000000000000000000000000a5");
+    const ADMIN: Address = Address::with_last_byte(0xa1);
+    const ORIGINATOR: Address = Address::with_last_byte(0xa2);
+    const RECEIVER: Address = Address::with_last_byte(0xa3);
+    const RECOVERY: Address = Address::with_last_byte(0xa4);
+    const OUTSIDER: Address = Address::with_last_byte(0xa5);
     const BLOCKED_AT: u64 = 123;
     const AMOUNT: U256 = U256::from_limbs([777, 0, 0, 0]);
 

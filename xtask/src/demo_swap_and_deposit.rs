@@ -1,5 +1,4 @@
 use alloy::{
-    network::EthereumWallet,
     primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
@@ -121,25 +120,22 @@ impl DemoSwapAndDeposit {
         let faucet_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect(&http_rpc)
             .await?;
-        let operator_wallet = EthereumWallet::from(operator_signer);
         let l1 = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(operator_wallet)
+            .wallet(operator_signer)
             .connect(&http_rpc)
             .await?;
         l1.client()
             .set_poll_interval(std::time::Duration::from_secs(1));
 
-        let sequencer_wallet = EthereumWallet::from(sequencer_signer);
         let l1_seq = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(sequencer_wallet)
+            .wallet(sequencer_signer)
             .connect(&http_rpc)
             .await?;
         l1_seq
             .client()
             .set_poll_interval(std::time::Duration::from_secs(1));
-        let admin_wallet = EthereumWallet::from(admin_signer);
         let l1_admin = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(admin_wallet)
+            .wallet(admin_signer)
             .connect(&http_rpc)
             .await?;
         l1_admin
@@ -150,7 +146,7 @@ impl DemoSwapAndDeposit {
             .connect(&self.zone_rpc_url)
             .await?;
         let l2_operator = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(parse_private_key(&self.private_key)?))
+            .wallet(parse_private_key(&self.private_key)?)
             .connect(&self.zone_rpc_url)
             .await?;
 
@@ -682,7 +678,7 @@ async fn ensure_sequencer_encryption_key<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed to read portal encryption key count")?;
 
-    let needs_registration = if key_count == U256::ZERO {
+    let needs_registration = if key_count.is_zero() {
         println!("  Registering the sequencer encryption key on the portal");
         true
     } else {

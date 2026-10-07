@@ -16,6 +16,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
   RUSTC_WRAPPER: "sccache"
+  # Pin vergen's build timestamp so reth-node-core and tempo-node compile identically across runs;
+  # otherwise they and every crate depending on them miss sccache on every build.
+  SOURCE_DATE_EPOCH: "1700000000"
 
 jobs:
   build-test-artifacts:
@@ -85,17 +88,19 @@ jobs:
             earn/cache
             crates/contracts/cache
             crates/contracts/out
-          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.contracts-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
+          key: forge-v2-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.contracts-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
+      # Earn vendors a partial IZone.sol, so build it first and let the Zones
+      # interface artifacts, which the ABI conformance test reads, overwrite it.
       - name: Build Solidity artifacts
         run: |
-          forge build --root crates/contracts --no-lint
           forge build \
             --root earn \
             --skip test \
             --skip script \
             --no-lint \
             --out "$GITHUB_WORKSPACE/crates/contracts/out"
+          forge build --root crates/contracts --no-lint
 
       - name: Build and archive tests
         run: cargo nextest archive --profile ci --archive-file nextest-archive.tar.zst

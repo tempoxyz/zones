@@ -10,7 +10,7 @@ use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, ErrorCode, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
     ProverConnection, TrustedChainSpecs, VerifyRequest, VerifyResponse,
-    nitro_batch_attestation_hash, request_error_response,
+    attested_transport::AttestedServer, nitro_batch_attestation_hash, request_error_response,
 };
 use zone_spf::{BatchOutput, PublicInputs, SpfConfig, prove_zone_batch};
 
@@ -68,13 +68,19 @@ impl Cli {
     async fn run(self) -> io::Result<()> {
         let specs = self.load_trusted_chain_specs()?;
 
+        #[cfg(target_os = "linux")]
+        linux::verify_entropy_configuration()?;
+        let tls = AttestedServer::new(|nonce, user_data| {
+            nitro_attestation(user_data, Some(nonce)).map_err(io::Error::other)
+        })?;
+
         if self.use_tcp {
-            return serve_tcp(self.port, self.max_request_bytes, specs, self.timeouts).await;
+            return serve_tcp(self.port, self.max_request_bytes, specs, self.timeouts, tls).await;
         }
 
         #[cfg(target_os = "linux")]
         {
-            linux::serve_vsock(self.port, self.max_request_bytes, specs, self.timeouts).await
+            linux::serve_vsock(self.port, self.max_request_bytes, specs, self.timeouts, tls).await
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -145,6 +151,7 @@ async fn serve_tcp(
     maximum: usize,
     specs: TrustedChainSpecs,
     timeouts: Timeouts,
+    tls: AttestedServer,
 ) -> io::Result<()> {
     use tokio::net::TcpListener;
     use tracing::info;
@@ -163,7 +170,6 @@ async fn serve_tcp(
         response_timeout_secs = timeouts.response.as_secs(),
         "SPF TCP service listening"
     );
-
     loop {
         let (connection, _peer) = match listener.accept().await {
             Ok(connection) => connection,
@@ -172,7 +178,7 @@ async fn serve_tcp(
                 continue;
             }
         };
-        handle_connection(connection, maximum, &specs, &timeouts).await;
+        handle_connection(connection, &tls, maximum, &specs, &timeouts).await;
     }
 }
 
@@ -185,11 +191,35 @@ mod linux {
 
     use super::*;
 
+    pub(super) fn verify_entropy_configuration() -> io::Result<()> {
+        let cmdline = std::fs::read_to_string("/proc/cmdline")?;
+        for required in ["random.trust_bootloader=off", "random.trust_cpu=off"] {
+            if !cmdline
+                .split_ascii_whitespace()
+                .any(|argument| argument == required)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Nitro guest kernel is missing required argument {required}"),
+                ));
+            }
+        }
+        let rng = std::fs::read_to_string("/sys/devices/virtual/misc/hw_random/rng_current")?;
+        if rng.trim() != "nsm-hwrng" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Nitro guest RNG is {:?}; expected nsm-hwrng", rng.trim()),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn serve_vsock(
         port: u32,
         maximum: usize,
         specs: TrustedChainSpecs,
         timeouts: Timeouts,
+        tls: AttestedServer,
     ) -> io::Result<()> {
         let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))?;
         info!(
@@ -199,7 +229,6 @@ mod linux {
             response_timeout_secs = timeouts.response.as_secs(),
             "SPF enclave service listening"
         );
-
         loop {
             let connection = match listener.accept().await {
                 Ok((connection, _peer)) => connection,
@@ -208,13 +237,17 @@ mod linux {
                     continue;
                 }
             };
-            handle_connection(connection, maximum, &specs, &timeouts).await;
+            handle_connection(connection, &tls, maximum, &specs, &timeouts).await;
         }
     }
 }
 
+/// Serves one attested connection to completion. The accept loop awaits this, so connections are
+/// handled one at a time to bound witness memory. I/O is time-bounded; SPF execution is not.
+/// Failures are logged, never returned.
 async fn handle_connection<T>(
     stream: T,
+    tls: &AttestedServer,
     maximum: usize,
     specs: &TrustedChainSpecs,
     timeouts: &Timeouts,
@@ -224,6 +257,13 @@ async fn handle_connection<T>(
     use std::time::Instant;
 
     use tracing::{info, warn};
+    let stream = match tls.accept(stream).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            error!(%error, "rejected attested TLS connection");
+            return;
+        }
+    };
     let mut connection = ProverConnection::new(stream, maximum);
     let started = Instant::now();
     let request: VerifyRequest = match timed(connection.receive(), timeouts.request).await {
@@ -322,7 +362,9 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
 
     let public_inputs = request.witness.public_inputs.clone();
     match prove_zone_batch(&config, request.witness) {
-        Ok(output) => match build_proof_bundle(&public_inputs, &output, nitro_attestation) {
+        Ok(output) => match build_proof_bundle(&public_inputs, &output, |digest| {
+            nitro_attestation(digest.as_slice(), None)
+        }) {
             Ok(proof_bundle) => VerifyResponse::Ok {
                 version: PROTOCOL_VERSION,
                 request_id: request.request_id,
@@ -362,7 +404,7 @@ where
 }
 
 #[cfg(target_os = "linux")]
-fn nitro_attestation(digest: alloy_primitives::B256) -> Result<Vec<u8>, String> {
+fn nitro_attestation(user_data: &[u8], nonce: Option<&[u8]>) -> Result<Vec<u8>, String> {
     use aws_nitro_enclaves_nsm_api::{
         api::{Request, Response},
         driver::{nsm_exit, nsm_init, nsm_process_request},
@@ -376,8 +418,8 @@ fn nitro_attestation(digest: alloy_primitives::B256) -> Result<Vec<u8>, String> 
     let response = nsm_process_request(
         descriptor,
         Request::Attestation {
-            user_data: Some(ByteBuf::from(digest.to_vec())),
-            nonce: None,
+            user_data: Some(ByteBuf::from(user_data.to_vec())),
+            nonce: nonce.map(|nonce| ByteBuf::from(nonce.to_vec())),
             public_key: None,
         },
     );
@@ -390,7 +432,7 @@ fn nitro_attestation(digest: alloy_primitives::B256) -> Result<Vec<u8>, String> 
 }
 
 #[cfg(not(target_os = "linux"))]
-fn nitro_attestation(_digest: alloy_primitives::B256) -> Result<Vec<u8>, String> {
+fn nitro_attestation(_user_data: &[u8], _nonce: Option<&[u8]>) -> Result<Vec<u8>, String> {
     Err("Nitro attestation is supported only on Linux".into())
 }
 

@@ -4,13 +4,12 @@
 //! public key, constructs the proof-of-possession signature, and submits it to
 //! the portal contract.
 
-use alloy::{
-    network::EthereumWallet, primitives::Address, providers::ProviderBuilder,
-    signers::local::PrivateKeySigner,
-};
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::WrapErr as _;
 use tempo_alloy::TempoNetwork;
 use zone_sequencer::register_encryption_key;
+
+use crate::zone_utils::{L1_EXPLORER, parse_private_key};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct SetEncryptionKey {
@@ -42,9 +41,8 @@ impl SetEncryptionKey {
                 .unwrap_or(&self.private_key),
         )?;
 
-        let wallet = EthereumWallet::from(transaction_signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
+            .wallet(transaction_signer)
             .connect(&self.l1_rpc_url)
             .await?;
 
@@ -57,30 +55,8 @@ impl SetEncryptionKey {
             .wrap_err("failed to send setSequencerEncryptionKey")?;
 
         println!("Encryption key registered!");
-        println!("Explorer: https://explore.moderato.tempo.xyz/tx/{tx_hash}");
+        println!("Explorer: {L1_EXPLORER}/{tx_hash}");
 
         Ok(())
-    }
-}
-
-fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
-    Ok(private_key
-        .strip_prefix("0x")
-        .unwrap_or(private_key)
-        .parse()?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_private_key;
-
-    #[test]
-    fn parses_prefixed_and_unprefixed_private_keys() {
-        let key = "1111111111111111111111111111111111111111111111111111111111111111";
-
-        assert_eq!(
-            parse_private_key(key).unwrap().to_bytes(),
-            parse_private_key(&format!("0x{key}")).unwrap().to_bytes()
-        );
     }
 }

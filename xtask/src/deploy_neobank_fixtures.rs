@@ -1,8 +1,8 @@
 //! Deploy and configure the non-secret L1 fixtures used by the private-Zone benchmark.
 
 use alloy::{
-    network::{EthereumWallet, TransactionBuilder, primitives::ReceiptResponse},
-    primitives::{Address, Bytes, Uint, keccak256},
+    network::{TransactionBuilder, primitives::ReceiptResponse},
+    primitives::{Address, Uint, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -21,7 +21,7 @@ use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
 use tempo_precompiles::TIP20_FACTORY_ADDRESS;
 use tempo_zone_contracts::{ZonePortal, ZonePortal::Role as PortalRole};
 
-use crate::zone_utils::check;
+use crate::zone_utils::{check, parse_private_key};
 
 alloy::sol! {
     #[sol(rpc)]
@@ -241,13 +241,13 @@ impl DeployNeobankFixtures {
         let portal_admin = signer_from_env("PORTAL_ADMIN_KEY")?;
         let portal_admin_address = portal_admin.address();
         let deployer_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(deployer))
+            .wallet(deployer)
             .connect(&self.l1_rpc_url)
             .await
             .wrap_err("failed connecting fixture deployer to Tempo L1")?;
         let admin_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .with_expiring_nonces()
-            .wallet(EthereumWallet::from(portal_admin))
+            .wallet(portal_admin)
             .connect(&self.l1_rpc_url)
             .await
             .wrap_err("failed connecting portal admin to Tempo L1")?;
@@ -263,7 +263,7 @@ impl DeployNeobankFixtures {
             .call()
             .await
             .wrap_err("failed querying ZonePortal zone ID")?;
-        ensure!(messenger != Address::ZERO, "ZonePortal messenger is zero");
+        ensure!(!messenger.is_zero(), "ZonePortal messenger is zero");
         let mut allowed_accounts = read_private_address_file(&self.allowed_accounts_file)?;
         allowed_accounts.sort_unstable();
         allowed_accounts.dedup();
@@ -405,7 +405,7 @@ impl DeployNeobankFixtures {
             ("EarnVault", earn_vault),
             ("EarnFees", earn_fees),
         ] {
-            ensure!(address != Address::ZERO, "{label} address is zero");
+            ensure!(!address.is_zero(), "{label} address is zero");
         }
 
         let receipt = ERC4626EngineInitializer::new(engine, &deployer_provider)
@@ -561,11 +561,8 @@ fn portal_role_assignments(
     earn_router: Address,
     messenger: Address,
 ) -> eyre::Result<Vec<(Address, PortalRole)>> {
-    ensure!(
-        bridge_wallet != Address::ZERO,
-        "Bridge wallet address is zero"
-    );
-    ensure!(earn_router != Address::ZERO, "EarnRouter address is zero");
+    ensure!(!bridge_wallet.is_zero(), "Bridge wallet address is zero");
+    ensure!(!earn_router.is_zero(), "EarnRouter address is zero");
     ensure!(
         bridge_wallet != earn_router,
         "Bridge wallet and EarnRouter addresses must be distinct"
@@ -581,7 +578,7 @@ fn portal_role_assignments(
     let mut assignments = Vec::with_capacity(allowed_accounts.len() + 2);
     for account in allowed_accounts {
         ensure!(
-            *account != Address::ZERO,
+            !account.is_zero(),
             "the benchmark account allowlist contains the zero address"
         );
         ensure!(
@@ -861,14 +858,14 @@ async fn configure_token_authority<P: Provider<TempoNetwork>>(
             })?;
         check(&receipt, &format!("seed {label} token authority reserve"))?;
         ensure!(
-            authority_contract
+            !authority_contract
                 .getReserveStore(token)
                 .call()
                 .await
                 .wrap_err_with(|| {
                     format!("failed querying the {label} token authority reserve store")
                 })?
-                != Address::ZERO,
+                .is_zero(),
             "{label} token authority reserve store was not created"
         );
     }
@@ -906,10 +903,7 @@ async fn grant_authority_unwrapper<P: Provider<TempoNetwork>>(
 fn signer_from_env(name: &str) -> eyre::Result<PrivateKeySigner> {
     let key =
         std::env::var(name).wrap_err_with(|| format!("{name} must be set in the environment"))?;
-    key.strip_prefix("0x")
-        .unwrap_or(&key)
-        .parse()
-        .wrap_err_with(|| format!("{name} is not a valid private key"))
+    parse_private_key(&key).wrap_err_with(|| format!("{name} is not a valid private key"))
 }
 
 async fn create_reserve_ledger<P: Provider<TempoNetwork>>(
@@ -941,10 +935,7 @@ async fn create_reserve_ledger<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed waiting for Bridge reserve ledger creation")?;
     check(&receipt, "create Bridge reserve ledger")?;
-    ensure!(
-        token != Address::ZERO,
-        "Bridge reserve ledger address is zero"
-    );
+    ensure!(!token.is_zero(), "Bridge reserve ledger address is zero");
     println!("Created Bridge reserve ledger: {token}");
     Ok(token)
 }
@@ -968,12 +959,11 @@ async fn deploy<P: Provider<TempoNetwork>>(
     let receipt = provider
         .send_transaction(
             TransactionRequest::default()
-                .with_kind(alloy::primitives::TxKind::Create)
+                .with_deploy_code(bytecode)
                 // Fixture constructors can make contract calls that Tempo's generic
                 // estimator underestimates. Use as much of the configured general-transaction
                 // budget as Tempo's per-transaction cap allows.
                 .with_gas_limit(gas_limit)
-                .input(Bytes::from(bytecode).into())
                 .into(),
         )
         .await

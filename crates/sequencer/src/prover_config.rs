@@ -15,6 +15,7 @@ use reth_metrics::metrics::Gauge;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoHardforks, hardfork::TempoHardfork};
 use zone_chainspec::ZoneChainSpec;
+use zone_prover::attested_transport::RemoteProverConfig;
 
 /// Readiness monitors endpoints for forks activating within 72 hours, inclusive.
 const PROVER_UPGRADE_LOOKAHEAD_SECS: u64 = 72 * 60 * 60;
@@ -51,27 +52,35 @@ impl FromStr for HardforkProverAddress {
 
 /// Remote prover configuration. Fork routing requires an exact assignment, with no fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProverAddresses(BTreeMap<TempoHardfork, String>);
+pub struct ProverAddresses(BTreeMap<TempoHardfork, RemoteProverConfig>);
 
 impl ProverAddresses {
-    /// Build a configuration, rejecting duplicate assignments.
-    pub fn new(assignments: Vec<HardforkProverAddress>) -> Result<Option<Self>> {
+    /// Build authenticated endpoints, requiring an explicit policy for nonempty assignments and
+    /// rejecting duplicate assignments.
+    pub fn new(
+        assignments: Vec<HardforkProverAddress>,
+        policy: Option<&[u8]>,
+    ) -> Result<Option<Self>> {
         if assignments.is_empty() {
             return Ok(None);
         }
+        let policy = policy.ok_or_else(|| {
+            eyre::eyre!(
+                "remote proving requires --sequencer.prover-attestation-policy; this Tempo release does not expose the verifier's PCR policy"
+            )
+        })?;
         let mut addresses = BTreeMap::new();
         for assignment in assignments {
+            let HardforkProverAddress { hardfork, address } = assignment;
             ensure!(
-                !assignment.address.trim().is_empty(),
+                !address.trim().is_empty(),
                 "prover address must not be empty"
             );
-            ensure!(
-                addresses
-                    .insert(assignment.hardfork, assignment.address)
-                    .is_none(),
-                "duplicate prover address for {}",
-                assignment.hardfork
+            let prev = addresses.insert(
+                hardfork,
+                RemoteProverConfig::from_policy_json(address, policy)?,
             );
+            ensure!(prev.is_none(), "duplicate prover address for {hardfork}");
         }
         Ok(Some(Self(addresses)))
     }
@@ -90,15 +99,14 @@ impl ProverAddresses {
         &self,
         provider: &DynProvider<TempoNetwork>,
         chain_spec: &impl TempoHardforks,
-    ) -> Result<(&str, TempoHardfork)> {
+    ) -> Result<(&RemoteProverConfig, TempoHardfork)> {
         let hardfork = active_l1_hardfork(provider, chain_spec).await?;
-        Ok((self.address_for(hardfork)?, hardfork))
+        Ok((self.config_for(hardfork)?, hardfork))
     }
 
-    fn address_for(&self, hardfork: TempoHardfork) -> Result<&str> {
+    fn config_for(&self, hardfork: TempoHardfork) -> Result<&RemoteProverConfig> {
         self.0
             .get(&hardfork)
-            .map(String::as_str)
             .ok_or_else(|| eyre::eyre!("no prover configured for active L1 hardfork {hardfork}"))
     }
 
@@ -177,6 +185,11 @@ mod tests {
         (TempoHardfork::T13, TempoHardfork::T14),
     ];
 
+    fn policy() -> Vec<u8> {
+        let pcr = "11".repeat(48);
+        serde_json::to_vec(&serde_json::json!({"pcrs":{"0":[&pcr],"1":[&pcr],"2":[&pcr]}})).unwrap()
+    }
+
     fn mock_l1_header(timestamp: u64) -> serde_json::Value {
         let header = TempoHeaderResponse {
             inner: RpcHeader {
@@ -242,10 +255,12 @@ mod tests {
         for (before, after) in TRANSITIONS {
             let activation = 400_000;
             let spec = scheduled(after, activation);
-            let addresses =
-                ProverAddresses::new(vec![format!("{before}=old:5000").parse().unwrap()])
-                    .unwrap()
-                    .unwrap();
+            let addresses = ProverAddresses::new(
+                vec![format!("{before}=old:5000").parse().unwrap()],
+                Some(&policy()),
+            )
+            .unwrap()
+            .unwrap();
             let recorded = Arc::new(RecordedGauge::default());
             let gauge = Gauge::from_arc(recorded.clone());
             for now in [
@@ -295,26 +310,59 @@ mod tests {
     }
 
     fn routed(before: TempoHardfork, after: TempoHardfork) -> ProverAddresses {
-        ProverAddresses::new(vec![
-            format!("{before}=old:5000").parse().unwrap(),
-            format!("{after}=new:5000").parse().unwrap(),
-        ])
+        ProverAddresses::new(
+            vec![
+                format!("{before}=old:5000").parse().unwrap(),
+                format!("{after}=new:5000").parse().unwrap(),
+            ],
+            Some(&policy()),
+        )
         .unwrap()
         .unwrap()
+    }
+
+    #[test]
+    fn remote_assignments_require_an_attestation_policy() {
+        assert!(ProverAddresses::new(Vec::new(), None).unwrap().is_none());
+        for &hardfork in TempoHardfork::VARIANTS {
+            let error = ProverAddresses::new(
+                vec![HardforkProverAddress {
+                    hardfork,
+                    address: "prover:5000".to_owned(),
+                }],
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("--sequencer.prover-attestation-policy")
+            );
+        }
     }
 
     #[test]
     fn assignments_are_exact_and_unambiguous() {
         for (before, after) in TRANSITIONS {
             let config = routed(before, after);
-            assert_eq!(config.address_for(before).unwrap(), "old:5000");
-            assert_eq!(config.address_for(after).unwrap(), "new:5000");
-            assert!(config.address_for(TempoHardfork::T11).is_err());
+            assert_eq!(config.config_for(before).unwrap().address(), "old:5000");
+            assert_eq!(config.config_for(after).unwrap().address(), "new:5000");
+            assert!(config.config_for(TempoHardfork::T11).is_err());
             assert!(
-                ProverAddresses::new(vec![
-                    format!("{after}=a:1").parse().unwrap(),
-                    format!("{after}=b:2").parse().unwrap()
-                ])
+                ProverAddresses::new(
+                    vec![format!("{before}=old:5000").parse().unwrap()],
+                    Some(b"{}"),
+                )
+                .is_err()
+            );
+            assert!(
+                ProverAddresses::new(
+                    vec![
+                        format!("{after}=a:1").parse().unwrap(),
+                        format!("{after}=b:2").parse().unwrap()
+                    ],
+                    Some(&policy()),
+                )
                 .is_err()
             );
             for invalid in [
@@ -337,9 +385,12 @@ mod tests {
             let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
                 .connect_mocked_client(asserter.clone())
                 .erased();
-            let config = ProverAddresses::new(vec![format!("{before}=old:5000").parse().unwrap()])
-                .unwrap()
-                .unwrap();
+            let config = ProverAddresses::new(
+                vec![format!("{before}=old:5000").parse().unwrap()],
+                Some(&policy()),
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(
                 config
                     .resolve(&provider, &scheduled(after, 100_001))
@@ -371,18 +422,14 @@ mod tests {
                 .erased();
             let config = routed(before, after);
             let spec = scheduled(after, 1_000);
-            assert_eq!(
-                config.resolve(&provider, &spec).await.unwrap(),
-                ("old:5000", before)
-            );
-            assert_eq!(
-                config.resolve(&provider, &spec).await.unwrap(),
-                ("new:5000", after)
-            );
-            assert_eq!(
-                config.resolve(&provider, &spec).await.unwrap(),
-                ("old:5000", before)
-            );
+            for (address, fork) in [
+                ("old:5000", before),
+                ("new:5000", after),
+                ("old:5000", before),
+            ] {
+                let (config, selected_fork) = config.resolve(&provider, &spec).await.unwrap();
+                assert_eq!((config.address(), selected_fork), (address, fork));
+            }
             assert!(config.resolve(&provider, &spec).await.is_err());
         }
     }

@@ -30,7 +30,6 @@ use tempo_zone_contracts::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::TcpStream,
     sync::{mpsc, oneshot},
 };
 use tracing::{debug, info, warn};
@@ -39,6 +38,7 @@ use zone_l1::TempoStateExt as _;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
     ProverConnection, ShadowProofVerifier, VerifierMode, VerifyRequest, VerifyResponse,
+    attested_transport::RemoteProverConfig,
 };
 use zone_rpc::ZoneDebugApi;
 use zone_spf::{
@@ -68,7 +68,7 @@ pub struct SettlementProverConfig {
     pub chain_spec: Arc<ZoneChainSpec>,
     /// In-process Zone debug API used to generate execution witnesses.
     pub debug_api: Arc<dyn ZoneDebugApi>,
-    /// Remote Nitro prover endpoints. When absent, execute the SPF in-process.
+    /// Authenticated remote Nitro prover endpoints. When absent, execute the SPF in-process.
     /// Settlement requires a remote NSM attestation; shadow validation does not.
     pub prover_addresses: Option<ProverAddresses>,
     /// Optional pinned PCR policy for local verification. Without it, remote proofs are
@@ -428,18 +428,18 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     let started = Instant::now();
     let (output, proof_bundle) = if let Some(addresses) = &context.config.prover_addresses {
-        let (address, hardfork) = addresses
+        let (remote, hardfork) = addresses
             .resolve(&context.l1_provider, context.config.chain_spec.as_ref())
             .await?;
         info!(
-            address,
+            address = remote.address(),
             ?hardfork,
             zone_from = job.from,
             zone_to = job.to,
             "Selected remote prover"
         );
         let (output, bundle) =
-            verify_remotely(address, context.config.zone_id, job, witness, metrics).await?;
+            verify_remotely(remote, context.config.zone_id, job, witness, metrics).await?;
         (output, Some(SettlementProof { bundle, hardfork }))
     } else {
         let spf_config = SpfConfig::new(context.config.chain_spec.clone());
@@ -678,12 +678,13 @@ fn validate_settlement_boundary(blocks: &[ZoneBlock]) -> Result<()> {
 }
 
 async fn verify_remotely(
-    address: &str,
+    remote: &RemoteProverConfig,
     zone_id: u32,
     job: &ProverJob,
     witness: BatchWitness,
     metrics: &ProverMetrics,
 ) -> Result<(BatchOutput, ProofBundle)> {
+    let address = remote.address();
     let request = VerifyRequest {
         version: PROTOCOL_VERSION,
         request_id: format!(
@@ -693,7 +694,7 @@ async fn verify_remotely(
         witness,
     };
     let started = Instant::now();
-    let stream = TcpStream::connect(address).await;
+    let stream = remote.connect().await;
     metrics
         .spf_remote_connect_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -788,9 +789,9 @@ fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
     let mode = VerifierMode::try_from(proof_bundle.verifier_config.as_ref())?;
     ensure!(
         mode == VerifierMode::NitroV1,
-        "remote prover returned unsupported verifier config 0x{}; expected 0x{}",
-        alloy_primitives::hex::encode(&proof_bundle.verifier_config),
-        alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
+        "remote prover returned unsupported verifier config {}; expected {}",
+        alloy_primitives::hex::encode_prefixed(&proof_bundle.verifier_config),
+        alloy_primitives::hex::encode_prefixed(NITRO_VERIFIER_CONFIG_V1),
     );
     mode.validate_proof_shape(&proof_bundle.proof)?;
     Ok(())
@@ -1103,7 +1104,7 @@ async fn tempo_header(provider: &DynProvider<TempoNetwork>, number: u64) -> Resu
     provider
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await?
-        .map(|block| block.header.as_ref().clone())
+        .map(|block| block.header.inner.into_consensus())
         .ok_or_eyre(format!("Tempo block {number} not found"))
 }
 

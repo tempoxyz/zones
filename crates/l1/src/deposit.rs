@@ -16,11 +16,9 @@ pub struct WithdrawalBounceBackDeposit {
 impl WithdrawalBounceBackDeposit {
     /// Create a bounce-back deposit from an event.
     pub fn from_bounce_back(event: WithdrawalBounceBack) -> Self {
-        let mut encoded_nonce = [0u8; 20];
-        encoded_nonce[12..].copy_from_slice(&event.fallbackNonce.to_be_bytes());
         Self {
             token: event.token,
-            to: Address::from(encoded_nonce),
+            to: Address::left_padding_from(&event.fallbackNonce.to_be_bytes()),
             amount: event.amount,
             fee: 0,
         }

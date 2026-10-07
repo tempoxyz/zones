@@ -1,5 +1,6 @@
 //! Versioned request protocol for the Tempo Zone prover service.
 
+pub mod attested_transport;
 mod chainspec;
 mod connection;
 mod protocol;

@@ -59,7 +59,7 @@ mod tests {
             TxEnv,
             result::{EVMError, ExecutionResult, HaltReason},
         },
-        database::{EmptyDB, in_memory_db::CacheDB},
+        database::InMemoryDB,
         inspector::NoOpInspector,
         state::AccountInfo,
     };
@@ -68,10 +68,10 @@ mod tests {
     use tempo_revm::{TempoBatchCallEnv, TempoInvalidTransaction, TempoTxEnv};
     use zone_precompiles::test_utils::MockL1Reader as TestL1;
 
-    type TestDb = CacheDB<EmptyDB>;
+    type TestDb = InMemoryDB;
     type TestAdaptedDb = L1OverlayDB<TestDb, TestL1>;
 
-    const TEST_DEPLOYER: Address = Address::new([0x42; 20]);
+    const TEST_DEPLOYER: Address = Address::repeat_byte(0x42);
 
     fn test_create<const IS_CREATE2: bool>(
         context: ZoneInstructionCtx<'_, TestAdaptedDb>,
@@ -86,17 +86,9 @@ mod tests {
     }
 
     fn test_db(contracts: impl IntoIterator<Item = (Address, Bytes)>) -> TestDb {
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
         for (address, code) in contracts {
-            db.insert_account_info(
-                address,
-                AccountInfo {
-                    code_hash: alloy_primitives::keccak256(&code),
-                    code: Some(Bytecode::new_raw(code)),
-                    nonce: 1,
-                    ..Default::default()
-                },
-            );
+            db.insert_account_info(address, AccountInfo::from_bytecode(Bytecode::new_raw(code)));
         }
         db
     }

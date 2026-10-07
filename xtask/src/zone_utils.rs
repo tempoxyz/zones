@@ -1,9 +1,10 @@
 use alloy::{
     consensus::BlockHeader as _,
     network::primitives::ReceiptResponse,
-    primitives::{Address, B256, U256},
+    primitives::{Address, U256},
     providers::Provider,
     rpc::types::Filter,
+    signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
 use eyre::{WrapErr as _, eyre};
@@ -57,17 +58,23 @@ const DEFAULT_WAIT_ATTEMPTS: usize = 120;
 const DEFAULT_WAIT_POLL: Duration = Duration::from_millis(500);
 const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
 
+/// Finds the block of the single ZoneCreated event for `zone_id` and `portal` in
+/// `from_block..=snapshot_block`.
+///
+/// Pass `0` when the creation block is unknown. Scanning from genesis issues one log query
+/// per 5,000 blocks, so callers that already know the creation block should start there.
 pub(crate) async fn find_zone_deployment_block<P: Provider<TempoNetwork>>(
     provider: &P,
     zone_id: u32,
     portal: Address,
+    from_block: u64,
     snapshot_block: u64,
 ) -> eyre::Result<u64> {
     let events = ZoneFactory::new(ZONE_FACTORY_ADDRESS, provider)
         .ZoneCreated_filter()
-        .topic1(B256::from(U256::from(zone_id)))
-        .topic2(portal.into_word())
-        .from_block(0)
+        .topic1(U256::from(zone_id))
+        .topic2(portal)
+        .from_block(from_block)
         .to_block(snapshot_block)
         .chunked()
         .chunk_size(LOG_QUERY_BLOCK_CHUNK)
@@ -180,6 +187,13 @@ pub(crate) fn normalize_http_rpc(rpc_url: &str) -> String {
     rpc_url
         .replace("wss://", "https://")
         .replace("ws://", "http://")
+}
+
+pub(crate) fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
+    Ok(private_key
+        .strip_prefix("0x")
+        .unwrap_or(private_key)
+        .parse()?)
 }
 
 pub(crate) fn check(receipt: &impl ReceiptResponse, label: &str) -> eyre::Result<()> {
@@ -345,4 +359,19 @@ pub(crate) async fn wait_for_withdrawal_processed<P: Provider<TempoNetwork>>(
     Err(eyre!(
         "timeout waiting for WithdrawalProcessed(to={to}, token={token}, amount={amount}, callbackSuccess={callback_success})"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_private_key;
+
+    #[test]
+    fn parses_prefixed_and_unprefixed_private_keys() {
+        let key = "1111111111111111111111111111111111111111111111111111111111111111";
+
+        assert_eq!(
+            parse_private_key(key).unwrap().to_bytes(),
+            parse_private_key(&format!("0x{key}")).unwrap().to_bytes()
+        );
+    }
 }

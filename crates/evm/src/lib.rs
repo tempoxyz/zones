@@ -376,7 +376,7 @@ where
                     .as_ref()
                     .map(|withdrawals| Cow::Borrowed(withdrawals.as_slice())),
                 extra_data: block.header().extra_data().clone(),
-                tx_count_hint: Some(block.body().transactions.len()),
+                tx_count_hint: Some(block.transaction_count()),
                 slot_number: block.slot_number(),
             },
             general_gas_limit: 0,
@@ -471,13 +471,10 @@ mod tests {
     use super::*;
 
     use alloy_consensus::Sealable as _;
-    use alloy_primitives::{B256, U256, address, keccak256};
-    use alloy_sol_types::{SolCall, SolValue};
-    use reth_chainspec::{EthChainSpec, ForkCondition};
-    use revm::{
-        context::result::ExecutionResult,
-        database::{CacheDB, EmptyDB},
-    };
+    use alloy_primitives::{B256, U256, address};
+    use alloy_sol_types::SolCall;
+    use reth_chainspec::EthChainSpec;
+    use revm::database::{EmptyDB, InMemoryDB};
     use tempo_chainspec::{
         hardfork::TempoHardfork,
         spec::{MODERATO, TempoHardforks},
@@ -487,7 +484,10 @@ mod tests {
         zone_factory::ZonePortalStorage,
     };
     use tempo_zone_contracts::IZoneInbox;
-    use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
+    use zone_precompiles::{
+        tempo_state::{TEMPO_BLOCK_NUMBER_SLOT, slots::TEMPO_BLOCK_HASH},
+        test_utils::MockL1Reader,
+    };
     use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, zone_chain_id};
 
     #[test]
@@ -519,14 +519,18 @@ mod tests {
         let reader = MockL1Reader::default();
 
         reader.seed_active_sequencer(portal, CHILD, sequencer);
-        let token_enablement_hash =
-            keccak256((B256::ZERO, token, "Adversarial Token", "ADV", "USD").abi_encode_params());
+        let enabled_token = IZoneInbox::EnabledToken {
+            token,
+            name: "Adversarial Token".into(),
+            symbol: "ADV".into(),
+            currency: "USD".into(),
+        };
         let portal_storage = ZonePortalStorage::new(portal);
         reader.insert(
             portal,
             portal_storage.token_enablement_hash.slot(),
             CHILD,
-            token_enablement_hash.into(),
+            enabled_token.hash_with_previous(B256::ZERO).into(),
         );
 
         let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
@@ -545,8 +549,8 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut db = CacheDB::new(EmptyDB::default());
-        db.insert_account_storage(TEMPO_STATE_ADDRESS, U256::ZERO, genesis_hash.into())
+        let mut db = InMemoryDB::default();
+        db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_HASH, genesis_hash.into())
             .unwrap();
         db.insert_account_storage(
             TEMPO_STATE_ADDRESS,
@@ -564,19 +568,14 @@ mod tests {
             header: alloy_rlp::encode(&child).into(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
-            enabledTokens: vec![IZoneInbox::EnabledToken {
-                token,
-                name: "Adversarial Token".into(),
-                symbol: "ADV".into(),
-                currency: "USD".into(),
-            }],
+            enabledTokens: vec![enabled_token],
         }
         .abi_encode();
 
         let result = evm
             .transact_system_call(Address::ZERO, ZONE_INBOX_ADDRESS, calldata.into())
             .expect("advanceTempo execution must not fail");
-        assert!(matches!(result.result, ExecutionResult::Success { .. }));
+        assert!(result.result.is_success());
         assert_eq!(
             evm.ctx().journaled_state.database.l1_state().get_anchor(),
             None,
@@ -601,14 +600,12 @@ mod tests {
             .config
             .extra_fields
             .retain(|name, _| !name.ends_with("Time"));
-        genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 1).unwrap();
+        genesis.config.chain_id = zone_chain_id(MODERATO.chain_id(), 1).unwrap();
         let composed = Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap());
         let activation_timestamp = TempoHardfork::VARIANTS
             .iter()
-            .find_map(|&hardfork| match MODERATO.tempo_fork_activation(hardfork) {
-                ForkCondition::Timestamp(timestamp) if timestamp > 0 => Some(timestamp),
-                _ => None,
-            })
+            .filter_map(|&hardfork| MODERATO.tempo_fork_activation(hardfork).as_timestamp())
+            .find(|&timestamp| timestamp > 0)
             .expect("Moderato must have a post-genesis Tempo hardfork");
         let config = ZoneEvmConfig::new(composed, MockL1Reader::default(), Address::ZERO);
         for timestamp in [activation_timestamp - 1, activation_timestamp] {

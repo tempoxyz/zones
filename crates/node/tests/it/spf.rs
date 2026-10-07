@@ -232,7 +232,7 @@ async fn spf_replays_migrated_policy_transaction_with_parent_forks() -> eyre::Re
     let (tempo_state_root, tempo_state_nodes) =
         tempo_state_with_transfer_policy(PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
     let built = build_single_transaction_block(&genesis, Some(tempo_state_root)).await?;
-    let legacy_policy_slot = U256::from(7).to_be_bytes::<32>();
+    let legacy_policy_slot = B256::with_last_byte(7);
     assert!(
         !built
             .generated_witness
@@ -418,9 +418,7 @@ fn spf_config(genesis: &Genesis) -> SpfConfig {
 }
 
 fn tempo_state_with_transfer_policy(token: Address, policy_id: u64) -> (B256, Vec<Bytes>) {
-    let policy_slot = token
-        .mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES)
-        .to_be_bytes::<32>();
+    let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
     let packed_policy = U256::from(policy_id) | (U256::ONE << u64::BITS);
     let genesis = Genesis {
         alloc: [(
@@ -466,9 +464,8 @@ fn genesis_state_witness(genesis: &Genesis) -> (B256, Vec<Bytes>, Vec<Bytes>) {
         }
 
         let code_hash = account
-            .code
-            .as_ref()
-            .map_or(alloy_consensus::constants::KECCAK_EMPTY, keccak256);
+            .code_hash()
+            .unwrap_or(alloy_consensus::constants::KECCAK_EMPTY);
         if let Some(code) = &account.code {
             bytecodes.entry(code_hash).or_insert_with(|| code.clone());
         }
@@ -494,14 +491,9 @@ fn genesis_state_witness(genesis: &Genesis) -> (B256, Vec<Bytes>, Vec<Bytes>) {
 
 fn storage_trie(account: &GenesisAccount) -> (B256, Vec<Bytes>) {
     let leaves = account
-        .storage
-        .iter()
-        .flat_map(|storage| storage.iter())
+        .storage_slots()
         .filter(|(_, value)| !value.is_zero())
-        .map(|(slot, value)| {
-            let value = U256::from_be_bytes(value.0);
-            (keccak256(slot), alloy_rlp::encode(value))
-        })
+        .map(|(slot, value)| (keccak256(slot), alloy_rlp::encode(value)))
         .collect();
     trie(leaves)
 }

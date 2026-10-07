@@ -3,7 +3,7 @@
 
 use alloy::{
     genesis::{Genesis, GenesisAccount},
-    primitives::{Address, B256, Bytes, U256},
+    primitives::{Address, B256, Bytes},
 };
 use alloy_eips::eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE};
 use eyre::{WrapErr as _, ensure};
@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempo_contracts::{
-    precompiles::INITIAL_FACTORY_OWNER,
+    precompiles::{INITIAL_FACTORY_OWNER, initial_zone_factory_config},
     zones::{
         T13_ZONE_MESSENGER_RUNTIME, T13_ZONE_PORTAL_RUNTIME, T13_ZONE_VERIFIER_RUNTIME,
         ZONE_MESSENGER_RUNTIME as TEMPO_ZONE_MESSENGER_RUNTIME,
@@ -68,7 +68,7 @@ struct DeployedBytecode {
 impl InstallReferenceZoneFactory {
     pub(crate) fn run(self) -> eyre::Result<()> {
         ensure!(
-            self.owner != Address::ZERO,
+            !self.owner.is_zero(),
             "--owner must not be the zero address"
         );
         ensure!(
@@ -191,7 +191,7 @@ fn install_native_zone_factory(
     owner: Address,
     artifacts: NativeArtifacts,
 ) -> eyre::Result<()> {
-    ensure!(owner != Address::ZERO, "ZoneFactory owner must not be zero");
+    ensure!(!owner.is_zero(), "ZoneFactory owner must not be zero");
     let canonical_factory = native_factory_account(INITIAL_FACTORY_OWNER);
     let benchmark_factory = native_factory_account(owner);
     match genesis.alloc.get(&ZONE_FACTORY_ADDRESS) {
@@ -255,11 +255,8 @@ fn install_native_zone_factory(
 }
 
 fn native_factory_account(owner: Address) -> GenesisAccount {
-    // Native TIP-1091 accounts use the non-empty 0xEF precompile marker. Slot zero packs
-    // uint32 nextZoneId, address owner, and the implementation-lock flag.
-    let packed_factory_config: U256 =
-        U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32_usize);
-    let factory_storage = BTreeMap::from([(B256::ZERO, packed_factory_config.into())]);
+    // Native TIP-1091 accounts use the non-empty 0xEF precompile marker.
+    let factory_storage = BTreeMap::from([(B256::ZERO, initial_zone_factory_config(owner).into())]);
     GenesisAccount::default()
         .with_code(Some(Bytes::from_static(&[0xef])))
         .with_storage(Some(factory_storage))
@@ -268,7 +265,7 @@ fn native_factory_account(owner: Address) -> GenesisAccount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::address;
+    use alloy::primitives::{U256, address};
 
     #[test]
     fn validates_zone_portal_allocations() {
@@ -309,7 +306,7 @@ mod tests {
     }
 
     fn assert_validates_shared_runtimes([portal, verifier, messenger]: [Bytes; 3]) {
-        let owner = address!("0x0000000000000000000000000000000000000001");
+        let owner = Address::with_last_byte(1);
         let mut genesis = Genesis::default();
         genesis.alloc.insert(
             ZONE_FACTORY_ADDRESS,
@@ -364,7 +361,7 @@ mod tests {
     }
 
     fn assert_rejects_shared_runtime(address: Address, account: GenesisAccount) {
-        let owner = address!("0x0000000000000000000000000000000000000001");
+        let owner = Address::with_last_byte(1);
         let mut genesis = Genesis::default();
         genesis.alloc.insert(address, account.clone());
 

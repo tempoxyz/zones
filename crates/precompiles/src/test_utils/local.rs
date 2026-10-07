@@ -3,14 +3,11 @@ use alloy_evm::{
     precompiles::{DynPrecompile, Precompile as _, PrecompileInput},
 };
 use alloy_primitives::{Address, B256, U256};
-use k256::{
-    AffinePoint, ProjectivePoint, Scalar,
-    elliptic_curve::{ops::Reduce, sec1::ToEncodedPoint},
-};
+use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::ops::Reduce};
 use revm::{
     Context,
     context::{CfgEnv, TxEnv},
-    database::{CacheDB, EmptyDB},
+    database::InMemoryDB,
     precompile::PrecompileResult,
 };
 use std::{cell::RefCell, rc::Rc};
@@ -30,8 +27,7 @@ use crate::{
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
 
 /// EVM context used by local precompile unit tests.
-pub(crate) type TestContext =
-    Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
+pub(crate) type TestContext = Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, InMemoryDB>;
 
 /// Create an empty test EVM context at the latest Tempo hardfork affecting Zones.
 pub(crate) fn test_context() -> TestContext {
@@ -40,7 +36,7 @@ pub(crate) fn test_context() -> TestContext {
 
 /// Create a test EVM context with the specified hardfork.
 pub(crate) fn test_context_with_hardfork(hardfork: TempoHardfork) -> TestContext {
-    Context::new(CacheDB::new(EmptyDB::new()), hardfork)
+    Context::new(InMemoryDB::default(), hardfork)
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.
@@ -157,8 +153,7 @@ impl EncryptedDepositFixture {
         // ECDH (depositor side)
         let shared_proj = ProjectivePoint::from(seq_pub) * eph_scalar;
         let shared_affine = AffinePoint::from(shared_proj);
-        let ss_enc = shared_affine.to_encoded_point(true);
-        let shared_secret_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
+        let (shared_secret_x, _) = compressed_x_and_parity(&shared_affine);
 
         let portal = Address::repeat_byte(0xAA);
         let key_index = U256::from(42u64);

@@ -260,7 +260,7 @@ mod tests {
 
     fn dev_zone_spec(zone_id: u32) -> ZoneChainSpec {
         let mut genesis = DEV.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), zone_id).unwrap();
+        genesis.config.chain_id = zone_chain_id(DEV.chain_id(), zone_id).unwrap();
         ZoneChainSpec::from_genesis(genesis).unwrap()
     }
 
@@ -268,10 +268,7 @@ mod tests {
     fn delegates_tempo_chain_behavior() {
         let zone = dev_zone_spec(1);
 
-        assert_eq!(
-            zone.chain().id(),
-            zone_chain_id(DEV.chain().id(), 1).unwrap()
-        );
+        assert_eq!(zone.chain_id(), zone_chain_id(DEV.chain_id(), 1).unwrap());
         for &hardfork in TempoHardfork::VARIANTS {
             assert_eq!(
                 zone.tempo_fork_activation(hardfork),
@@ -298,7 +295,7 @@ mod tests {
     #[test]
     fn tempo_hardfork_activates_at_boundary() {
         let mut genesis = DEV.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 5).unwrap();
+        genesis.config.chain_id = zone_chain_id(DEV.chain_id(), 5).unwrap();
         test_utils::set_tempo_fork(&mut genesis, TempoHardfork::T13, 100);
         let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
 
@@ -309,7 +306,7 @@ mod tests {
     #[test]
     fn genesis_inherits_missing_parent_hardforks_everywhere() {
         let mut genesis = MODERATO.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 7).unwrap();
+        genesis.config.chain_id = zone_chain_id(MODERATO.chain_id(), 7).unwrap();
         genesis.config.london_block = None;
         genesis.config.shanghai_time = None;
         genesis.config.cancun_time = None;
@@ -317,7 +314,7 @@ mod tests {
         let raw = TempoChainSpec::from_genesis(genesis.clone());
         let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
 
-        assert_eq!(zone.chain().id(), raw.chain().id());
+        assert_eq!(zone.chain_id(), raw.chain_id());
         assert_ne!(zone.genesis_hash(), raw.genesis_hash());
         assert!(raw.genesis_header().inner.base_fee_per_gas.is_none());
         assert!(raw.genesis_header().inner.withdrawals_root.is_none());
@@ -402,12 +399,12 @@ mod tests {
     #[test]
     fn parser_parses_zone_genesis_json() {
         let mut genesis = DEV.genesis().clone();
-        let chain_id = zone_chain_id(DEV.chain().id(), 9).unwrap();
+        let chain_id = zone_chain_id(DEV.chain_id(), 9).unwrap();
         genesis.config.chain_id = chain_id;
         let json = serde_json::to_string(&genesis).unwrap();
         let zone = ZoneChainSpecParser::parse(&json).expect("valid Zone genesis JSON");
 
-        assert_eq!(zone.chain().id(), chain_id);
+        assert_eq!(zone.chain_id(), chain_id);
     }
 
     #[cfg(feature = "cli")]

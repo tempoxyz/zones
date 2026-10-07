@@ -8,7 +8,7 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, now_secs, start_zone_with_redacted_rpc,
+    DEFAULT_TIMEOUT, TIP20_TX_GAS, l1_dev_signer, now_secs, start_zone_with_redacted_rpc,
     start_zone_with_redacted_rpc_l1, start_zone_with_redacted_rpc_l1_with_encryption,
 };
 use alloy::{
@@ -18,7 +18,6 @@ use alloy::{
 use alloy_eips::eip2718::Encodable2718;
 use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
 use alloy_signer::SignerSync;
-use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolError};
 use futures::{SinkExt, StreamExt};
 use p256::ecdsa::SigningKey as P256SigningKey;
@@ -37,7 +36,7 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{
     TempoTxEnvelope,
-    transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
+    transaction::{Call, TempoTransaction},
 };
 use tempo_zone_contracts::{
     IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
@@ -56,7 +55,7 @@ fn corrupt_token_hex(token: &str) -> String {
 }
 
 fn address_topic(address: Address) -> String {
-    format!("{:#x}", address.into_word())
+    address.into_word().to_string()
 }
 
 fn signed_sponsored_raw_transaction(
@@ -82,11 +81,7 @@ fn signed_sponsored_raw_transaction(
     transaction.fee_payer_signature = Some(fee_payer.sign_hash_sync(&fee_payer_hash)?);
 
     let signature = signer.sign_hash_sync(&transaction.signature_hash())?;
-    let signed = AASigned::new_unhashed(
-        transaction,
-        TempoSignature::Primitive(PrimitiveSignature::Secp256k1(signature)),
-    );
-    let envelope: TempoTxEnvelope = signed.into();
+    let envelope: TempoTxEnvelope = transaction.into_signed(signature.into()).into();
 
     Ok(hex::encode_prefixed(envelope.encoded_2718()))
 }
@@ -116,7 +111,7 @@ fn assert_redacted_block(block: &Value) {
         "block transactions should be empty (redacted)"
     );
 
-    let zero_root = format!("{:#x}", B256::ZERO);
+    let zero_root = B256::ZERO.to_string();
     assert_eq!(block["transactionsRoot"], zero_root);
     assert_eq!(block["receiptsRoot"], zero_root);
     assert_eq!(block["stateRoot"], zero_root);
@@ -732,9 +727,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
 
     let mut ctx = start_zone_with_redacted_rpc().await?;
 
-    let owner_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let owner_signer = l1_dev_signer();
     let owner = owner_signer.address();
     let spender_signer = PrivateKeySigner::random();
     let spender = spender_signer.address();
@@ -1021,7 +1014,7 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
             NONCE_PRECOMPILE_ADDRESS,
             INonce::getNonceCall {
                 account: owner,
-                nonceKey: U256::from(1),
+                nonceKey: U256::ONE,
             }
             .abi_encode(),
             "NonceManager.getNonce",
@@ -1278,9 +1271,7 @@ async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let mut ctx = start_zone_with_redacted_rpc().await?;
-    let owner_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let owner_signer = l1_dev_signer();
     let outsider_signer = PrivateKeySigner::random();
     let spender = PrivateKeySigner::random().address();
 
@@ -1377,7 +1368,7 @@ async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
                 .to_owned()
         })
         .collect::<HashSet<_>>();
-    assert_eq!(owner_hashes, HashSet::from([format!("{owner_hash:#x}")]));
+    assert_eq!(owner_hashes, HashSet::from([owner_hash.to_string()]));
 
     Ok(())
 }
@@ -1512,13 +1503,9 @@ async fn test_zone_get_zone_info_returns_all_enabled_tokens() -> eyre::Result<()
 }
 
 fn encryption_public_key(secret_key: &k256::SecretKey) -> (String, u8) {
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
-
-    let encoded = secret_key.public_key().to_encoded_point(true);
-    (
-        format!("{:#x}", B256::from_slice(encoded.x().unwrap())),
-        encoded.as_bytes()[0],
-    )
+    let (x, y_parity) =
+        zone_precompiles::ecies::compressed_x_and_parity(secret_key.public_key().as_affine());
+    (x.to_string(), y_parity)
 }
 
 /// The method returns the latest key on Tempo L1 without waiting for the Zone

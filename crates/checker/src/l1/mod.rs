@@ -421,16 +421,11 @@ mod tests {
                 },
                 ..Default::default()
             };
-            tip = BlockNumHash::new(number, header.hash_slow());
             let response = TempoHeaderResponse {
-                inner: RpcHeader {
-                    hash: tip.hash,
-                    inner: header,
-                    total_difficulty: None,
-                    size: None,
-                },
+                inner: RpcHeader::new(header),
                 timestamp_millis: 0,
             };
+            tip = BlockNumHash::new(number, response.inner.hash);
             let mut block = serde_json::to_value(response).unwrap();
             block["transactions"] = serde_json::json!([]);
             block["uncles"] = serde_json::json!([]);
@@ -499,12 +494,7 @@ mod tests {
             ..Default::default()
         };
         let mut response = TempoHeaderResponse {
-            inner: RpcHeader {
-                hash: header.hash_slow(),
-                inner: header,
-                total_difficulty: None,
-                size: None,
-            },
+            inner: RpcHeader::new(header),
             timestamp_millis: 0,
         };
         let validated = validate_rpc_header(&response).unwrap();

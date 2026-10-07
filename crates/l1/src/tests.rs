@@ -1,6 +1,6 @@
 use super::*;
 use crate::{abi::DepositType, subscriber::L1SubscriberError};
-use alloy_consensus::{Header, ReceiptWithBloom, Sealable as _};
+use alloy_consensus::{Header, ReceiptWithBloom, Sealable as _, TxReceipt as _};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
 use alloy_sol_types::SolEvent;
@@ -115,7 +115,7 @@ impl DepositFixture {
 fn make_withdrawal_bounce_back(amount: u128) -> L1Deposit {
     L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
-        to: address!("0x0000000000000000000000000000000000000002"),
+        to: Address::with_last_byte(2),
         amount,
         fee: 0,
     })
@@ -473,12 +473,7 @@ fn seal(header: TempoHeader) -> SealedHeader<TempoHeader> {
 
 fn header_response(header: TempoHeader) -> TempoHeaderResponse {
     TempoHeaderResponse {
-        inner: RpcHeader {
-            hash: header.hash_slow(),
-            inner: header,
-            total_difficulty: None,
-            size: None,
-        },
+        inner: RpcHeader::new(header),
         timestamp_millis: 0,
     }
 }
@@ -690,8 +685,8 @@ fn assert_tempo_header_fixture_rejected(value: &str) {
 fn assert_tempo_header_rejected(input: &[u8]) {
     assert!(
         alloy_rlp::decode_exact::<TempoHeader>(input).is_err(),
-        "TempoHeader should reject malformed RLP input 0x{}",
-        const_hex::encode(input)
+        "TempoHeader should reject malformed RLP input {}",
+        const_hex::encode_prefixed(input)
     );
 }
 
@@ -829,7 +824,7 @@ async fn test_subscribe_block_headers_falls_back_to_http_block_filter() {
         .connect_mocked_client(asserter.clone())
         .erased();
 
-    asserter.push_success(&U256::from(1));
+    asserter.push_success(&U256::ONE);
     asserter.push_success(&vec![B256::with_last_byte(1)]);
 
     let mut header_stream = subscriber
@@ -917,7 +912,7 @@ async fn test_sync_finalized_once_extends_a_moving_finalized_target_until_stable
 fn test_push_log_decodes_withdrawal_bounce_back() {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
     let fallback_nonce = 0xF1;
-    let encoded_fallback_nonce = address!("0x00000000000000000000000000000000000000F1");
+    let encoded_fallback_nonce = Address::with_last_byte(0xf1);
     let token = address!("0x0000000000000000000000000000000000002000");
     let event = WithdrawalBounceBack {
         newCurrentDepositQueueHash: B256::with_last_byte(0x42),
@@ -980,14 +975,14 @@ fn test_drain_returns_block_grouped_deposits() {
 
     let d1 = L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
-        to: address!("0x0000000000000000000000000000000000000002"),
+        to: Address::with_last_byte(2),
         amount: 100,
         fee: 0,
     });
 
     let d2 = L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
-        to: address!("0x0000000000000000000000000000000000000004"),
+        to: Address::with_last_byte(4),
         amount: 200,
         fee: 0,
     });
@@ -1072,7 +1067,7 @@ fn test_withdrawal_bounce_back_and_deposit_hash_chain() {
         amount: 300_000,
         fee: 0,
         tempo_refund_recipient: sender,
-        key_index: U256::from(1u64),
+        key_index: U256::ONE,
         ephemeral_pubkey_x: B256::with_last_byte(0xBB),
         ephemeral_pubkey_y_parity: 0x03,
         ciphertext: vec![0x55u8; 64],
@@ -1214,7 +1209,7 @@ async fn deposits_select_the_private_key_by_portal_index() {
             address!("0x000000000000000000000000000000000000BEEF"),
         ),
         (
-            U256::from(1),
+            U256::ONE,
             current,
             address!("0x000000000000000000000000000000000000CAFE"),
         ),
@@ -1793,21 +1788,15 @@ fn make_receipt_with_logs(
     block_hash: B256,
     logs: Vec<Log>,
 ) -> TempoTransactionReceipt {
-    let mut bloom = Bloom::ZERO;
-    for log in &logs {
-        bloom.accrue_log(&log.inner);
-    }
     TempoTransactionReceipt {
         inner: TransactionReceipt {
-            inner: ReceiptWithBloom::new(
-                TempoReceipt {
-                    tx_type: TempoTxType::Legacy,
-                    success: true,
-                    cumulative_gas_used: 21_000,
-                    logs,
-                },
-                bloom,
-            ),
+            inner: TempoReceipt {
+                tx_type: TempoTxType::Legacy,
+                success: true,
+                cumulative_gas_used: 21_000,
+                logs,
+            }
+            .into_with_bloom(),
             transaction_hash: B256::with_last_byte(0xaa),
             transaction_index: Some(0),
             block_hash: Some(block_hash),

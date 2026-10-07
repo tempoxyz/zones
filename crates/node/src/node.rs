@@ -1326,7 +1326,7 @@ where
                 use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
                 let provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
                     .with_nonce_key_filler()
-                    .wallet(alloy_network::EthereumWallet::from(signer))
+                    .wallet(signer)
                     .connect_with_config(
                         &l1_rpc_url,
                         rpc_connection_config(retry_connection_interval),
@@ -2106,15 +2106,14 @@ where
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
     use alloy_primitives::{Bytes, Signature, TxKind, U256};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
-    use tempo_primitives::transaction::{
-        AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
-    };
+    use tempo_primitives::transaction::{Call, TempoTransaction};
     use zone_chainspec::tempo_chain_spec_for_l1;
 
     fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
@@ -2126,20 +2125,20 @@ mod tests {
             calls,
             ..Default::default()
         };
-        let signature =
-            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature()));
         pooled_transaction(
-            AASigned::new_unhashed(transaction, signature).into(),
+            transaction
+                .into_signed(Signature::test_signature().into())
+                .into(),
             sender,
         )
     }
 
     #[test]
     fn resolves_public_and_local_tempo_l1_specs() {
-        assert_eq!(tempo_chain_spec_for_l1(4217).unwrap().chain().id(), 4217);
-        assert_eq!(tempo_chain_spec_for_l1(42431).unwrap().chain().id(), 42431);
-        assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
-        assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
+        assert_eq!(tempo_chain_spec_for_l1(4217).unwrap().chain_id(), 4217);
+        assert_eq!(tempo_chain_spec_for_l1(42431).unwrap().chain_id(), 42431);
+        assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain_id(), 1337);
+        assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain_id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
 
         assert!(tempo_chain_spec_for_l1(31318).is_none());
@@ -2182,12 +2181,8 @@ mod tests {
         };
 
         sink.apply_leader_transition(&LeaderTransition {
-            previous_leader: "0x0000000000000000000000000000000000000001"
-                .parse()
-                .unwrap(),
-            new_leader: "0x0000000000000000000000000000000000000009"
-                .parse()
-                .unwrap(),
+            previous_leader: Address::with_last_byte(1),
+            new_leader: Address::with_last_byte(9),
             epoch: 2,
             activation_tempo_block: 100,
         })
@@ -2196,12 +2191,8 @@ mod tests {
         assert_eq!(schedule.leader_for(100).unwrap().leader, peer(9));
 
         sink.apply_leader_transition(&LeaderTransition {
-            previous_leader: "0x0000000000000000000000000000000000000009"
-                .parse()
-                .unwrap(),
-            new_leader: "0x0000000000000000000000000000000000000002"
-                .parse()
-                .unwrap(),
+            previous_leader: Address::with_last_byte(9),
+            new_leader: Address::with_last_byte(2),
             epoch: 3,
             activation_tempo_block: 200,
         })
@@ -2210,12 +2201,8 @@ mod tests {
 
         assert!(
             sink.apply_leader_transition(&LeaderTransition {
-                previous_leader: "0x0000000000000000000000000000000000000002"
-                    .parse()
-                    .unwrap(),
-                new_leader: "0x0000000000000000000000000000000000000009"
-                    .parse()
-                    .unwrap(),
+                previous_leader: Address::with_last_byte(2),
+                new_leader: Address::with_last_byte(9),
                 epoch: 4,
                 activation_tempo_block: 300,
             })

@@ -184,7 +184,7 @@ where
         };
         validate_l1_continuity(state_provider.as_ref(), imported_headers)?;
         let final_imported = imported_headers.last().expect("validated nonempty import");
-        let checkpoint_only = matches!(tempo_import, TempoImport::CheckpointOnly(_));
+        let checkpoint_only = tempo_import.is_checkpoint_only();
         let follows_checkpoint_blocks = tempo_import.follows_checkpoint_blocks();
         let total_deposits = tempo_import.total_deposits();
         let enabled_tokens = tempo_import.enabled_tokens();
@@ -217,7 +217,7 @@ where
             .build();
 
         let chain_spec = self.provider.chain_spec();
-        let chain_id = chain_spec.chain().id();
+        let chain_id = chain_spec.chain_id();
 
         let block_gas_limit = parent_header.gas_limit();
 
@@ -362,7 +362,7 @@ where
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
-            tx_count = sealed_block.body().transactions.len(),
+            tx_count = sealed_block.transaction_count(),
             block_size_bytes = execution_block_size_estimate,
             ?elapsed,
             "Built zone payload"
@@ -955,7 +955,7 @@ mod tests {
 
     impl BestTransactions for MockBestTransactions {
         fn mark_invalid(&mut self, _tx: &Self::Item, kind: InvalidPoolTransactionError) {
-            if matches!(kind, InvalidPoolTransactionError::OversizedData { .. }) {
+            if kind.is_oversized() {
                 self.oversized_marked += 1;
             }
         }

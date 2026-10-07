@@ -987,7 +987,7 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
         .starts_with(&IZoneInbox::advanceTempoHeadersCall::SELECTOR)
     {
         eyre::ensure!(
-            block.body().transactions.len() == 1,
+            block.transaction_count() == 1,
             "advanceTempoHeaders must be the only transaction in its block"
         );
         let call = IZoneInbox::advanceTempoHeadersCall::abi_decode(signed.tx().input.as_ref())?;

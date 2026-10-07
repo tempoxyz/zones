@@ -756,7 +756,7 @@ where
     pub(crate) fn resolve_start_block(&self) -> Result<u64, L1SubscriberError> {
         let state = self.zone_provider.latest().map_err(eyre::Report::from)?;
         let local_checkpoint = state.tempo_num_hash().map_err(eyre::Report::from)?;
-        if local_checkpoint.hash == B256::ZERO {
+        if local_checkpoint.hash.is_zero() {
             return Err(eyre::eyre!("zone genesis is not anchored to an L1 block").into());
         }
         let local_tempo_block_number = local_checkpoint.number;

@@ -210,7 +210,8 @@ pub(crate) fn settlement_quota() -> Quota {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::address;
+
+    use alloy_primitives::Address;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{
@@ -255,8 +256,8 @@ mod tests {
 
     #[test]
     fn namespace_separates_l1_environments_and_portals() {
-        let portal_a = address!("1111111111111111111111111111111111111111");
-        let portal_b = address!("2222222222222222222222222222222222222222");
+        let portal_a = Address::repeat_byte(0x11);
+        let portal_b = Address::repeat_byte(0x22);
 
         assert_ne!(
             namespace(7, P2pNetworkId::new(1, portal_a)),

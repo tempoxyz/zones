@@ -6,7 +6,7 @@ use alloy::{
     primitives::{Address, B256, U64, U256},
     providers::{Provider, ProviderBuilder},
 };
-use alloy_rpc_types_eth::BlockId;
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
 use eyre::{Context as _, ensure, eyre};
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
@@ -199,7 +199,7 @@ where
         .await
         .wrap_err("failed resolving Zone through ZoneFactory")?;
     ensure!(
-        factory_info.portal != Address::ZERO,
+        !factory_info.portal.is_zero(),
         "ZoneFactory has no Zone {expected_zone_id} at finalized block {block_number}"
     );
     ensure!(
@@ -242,7 +242,7 @@ where
     let enabled_token_count_call = portal.enabledTokenCount().block(block_id);
     let encryption_key_call = async {
         let key_count = portal.encryptionKeyCount().block(block_id).call().await?;
-        if key_count == U256::ZERO {
+        if key_count.is_zero() {
             Ok(None)
         } else {
             portal
@@ -328,7 +328,7 @@ where
     .await?;
 
     let encryption_key = encryption_key
-        .filter(|key| key.x != B256::ZERO)
+        .filter(|key| !key.x.is_zero())
         .map(|key| {
             let y_parity = key.normalized_y_parity().ok_or_else(|| {
                 eyre!(
@@ -446,7 +446,7 @@ pub(crate) async fn query_common_blocks(
                     let block: Option<RpcBlock> = provider
                         .raw_request(
                             "eth_getBlockByNumber".into(),
-                            (format!("0x{height:x}"), false),
+                            (BlockNumberOrTag::Number(height), false),
                         )
                         .await?;
                     block.ok_or_else(|| eyre!("block {height} not found"))

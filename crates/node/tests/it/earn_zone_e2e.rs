@@ -13,7 +13,7 @@ use alloy::{
     primitives::{Address, B256, Bytes, TxKind, U256, keccak256},
     providers::{Provider, ProviderBuilder},
 };
-use alloy_network::ReceiptResponse;
+use alloy_network::{ReceiptResponse, TransactionBuilder as _};
 use alloy_rpc_types_eth::{Filter, TransactionRequest};
 use alloy_sol_types::{SolCall, SolConstructor, SolValue};
 use eyre::WrapErr;
@@ -21,7 +21,8 @@ use std::time::Duration;
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
 use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP403Registry};
 use tempo_precompiles::{
-    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_registry::AuthRole,
+    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
+    tip403_registry::AuthRole,
 };
 use tempo_primitives::transaction::Call;
 use tempo_zone_contracts::{DepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
@@ -137,13 +138,6 @@ alloy_sol_types::sol! {
         DistributorConfig distributorConfig;
         FeeConfig fees;
         uint64 transferPolicyId;
-    }
-
-    #[sol(rpc)]
-    contract EarnShare {
-        function approve(address spender, uint256 amount) external returns (bool);
-        function balanceOf(address account) external view returns (uint256);
-        function totalSupply() external view returns (uint256);
     }
 
     #[sol(rpc)]
@@ -430,7 +424,7 @@ impl EarnZoneFixture {
         let provider = l1.dev_provider();
         let authority_contract = DemoTokenAuthority::new(authority, &provider);
         let receipt = IRolesAuth::new(PATH_USD_ADDRESS, &provider)
-            .grantRole(keccak256("ISSUER_ROLE"), authority)
+            .grantRole(ISSUER_ROLE, authority)
             .send()
             .await?
             .get_receipt()
@@ -438,7 +432,7 @@ impl EarnZoneFixture {
         eyre::ensure!(receipt.status(), "granting reserve issuer role failed");
         for token in [vault_asset, alternate_asset] {
             let receipt = IRolesAuth::new(token, &provider)
-                .grantRole(keccak256("ISSUER_ROLE"), authority)
+                .grantRole(ISSUER_ROLE, authority)
                 .send()
                 .await?
                 .get_receipt()
@@ -635,7 +629,7 @@ impl EarnZoneFixture {
         let supply_before = earn_vault.totalEarnShares().call().await?;
 
         let unauthorized = EarnVault::new(self.earn_vault, self.user.l1_provider())
-            .migrateEngine(Address::ZERO, U256::from(1), U256::from(1))
+            .migrateEngine(Address::ZERO, U256::ONE, U256::ONE)
             .from(self.user.address())
             .call()
             .await;
@@ -648,7 +642,7 @@ impl EarnZoneFixture {
         let operator_vault = EarnVault::new(self.earn_vault, &provider);
         eyre::ensure!(
             operator_vault
-                .migrateEngine(Address::ZERO, U256::from(1), U256::from(1))
+                .migrateEngine(Address::ZERO, U256::ONE, U256::ONE)
                 .call()
                 .await
                 .is_err(),
@@ -656,7 +650,7 @@ impl EarnZoneFixture {
         );
         eyre::ensure!(
             operator_vault
-                .migrateEngine(engine_before, U256::from(1), U256::from(1))
+                .migrateEngine(engine_before, U256::ONE, U256::ONE)
                 .call()
                 .await
                 .is_err(),
@@ -807,7 +801,7 @@ impl EarnZoneFixture {
             portal_after - portal_before
         );
         eyre::ensure!(
-            self.l1.balance_of(token, self.router).await? == U256::ZERO,
+            self.l1.balance_of(token, self.router).await?.is_zero(),
             "{description} left tokens on the closed-loop router"
         );
         Ok(())
@@ -921,12 +915,7 @@ impl EarnZoneFixture {
         eyre::ensure!(callback_success, "Earn deposit callback failed");
         let after = self
             .zone
-            .wait_for_balance(
-                self.earn_share,
-                recipient,
-                before + U256::from(1),
-                E2E_TIMEOUT,
-            )
+            .wait_for_balance(self.earn_share, recipient, before + U256::ONE, E2E_TIMEOUT)
             .await?;
         let minted = after - before;
         self.assert_private_return(
@@ -979,7 +968,7 @@ impl EarnZoneFixture {
             .balance_of(input_token, self.user.address())
             .await?;
         let recipient_earn_before = self.zone.balance_of(self.earn_share, recipient).await?;
-        let share_supply_before = EarnShare::new(self.earn_share, self.l1.provider())
+        let share_supply_before = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1022,7 +1011,7 @@ impl EarnZoneFixture {
             "failed Earn callback credited private EarnShare"
         );
         assert_eq!(
-            EarnShare::new(self.earn_share, self.l1.provider())
+            ITIP20::new(self.earn_share, self.l1.provider())
                 .totalSupply()
                 .call()
                 .await?,
@@ -1070,7 +1059,7 @@ impl EarnZoneFixture {
             .l1
             .balance_of(self.earn_share, self.user.address())
             .await?;
-        let share_supply_before = EarnShare::new(self.earn_share, self.l1.provider())
+        let share_supply_before = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1107,11 +1096,11 @@ impl EarnZoneFixture {
             .wait_for_balance(
                 self.earn_share,
                 self.user.address(),
-                public_refund_before + U256::from(1),
+                public_refund_before + U256::ONE,
                 BOUNCE_TIMEOUT,
             )
             .await?;
-        let share_supply_after = EarnShare::new(self.earn_share, self.l1.provider())
+        let share_supply_after = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1207,7 +1196,7 @@ impl EarnZoneFixture {
 
         let after = self
             .zone
-            .wait_for_balance(output_token, recipient, before + U256::from(1), E2E_TIMEOUT)
+            .wait_for_balance(output_token, recipient, before + U256::ONE, E2E_TIMEOUT)
             .await?;
         let returned = after - before;
         self.assert_private_return(
@@ -1315,11 +1304,8 @@ impl EarnZoneFixture {
             .encrypt_deposit_for_portal(self.portal, user, user, B256::ZERO)
             .await?;
         let private_before = self.zone.balance_of(self.earn_share, user).await?;
-        let public_before = EarnShare::new(self.earn_share, self.l1.provider())
-            .balanceOf(user)
-            .call()
-            .await?;
-        let supply_before = EarnShare::new(self.earn_share, self.l1.provider())
+        let public_before = self.l1.balance_of(self.earn_share, user).await?;
+        let supply_before = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1353,7 +1339,7 @@ impl EarnZoneFixture {
             Call {
                 to: TxKind::Call(self.earn_share),
                 value: U256::ZERO,
-                input: EarnShare::approveCall {
+                input: ITIP20::approveCall {
                     spender: self.portal,
                     amount: earn_shares,
                 }
@@ -1416,11 +1402,8 @@ impl EarnZoneFixture {
             .balanceOf(self.engine)
             .call()
             .await?;
-        let public_after = EarnShare::new(self.earn_share, self.l1.provider())
-            .balanceOf(user)
-            .call()
-            .await?;
-        let supply_after = EarnShare::new(self.earn_share, self.l1.provider())
+        let public_after = self.l1.balance_of(self.earn_share, user).await?;
+        let supply_after = ITIP20::new(self.earn_share, self.l1.provider())
             .totalSupply()
             .call()
             .await?;
@@ -1445,11 +1428,11 @@ async fn deploy_contract(
 ) -> eyre::Result<Address> {
     let mut deployment = forge_bytecode(contract)?.to_vec();
     deployment.extend_from_slice(&constructor_args);
-    let mut request = TransactionRequest::default().input(Bytes::from(deployment).into());
-    request.to = Some(TxKind::Create);
     // Contract-to-contract constructor calls are valid on Tempo but can be under-estimated by the
     // generic Ethereum gas estimator. Earn's local deployer likewise applies explicit headroom.
-    request.gas = Some(CONTRACT_DEPLOYMENT_TX_GAS_LIMIT);
+    let request = TransactionRequest::default()
+        .with_deploy_code(deployment)
+        .gas_limit(CONTRACT_DEPLOYMENT_TX_GAS_LIMIT);
     let receipt = l1
         .dev_provider()
         .send_transaction(request)
@@ -1638,7 +1621,7 @@ async fn zone_ineligible_private_transfer_blocked() -> eyre::Result<()> {
         .wallet(fixture.l1.user_signer())
         .connect_http(fixture.zone.http_url().clone());
     let transfer = ITIP20::new(fixture.earn_share, &user_provider)
-        .transfer(outsider, U256::from(1))
+        .transfer(outsider, U256::ONE)
         .from(user)
         .call()
         .await;
@@ -1864,7 +1847,7 @@ async fn matrix_deposit_public_public_succeeds() -> eyre::Result<()> {
         .await?;
     eyre::ensure!(receipt.status(), "public EarnVault approval failed");
     let receipt = EarnVault::new(fixture.earn_vault, provider)
-        .deposit(U256::from(AMOUNT), user, U256::from(1))
+        .deposit(U256::from(AMOUNT), user, U256::ONE)
         .send()
         .await?
         .get_receipt()
@@ -1892,7 +1875,7 @@ async fn matrix_redeem_public_public_succeeds() -> eyre::Result<()> {
         .get_receipt()
         .await?;
     EarnVault::new(fixture.earn_vault, provider)
-        .deposit(U256::from(AMOUNT), user, U256::from(1))
+        .deposit(U256::from(AMOUNT), user, U256::ONE)
         .send()
         .await?
         .get_receipt()
@@ -1907,7 +1890,7 @@ async fn matrix_redeem_public_public_succeeds() -> eyre::Result<()> {
         .await?;
     eyre::ensure!(receipt.status(), "public EarnShare approval failed");
     let receipt = EarnVault::new(fixture.earn_vault, provider)
-        .redeem(earn_shares, user, U256::from(1))
+        .redeem(earn_shares, user, U256::ONE)
         .send()
         .await?
         .get_receipt()
@@ -1929,7 +1912,7 @@ async fn matrix_deposit_public_private_rejects_retired_router_surface() -> eyre:
         .depositToZone(
             fixture.earn_vault,
             U256::from(AMOUNT),
-            U256::from(1),
+            U256::ONE,
             legacy_delivery(fixture.portal, user),
         )
         .call()
@@ -1949,7 +1932,7 @@ async fn matrix_redeem_public_private_rejects_retired_router_surface() -> eyre::
         .redeemToZone(
             fixture.earn_vault,
             U256::from(AMOUNT),
-            U256::from(1),
+            U256::ONE,
             legacy_delivery(fixture.portal, user),
         )
         .call()
@@ -1989,7 +1972,7 @@ async fn matrix_redeem_private_public_rejects_legacy_destination() -> eyre::Resu
     let user = fixture.user.address();
     let earn_shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
     let private_before = fixture.zone.balance_of(fixture.earn_share, user).await?;
-    let supply_before = EarnShare::new(fixture.earn_share, fixture.l1.provider())
+    let supply_before = ITIP20::new(fixture.earn_share, fixture.l1.provider())
         .totalSupply()
         .call()
         .await?;
@@ -2036,7 +2019,7 @@ async fn matrix_redeem_private_public_rejects_legacy_destination() -> eyre::Resu
         )
         .await?;
     assert_eq!(
-        EarnShare::new(fixture.earn_share, fixture.l1.provider())
+        ITIP20::new(fixture.earn_share, fixture.l1.provider())
             .totalSupply()
             .call()
             .await?,

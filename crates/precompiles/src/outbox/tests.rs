@@ -4,8 +4,8 @@ use super::{
 };
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Bytes, address, keccak256};
-use alloy_sol_types::{SolCall, SolEvent, SolInterface, SolValue};
+use alloy_primitives::{Bytes, address};
+use alloy_sol_types::{SolCall, SolEvent, SolInterface};
 use revm::{
     context::JournalTr,
     precompile::{PrecompileHalt, PrecompileResult, PrecompileStatus},
@@ -32,12 +32,12 @@ const GAS: u64 = 10_000_000;
 const ANCHOR: u64 = 42;
 const TEST_MAX_TEMPO_GAS_RATE: u128 = 1_000_000_000_000_000_000;
 const TX_HASH: B256 = B256::repeat_byte(0x42);
-const PORTAL: Address = address!("0x7777777777777777777777777777777777777777");
-const ALICE: Address = address!("0x00000000000000000000000000000000000000a1");
-const BOB: Address = address!("0x00000000000000000000000000000000000000b2");
-const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000c3");
-const FEE_PAYER: Address = address!("0x00000000000000000000000000000000000000d4");
-const GATEWAY: Address = address!("0x00000000000000000000000000000000000000e5");
+const PORTAL: Address = Address::repeat_byte(0x77);
+const ALICE: Address = Address::with_last_byte(0xa1);
+const BOB: Address = Address::with_last_byte(0xb2);
+const SEQUENCER: Address = Address::with_last_byte(0xc3);
+const FEE_PAYER: Address = Address::with_last_byte(0xd4);
+const GATEWAY: Address = Address::with_last_byte(0xe5);
 
 struct Harness {
     ctx: TestContext,
@@ -51,10 +51,9 @@ impl Harness {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
         let l1 = MockL1Reader::default();
-        let sequencer_membership_slot = keccak256((SEQUENCER, portal::slots::ROLE).abi_encode());
         l1.insert(
             PORTAL,
-            sequencer_membership_slot.into(),
+            SEQUENCER.mapping_slot(portal::slots::ROLE),
             ANCHOR,
             U256::from(u8::from(Role::Sequencer)),
         );
@@ -214,9 +213,12 @@ impl Harness {
     }
 
     fn set_role(&self, account: Address, role: Role) {
-        let slot = keccak256((account, portal::slots::ROLE).abi_encode());
-        self.l1
-            .insert(PORTAL, slot.into(), ANCHOR, U256::from(u8::from(role)));
+        self.l1.insert(
+            PORTAL,
+            account.mapping_slot(portal::slots::ROLE),
+            ANCHOR,
+            U256::from(u8::from(role)),
+        );
     }
 
     fn set_token_enabled(&self, enabled: bool) {

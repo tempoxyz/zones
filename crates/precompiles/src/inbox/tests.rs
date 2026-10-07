@@ -25,10 +25,10 @@ use crate::test_utils::{
 };
 
 const GAS: u64 = 30_000_000;
-const PORTAL: Address = address!("0x4242424242424242424242424242424242424242");
-const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000a1");
-const ALICE: Address = address!("0x00000000000000000000000000000000000000a2");
-const BOB: Address = address!("0x00000000000000000000000000000000000000b0");
+const PORTAL: Address = Address::repeat_byte(0x42);
+const SEQUENCER: Address = Address::with_last_byte(0xa1);
+const ALICE: Address = Address::with_last_byte(0xa2);
+const BOB: Address = Address::with_last_byte(0xb0);
 
 struct Harness {
     ctx: TestContext,
@@ -548,11 +548,9 @@ fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let nonce = 1u64;
     harness.seed_fallback_recipient(nonce, BOB)?;
-    let mut encoded_nonce = [0u8; 20];
-    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let first = WithdrawalBounceBackDeposit {
         token: PATH_USD_ADDRESS,
-        to: Address::from(encoded_nonce),
+        to: Address::left_padding_from(&nonce.to_be_bytes()),
         amount: 100,
     };
     let first_hash = keccak256(
@@ -1107,11 +1105,9 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
     let nonce = 8u64;
     harness.seed_fallback_recipient(nonce, BOB)?;
     let token = address!("0x20c00000000000000000000000000000000000cc");
-    let mut encoded_nonce = [0u8; 20];
-    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = WithdrawalBounceBackDeposit {
         token,
-        to: Address::from(encoded_nonce),
+        to: Address::left_padding_from(&nonce.to_be_bytes()),
         amount: 555,
     };
     let expected_hash = keccak256(
@@ -1156,11 +1152,9 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let nonce = 7u64;
     harness.seed_fallback_recipient(nonce, BOB)?;
-    let mut encoded_nonce = [0u8; 20];
-    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = WithdrawalBounceBackDeposit {
         token: PATH_USD_ADDRESS,
-        to: Address::from(encoded_nonce),
+        to: Address::left_padding_from(&nonce.to_be_bytes()),
         amount: 321,
     };
     let expected_hash = keccak256(

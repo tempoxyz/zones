@@ -24,7 +24,7 @@ pub async fn refresh_portal_pause(
         .get_header_by_number(BlockNumberOrTag::Finalized)
         .await?
         .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))?;
-    let block = NumHash::new(header.number(), header.hash());
+    let block = header.num_hash();
     tracker.observe_finalized_l1_timestamp(header.timestamp());
     if tracker.portal_pause_block() == Some(block) {
         return Ok(());
