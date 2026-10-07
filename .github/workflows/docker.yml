@@ -624,8 +624,11 @@ jobs:
 
   publish-companion-images:
     name: Publish companion Docker images
-    needs: build-and-push
+    needs:
+      - build-and-push
+      - production-reproducible-verify
     if: >-
+      needs.production-reproducible-verify.result == 'success' &&
       github.repository == 'tempoxyz/zones' &&
       github.event_name != 'pull_request' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
@@ -754,6 +757,7 @@ jobs:
       clean_sha256: ${{ steps.hash.outputs.sha256 }}
       clean_runtime_config_sha256: ${{ steps.hash.outputs.runtime_config_sha256 }}
       clean_ca_bundle_sha256: ${{ steps.hash.outputs.ca_bundle_sha256 }}
+      clean_rootfs_sha256: ${{ steps.hash.outputs.rootfs_sha256 }}
     steps:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
@@ -809,10 +813,17 @@ jobs:
             exit 1
           }
 
+          rootfs_sha256="$(docker export "$container_id" | python3 scripts/hash-image-rootfs.py)"
+          [[ "$rootfs_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Invalid clean root filesystem SHA-256: $rootfs_sha256" >&2
+            exit 1
+          }
+
           {
             echo "sha256=$sha256"
             echo "runtime_config_sha256=$runtime_config_sha256"
             echo "ca_bundle_sha256=$ca_bundle_sha256"
+            echo "rootfs_sha256=$rootfs_sha256"
           } >> "$GITHUB_OUTPUT"
 
   production-reproducible-verify:
@@ -842,6 +853,12 @@ jobs:
           artifact-ids: ${{ needs.build-and-push.outputs.artifact_id }}
           path: ${{ runner.temp }}/candidate-images
 
+      - name: Check out resolved commit for filesystem hashing
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
+          persist-credentials: false
+
       - name: Log in to Container Registry
         uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
@@ -861,6 +878,7 @@ jobs:
           CLEAN_SHA256: ${{ needs.production-reproducible-clean-rebuild.outputs.clean_sha256 }}
           CLEAN_RUNTIME_CONFIG_SHA256: ${{ needs.production-reproducible-clean-rebuild.outputs.clean_runtime_config_sha256 }}
           CLEAN_CA_BUNDLE_SHA256: ${{ needs.production-reproducible-clean-rebuild.outputs.clean_ca_bundle_sha256 }}
+          CLEAN_ROOTFS_SHA256: ${{ needs.production-reproducible-clean-rebuild.outputs.clean_rootfs_sha256 }}
           BINARY_PATH: /usr/local/bin/tempo-zone
           CONTRACT_NAME: tempo-zone-linux-x86_64-reproducible
           CONTRACT_VERSION: "1"
@@ -872,6 +890,7 @@ jobs:
           image_sha256=""
           image_runtime_config_sha256=""
           image_ca_bundle_sha256=""
+          image_rootfs_sha256=""
           comparison_result="failed"
           failure=""
           container_id=""
@@ -889,9 +908,11 @@ jobs:
               --arg image_sha256 "$image_sha256" \
               --arg image_runtime_config_sha256 "$image_runtime_config_sha256" \
               --arg image_ca_bundle_sha256 "$image_ca_bundle_sha256" \
+              --arg image_rootfs_sha256 "$image_rootfs_sha256" \
               --arg clean_build_sha256 "$CLEAN_SHA256" \
               --arg clean_runtime_config_sha256 "$CLEAN_RUNTIME_CONFIG_SHA256" \
               --arg clean_ca_bundle_sha256 "$CLEAN_CA_BUNDLE_SHA256" \
+              --arg clean_rootfs_sha256 "$CLEAN_ROOTFS_SHA256" \
               --arg binary_comparison_result "$comparison_result" \
               --arg failure "$failure" \
               '{
@@ -904,18 +925,20 @@ jobs:
                   cargo_profile: "reproducible",
                   cargo_features: ["jemalloc"]
                 },
-                verification_scope: "tempo-zone binary, runtime execution config, and CA bundle",
+                verification_scope: "tempo-zone binary, runtime execution config, CA bundle, and root filesystem",
                 candidate_image: {
                   repository: $image_repository,
                   digest: $image_digest,
                   binary_path: $binary_path,
                   binary_sha256: $image_sha256,
                   runtime_config_sha256: $image_runtime_config_sha256,
-                  ca_bundle_sha256: $image_ca_bundle_sha256
+                  ca_bundle_sha256: $image_ca_bundle_sha256,
+                  rootfs_sha256: $image_rootfs_sha256
                 },
                 clean_build_sha256: $clean_build_sha256,
                 clean_runtime_config_sha256: $clean_runtime_config_sha256,
                 clean_ca_bundle_sha256: $clean_ca_bundle_sha256,
+                clean_rootfs_sha256: $clean_rootfs_sha256,
                 binary_comparison_result: $binary_comparison_result,
                 failure: $failure
               }' > "$MANIFEST"
@@ -947,6 +970,7 @@ jobs:
           image_runtime_config_sha256="$(printf '%s' "$image_runtime_config" | sha256sum | awk '{print $1}')"
           docker cp "$container_id:/etc/ssl/certs/ca-certificates.crt" "$RUNNER_TEMP/ca-certificates.crt"
           image_ca_bundle_sha256="$(sha256sum "$RUNNER_TEMP/ca-certificates.crt" | awk '{print $1}')"
+          image_rootfs_sha256="$(docker export "$container_id" | python3 scripts/hash-image-rootfs.py)"
 
           [[ "$image_runtime_config_sha256" =~ ^[0-9a-f]{64}$ ]] || {
             failure="invalid image runtime-config SHA-256"
@@ -958,12 +982,18 @@ jobs:
             echo "Invalid image CA-bundle SHA-256: $image_ca_bundle_sha256" >&2
             exit 1
           }
+          [[ "$image_rootfs_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            failure="invalid image root filesystem SHA-256"
+            echo "Invalid image root filesystem SHA-256: $image_rootfs_sha256" >&2
+            exit 1
+          }
 
           if [[ "$image_sha256" == "$CLEAN_SHA256" && \
               "$image_runtime_config_sha256" == "$CLEAN_RUNTIME_CONFIG_SHA256" && \
-              "$image_ca_bundle_sha256" == "$CLEAN_CA_BUNDLE_SHA256" ]]; then
+              "$image_ca_bundle_sha256" == "$CLEAN_CA_BUNDLE_SHA256" && \
+              "$image_rootfs_sha256" == "$CLEAN_ROOTFS_SHA256" ]]; then
             comparison_result="success"
-            echo "Staged tempo-zone binary and runtime inputs match the clean rebuild"
+            echo "Staged tempo-zone binary and runtime filesystem match the clean rebuild"
           else
             failure="staged binary or runtime input does not match clean rebuild"
             echo "::error::Staged production reproducibility verification mismatch"

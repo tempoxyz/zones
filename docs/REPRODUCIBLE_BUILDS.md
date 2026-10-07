@@ -51,6 +51,13 @@ the candidate GHCR package.
 This checks the reproducible-profile candidate's binary only. It does not verify
 the normal profiling image, the full container filesystem, or the prover EIF.
 
+For normal production publishing, the Docker Build workflow checks the staged
+`tempo-zone` binary, runtime configuration, CA bundle, and normalized root
+filesystem against a separate clean rebuild before it promotes the image.
+Companion image tags publish only after this production check succeeds. This
+check gates their publication; it does not independently reproduce companion
+image contents.
+
 ## Prover EIF
 
 The separate `reproducible_eif_verify` dispatch option compares unsigned prover

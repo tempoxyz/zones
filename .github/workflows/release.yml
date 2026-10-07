@@ -47,7 +47,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
           fetch-depth: 0
           persist-credentials: false
-          submodules: recursive
+          submodules: false
 
       - name: Record immutable release inputs
         id: release
@@ -88,6 +88,18 @@ jobs:
           }
           [[ "$tag_commit" == "$commit_sha" ]] || {
             echo "Release tag $version resolves to $tag_commit, not $commit_sha" >&2
+            exit 1
+          }
+
+          # A manual dispatch runs the workflow from main but checks out the
+          # selected tag. Reject tag code that has not reached protected main
+          # before OIDC-enabled build jobs execute scripts from that checkout.
+          git show-ref --verify --quiet refs/remotes/origin/main || {
+            echo "Protected main was not fetched" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$commit_sha" refs/remotes/origin/main || {
+            echo "Release tag $version does not point to a commit on main" >&2
             exit 1
           }
 
