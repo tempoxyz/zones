@@ -813,7 +813,7 @@ jobs:
             exit 1
           }
 
-          rootfs_sha256="$(docker export "$container_id" | go run scripts/hash-image-rootfs.go)"
+          rootfs_sha256="$(docker export "$container_id" | python3 scripts/hash-image-rootfs.py)"
           [[ "$rootfs_sha256" =~ ^[0-9a-f]{64}$ ]] || {
             echo "Invalid clean root filesystem SHA-256: $rootfs_sha256" >&2
             exit 1
@@ -970,7 +970,7 @@ jobs:
           image_runtime_config_sha256="$(printf '%s' "$image_runtime_config" | sha256sum | awk '{print $1}')"
           docker cp "$container_id:/etc/ssl/certs/ca-certificates.crt" "$RUNNER_TEMP/ca-certificates.crt"
           image_ca_bundle_sha256="$(sha256sum "$RUNNER_TEMP/ca-certificates.crt" | awk '{print $1}')"
-          image_rootfs_sha256="$(docker export "$container_id" | go run scripts/hash-image-rootfs.go)"
+          image_rootfs_sha256="$(docker export "$container_id" | python3 scripts/hash-image-rootfs.py)"
 
           [[ "$image_runtime_config_sha256" =~ ^[0-9a-f]{64}$ ]] || {
             failure="invalid image runtime-config SHA-256"
