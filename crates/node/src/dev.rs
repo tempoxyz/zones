@@ -238,6 +238,7 @@ mod command {
 
     use alloy_primitives::Address;
     use alloy_signer_local::PrivateKeySigner;
+    use eyre::OptionExt;
 
     use super::{ProvisionConfig, provision_zone};
     use crate::cli::ZoneCli;
