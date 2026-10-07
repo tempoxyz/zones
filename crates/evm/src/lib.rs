@@ -89,9 +89,9 @@ where
         input: EvmEnv<TempoHardfork, TempoBlockEnv>,
     ) -> TempoEvm<L1OverlayDB<DB, L1>> {
         let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
-        let l1 = db.l1_state().clone();
-        TempoEvm::new_with_precompiles(db, input, move |cfg, actions, non_creditable_slots| {
-            zone_precompiles(cfg, l1.clone(), actions, non_creditable_slots)
+        TempoEvm::new_with_precompiles(db, input, |ctx, actions, non_creditable_slots| {
+            let l1 = ctx.journaled_state.database.l1_state().clone();
+            zone_precompiles(&ctx.cfg, l1, actions, non_creditable_slots)
         })
         .with_fee_manager(ZoneProtocolFeeManager::new())
     }
