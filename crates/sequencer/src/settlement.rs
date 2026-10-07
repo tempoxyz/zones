@@ -27,8 +27,9 @@
 use std::{
     collections::BTreeMap,
     fmt,
+    num::NonZeroU64,
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -59,14 +60,12 @@ use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
-use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
+use tempo_alloy::{TempoNetwork, fillers::ExpiringNonceFiller, rpc::TempoTransactionRequest};
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_primitives::{Block, TempoReceipt};
+use tempo_primitives::{Block, TempoReceipt, transaction::TEMPO_EXPIRING_NONCE_KEY};
 use tracing::{info, instrument, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_prover::{ProofBundle, VerifierMode};
-
-use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
 #[derive(Debug)]
 pub enum BatchSubmitError {
@@ -475,17 +474,12 @@ impl BatchSubmitter {
             )?]
         };
 
-        // Refetch the committed lane nonce for every submission attempt. The provider's
-        // process-local nonce cache advances before a send is known to have succeeded, so
-        // relying on it after a failed send can create an unfillable 2D-nonce gap.
-        let submission_address = signer
-            .ok_or_eyre("batch submission requires the local sequencer signer")?
-            .address();
-        let nonce = self
-            .l1_provider
-            .get_transaction_count_with_nonce_key(submission_address, SUBMIT_BATCH_NONCE_KEY)
-            .await
-            .map_err(|error| BatchSubmitError::Other(error.into()))?;
+        signer.ok_or_eyre("batch submission requires the local sequencer signer")?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| BatchSubmitError::Other(error.into()))?
+            .as_secs();
+        let valid_before = batch_submission_valid_before(timestamp)?;
 
         info!(
             anchor_mode = prepared.anchor.mode_name(),
@@ -496,8 +490,8 @@ impl BatchSubmitter {
             anchors_to_current_tip,
             ?verifier_mode,
             batch_prev_block_hash = %batch.prev_block_hash,
-            nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
-            nonce,
+            nonce_key = ?TEMPO_EXPIRING_NONCE_KEY,
+            valid_before = valid_before.get(),
             "Submitting batch to ZonePortal on L1"
         );
 
@@ -516,8 +510,7 @@ impl BatchSubmitter {
                         U256::from(batch.zone_height),
                         signatures,
                     )
-                    .nonce_key(SUBMIT_BATCH_NONCE_KEY)
-                    .nonce(nonce)
+                    .map(|request| expiring_batch_submission(request, valid_before))
                     .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
                     .max_priority_fee_per_gas(0);
                 if anchors_to_current_tip {
@@ -540,8 +533,7 @@ impl BatchSubmitter {
                         U256::from(batch.zone_height),
                         signatures,
                     )
-                    .nonce_key(SUBMIT_BATCH_NONCE_KEY)
-                    .nonce(nonce)
+                    .map(|request| expiring_batch_submission(request, valid_before))
                     .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
                     .max_priority_fee_per_gas(0);
                 if anchors_to_current_tip {
@@ -1939,6 +1931,23 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
     hi.saturating_sub(LOG_QUERY_BLOCK_CHUNK - 1).max(floor)
 }
 
+fn expiring_batch_submission(
+    mut request: TempoTransactionRequest,
+    valid_before: NonZeroU64,
+) -> TempoTransactionRequest {
+    request.set_nonce_key(TEMPO_EXPIRING_NONCE_KEY);
+    request.inner.nonce = Some(0);
+    request.set_valid_before(valid_before);
+    request
+}
+
+fn batch_submission_valid_before(timestamp: u64) -> Result<NonZeroU64> {
+    timestamp
+        .checked_add(ExpiringNonceFiller::DEFAULT_EXPIRY_SECS)
+        .and_then(NonZeroU64::new)
+        .ok_or_eyre("batch submission expiry timestamp overflow")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3236,5 +3245,54 @@ mod tests {
 
         let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, corrupted_hash);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn expiring_batch_submission_preserves_call_fields() {
+        let mut request = TempoTransactionRequest::default();
+        request.inner.to = Some(Address::repeat_byte(0x11).into());
+        request.inner.input = Bytes::from_static(b"submitBatch").into();
+        request.inner.gas = Some(SUBMIT_BATCH_GAS_LIMIT);
+        request.inner.max_fee_per_gas = Some(crate::TEMPO_L1_MAX_FEE_PER_GAS);
+        request.inner.max_priority_fee_per_gas = Some(0);
+        request.inner.nonce = Some(42);
+        request.nonce_key = Some(U256::from(1));
+        let valid_before = NonZeroU64::new(1_025).unwrap();
+
+        let submission = expiring_batch_submission(request.clone(), valid_before);
+
+        request.inner.nonce = Some(0);
+        request.nonce_key = Some(TEMPO_EXPIRING_NONCE_KEY);
+        request.valid_before = Some(valid_before);
+        assert_eq!(submission, request);
+    }
+
+    #[test]
+    fn expiring_batch_retry_refreshes_expiry() {
+        let request = TempoTransactionRequest::default();
+        let first_expiry = batch_submission_valid_before(1_000).unwrap();
+        let retry_expiry = batch_submission_valid_before(1_030).unwrap();
+        let first = expiring_batch_submission(request.clone(), first_expiry);
+        let retry = expiring_batch_submission(request, retry_expiry);
+
+        assert_eq!(first.nonce_key, Some(TEMPO_EXPIRING_NONCE_KEY));
+        assert_eq!(retry.nonce_key, first.nonce_key);
+        assert_eq!(first.inner.nonce, Some(0));
+        assert_eq!(retry.inner.nonce, first.inner.nonce);
+        assert_eq!(first.valid_before, Some(first_expiry));
+        assert_eq!(retry.valid_before, Some(retry_expiry));
+        assert_eq!(first_expiry.get(), 1_025);
+        assert_eq!(retry_expiry.get(), 1_055);
+        assert_ne!(first, retry);
+    }
+
+    #[test]
+    fn expiring_batch_submission_rejects_expiry_overflow() {
+        assert_eq!(
+            batch_submission_valid_before(u64::MAX)
+                .unwrap_err()
+                .to_string(),
+            "batch submission expiry timestamp overflow"
+        );
     }
 }
