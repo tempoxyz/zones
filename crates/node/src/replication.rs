@@ -549,7 +549,7 @@ mod tests {
         atomic::{AtomicU64, AtomicUsize, Ordering},
     };
 
-    use futures::{StreamExt as _, stream};
+    use futures::stream;
     use tokio::sync::{oneshot, watch};
 
     use super::*;

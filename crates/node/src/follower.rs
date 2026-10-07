@@ -1675,7 +1675,7 @@ mod tests {
         };
         let block = SealedBlock::seal_slow(Block { header, body });
         validate_pending_peer_block(&block, &schedule, Some(&leader)).unwrap();
-        validate_pending_peer_block(&block, &schedule, Some(&other)).unwrap_err();
+        assert!(validate_pending_peer_block(&block, &schedule, Some(&other)).is_err());
         validate_pending_peer_block(&block, &schedule, None).unwrap();
     }
 
@@ -1691,6 +1691,7 @@ mod tests {
                 transactions_root: body.calculate_tx_root(),
                 ommers_hash: body.calculate_ommers_root(),
                 withdrawals_root: body.calculate_withdrawals_root(),
+                base_fee_per_gas: Some(0),
                 ..Default::default()
             },
             ..Default::default()
@@ -1704,7 +1705,7 @@ mod tests {
         mismatched.body.withdrawals = None;
         let received = decode_peer_block(&alloy_rlp::encode(&mismatched)).unwrap();
         assert_eq!(received.block.hash(), valid_hash);
-        validate_peer_block_body(&received.block).unwrap_err();
+        assert!(validate_peer_block_body(&received.block).is_err());
     }
     #[test]
     fn full_import_validates_deferred_and_current_portal_events() {
