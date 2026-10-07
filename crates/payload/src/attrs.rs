@@ -149,8 +149,7 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
         &self,
         payload: TempoExecutionData,
     ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
-        let TempoExecutionData { block } = payload;
-        Ok(block.into_sealed_block())
+        Ok(payload.block.into_sealed_block())
     }
 
     fn validate_payload_attributes_against_header(
