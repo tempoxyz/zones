@@ -3,7 +3,7 @@
 # Reproducible build of the canonical Linux x86_64 `tempo-zone` binary.
 
 ARG RUST_TOOLCHAIN=1.96.0
-FROM rust:${RUST_TOOLCHAIN}-bookworm@sha256:64d9b7f60e3abb08d477cad983d0a3743acc53a19369ba4482510184c9c807e5 AS builder
+FROM rust:${RUST_TOOLCHAIN}-bookworm@sha256:64d9b7f60e3abb08d477cad983d0a3743acc53a19369ba4482510184c9c807e5 AS reproducible-builder-base
 
 ARG SOURCE_DATE_EPOCH
 ARG GIT_SHA
@@ -44,6 +44,7 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
     JEMALLOC_OVERRIDE=/usr/lib/x86_64-linux-gnu/libjemalloc.a \
     RUSTFLAGS="-C symbol-mangling-version=v0 -C strip=none -C link-arg=-Wl,--build-id=none -C link-arg=-fuse-ld=mold -C metadata= --remap-path-prefix /app=. --remap-path-prefix /usr/local/cargo/registry=/registry --remap-path-prefix /usr/local/rustup=/rustup"
 
+FROM reproducible-builder-base AS builder
 RUN cargo build --locked --bin tempo-zone \
         --features jemalloc \
         --profile reproducible \
@@ -51,6 +52,15 @@ RUN cargo build --locked --bin tempo-zone \
 
 FROM scratch AS artifacts
 COPY --from=builder /app/target/x86_64-unknown-linux-gnu/reproducible/tempo-zone /tempo-zone
+
+FROM reproducible-builder-base AS prover-builder
+RUN cargo build --locked --bin tempo-zone-prover-enclave \
+        --profile reproducible \
+        --target x86_64-unknown-linux-gnu
+
+# Production and verification export the same executable before genesis packaging.
+FROM scratch AS prover-artifacts
+COPY --from=prover-builder /app/target/x86_64-unknown-linux-gnu/reproducible/tempo-zone-prover-enclave /tempo-zone-prover-enclave
 
 # The production runtime copies the canonical reproducible binary. Image layers
 # are not themselves part of this reproducibility contract.
