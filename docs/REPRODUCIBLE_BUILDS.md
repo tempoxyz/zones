@@ -51,9 +51,12 @@ the candidate GHCR package.
 This checks the reproducible-profile candidate's binary only. It does not verify
 the normal profiling image, the full container filesystem, or the prover EIF.
 
-For normal production publishing, the Docker Build workflow checks the staged
-`tempo-zone` binary, runtime configuration, CA bundle, and normalized root
-filesystem against a separate clean rebuild before it promotes the image.
+For normal production publishing, the Docker Build workflow builds the same
+`tempo-zone` Bake target with Depot and independently on a clean GitHub runner.
+It loads both image archives and requires identical Docker image IDs before
+staging and promoting Depot's candidate. The image ID covers the image config
+and its ordered layer contents. A `production_image_verify_only` dispatch runs
+this comparison without publishing production tags.
 Companion image tags publish only after this production check succeeds. This
 check gates their publication; it does not independently reproduce companion
 image contents.

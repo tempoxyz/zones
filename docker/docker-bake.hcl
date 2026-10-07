@@ -86,8 +86,8 @@ target "tempo-zone" {
     VERSION = "${VERSION}"
   }
   labels = {
-    "org.opencontainers.image.description" = "Production tempo-zone image; verification covers the binary, runtime execution config, CA bundle, and root filesystem."
-    "org.tempoxyz.reproducible.verification-scope" = "tempo-zone-binary-runtime-config-ca-bundle-rootfs"
+    "org.opencontainers.image.description" = "Production tempo-zone image verified against an independent clean image build."
+    "org.tempoxyz.reproducible.verification-scope" = "tempo-zone-image-id"
   }
   platforms = ["linux/amd64"]
 }
