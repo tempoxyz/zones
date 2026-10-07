@@ -28,8 +28,8 @@ use tempo_primitives::TempoHeader;
 use zone_chainspec::ZoneChainSpec;
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
-    BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock, ZoneStateWitness,
-    prove_zone_batch,
+    BatchWitness, PublicInputs, SpfConfig, TempoImport, TempoStateWitness, ZoneBlock,
+    ZoneStateWitness, prove_zone_batch,
 };
 
 use crate::utils::{
@@ -54,7 +54,8 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         )))
         .await?;
     let first_transaction_hash = *first_pending.tx_hash();
-    let first_tempo_block = fixture.next_block();
+    let mut first_tempo_block = fixture.next_block();
+    first_tempo_block.header.inner.state_root = EMPTY_ROOT_HASH;
     fixture.enqueue(&first_tempo_block, zone.deposit_queue(), vec![]);
     assert!(first_pending.get_receipt().await?.status());
     zone.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
@@ -65,7 +66,9 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         )))
         .await?;
     let second_transaction_hash = *second_pending.tx_hash();
-    let second_tempo_block = fixture.next_block();
+    let mut second_tempo_block = fixture.next_block();
+    second_tempo_block.header.inner.state_root = EMPTY_ROOT_HASH;
+    second_tempo_block.header.inner.parent_hash = first_tempo_block.header.hash_slow();
     fixture.enqueue(&second_tempo_block, zone.deposit_queue(), vec![]);
     assert!(second_pending.get_receipt().await?.status());
     zone.wait_for_block_number(2, DEFAULT_TIMEOUT).await?;
@@ -113,7 +116,6 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         public_inputs: PublicInputs {
             parent_chain_id: 1_337,
             zone_id: ZONE_ID,
-            portal: Address::ZERO,
             tempo_block_number: second_tempo_block.header.number(),
             anchor_block_number: second_tempo_block.header.number(),
             anchor_block_hash: second_tempo_block.header.hash_slow(),
@@ -126,10 +128,12 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 timestamp: first_built_block.header.timestamp(),
                 timestamp_millis_part: first_built_block.header.timestamp_millis_part,
                 beneficiary: first_built_block.header.beneficiary(),
-                tempo_header_rlp: Bytes::from(alloy_rlp::encode(&first_tempo_block.header)),
-                deposits: vec![],
-                decryptions: vec![],
-                enabled_tokens: vec![],
+                tempo_import: TempoImport::Full {
+                    header_rlp: Bytes::from(alloy_rlp::encode(&first_tempo_block.header)),
+                    deposits: vec![],
+                    decryptions: vec![],
+                    enabled_tokens: vec![],
+                },
                 finalize_withdrawal_batch_count: None,
                 finalize_withdrawal_batch_encrypted_senders: vec![],
                 transactions: vec![first_raw_transaction],
@@ -140,10 +144,12 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 timestamp: second_built_block.header.timestamp(),
                 timestamp_millis_part: second_built_block.header.timestamp_millis_part,
                 beneficiary: second_built_block.header.beneficiary(),
-                tempo_header_rlp: Bytes::from(alloy_rlp::encode(&second_tempo_block.header)),
-                deposits: vec![],
-                decryptions: vec![],
-                enabled_tokens: vec![],
+                tempo_import: TempoImport::Full {
+                    header_rlp: Bytes::from(alloy_rlp::encode(&second_tempo_block.header)),
+                    deposits: vec![],
+                    decryptions: vec![],
+                    enabled_tokens: vec![],
+                },
                 finalize_withdrawal_batch_count: Some(U256::ZERO),
                 finalize_withdrawal_batch_encrypted_senders: vec![],
                 transactions: vec![second_raw_transaction],
@@ -162,6 +168,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
 
     assert_eq!(output.block_transition.prevBlockHash, B256::ZERO);
     assert_eq!(output.block_transition.nextBlockHash, expected_hash);
+    assert_eq!(output.next_zone_height, second_built_block.header.number());
     assert_eq!(
         output.deposit_queue_transition.prevProcessedHash,
         B256::ZERO
@@ -190,6 +197,7 @@ async fn spf_builder_equivalence() -> eyre::Result<()> {
 
     let output = prove_zone_batch(&config, witness)?;
 
+    assert_eq!(output.next_zone_height, 1);
     assert_eq!(
         output.block_transition.nextBlockHash, built.zone_hash,
         "SPF state, transaction, or receipt roots diverged from the production builder"
@@ -219,12 +227,12 @@ async fn spf_replays_migrated_policy_transaction_with_parent_forks() -> eyre::Re
         .storage
         .as_mut()
         .expect("pathUSD genesis storage")
-        .remove(&B256::from(U256::from(7).to_be_bytes::<32>()));
+        .remove(&B256::with_last_byte(7));
 
     let (tempo_state_root, tempo_state_nodes) =
         tempo_state_with_transfer_policy(PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
     let built = build_single_transaction_block(&genesis, Some(tempo_state_root)).await?;
-    let legacy_policy_slot = U256::from(7).to_be_bytes::<32>();
+    let legacy_policy_slot = B256::with_last_byte(7);
     assert!(
         !built
             .generated_witness
@@ -245,6 +253,7 @@ async fn spf_replays_migrated_policy_transaction_with_parent_forks() -> eyre::Re
 
     let output = prove_zone_batch(&config, witness)?;
 
+    assert_eq!(output.next_zone_height, 1);
     assert_eq!(
         output.block_transition.nextBlockHash, built.zone_hash,
         "SPF state, transaction, or receipt roots diverged from the production builder"
@@ -277,7 +286,6 @@ impl BuiltTransactionBlock {
             public_inputs: PublicInputs {
                 parent_chain_id: 1_337,
                 zone_id: ZONE_ID,
-                portal: Address::ZERO,
                 tempo_block_number: self.tempo_header.number(),
                 anchor_block_number: self.tempo_header.number(),
                 anchor_block_hash: self.tempo_header.hash_slow(),
@@ -290,10 +298,12 @@ impl BuiltTransactionBlock {
                 timestamp: self.zone_timestamp,
                 timestamp_millis_part: self.zone_timestamp_millis_part,
                 beneficiary: self.zone_beneficiary,
-                tempo_header_rlp: Bytes::from(alloy_rlp::encode(&self.tempo_header)),
-                deposits: vec![],
-                decryptions: vec![],
-                enabled_tokens: vec![],
+                tempo_import: TempoImport::Full {
+                    header_rlp: Bytes::from(alloy_rlp::encode(&self.tempo_header)),
+                    deposits: vec![],
+                    decryptions: vec![],
+                    enabled_tokens: vec![],
+                },
                 finalize_withdrawal_batch_count: Some(U256::ZERO),
                 finalize_withdrawal_batch_encrypted_senders: vec![],
                 transactions: vec![self.raw_user_transaction.clone()],
@@ -325,9 +335,7 @@ async fn build_single_transaction_block(
     let user_transaction_hash = *pending.tx_hash();
 
     let mut l1_block = fixture.next_block();
-    if let Some(state_root) = tempo_state_root {
-        l1_block.header.inner.state_root = state_root;
-    }
+    l1_block.header.inner.state_root = tempo_state_root.unwrap_or(EMPTY_ROOT_HASH);
     l1_block.header.timestamp_millis_part = 321;
     fixture.enqueue(&l1_block, zone.deposit_queue(), vec![]);
     assert!(
@@ -395,8 +403,8 @@ fn funded_zone_genesis() -> Genesis {
         .storage
         .get_or_insert_default()
         .insert(
-            B256::from(fee_balance_slot.to_be_bytes::<32>()),
-            B256::from(U256::from(1_000_000_000_u64).to_be_bytes::<32>()),
+            fee_balance_slot.into(),
+            U256::from(1_000_000_000_u64).into(),
         );
     genesis
 }
@@ -406,25 +414,17 @@ fn spf_config(genesis: &Genesis) -> SpfConfig {
     genesis.config.chain_id = zone_primitives::constants::zone_chain_id(1_337, ZONE_ID)
         .expect("valid zone genesis chain ID");
     let chain_spec = ZoneChainSpec::from_genesis(genesis).expect("valid zone genesis chain ID");
-    SpfConfig::new(Arc::new(chain_spec), Address::ZERO)
+    SpfConfig::new(Arc::new(chain_spec))
 }
 
 fn tempo_state_with_transfer_policy(token: Address, policy_id: u64) -> (B256, Vec<Bytes>) {
-    let policy_slot = token
-        .mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES)
-        .to_be_bytes::<32>();
+    let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
     let packed_policy = U256::from(policy_id) | (U256::ONE << u64::BITS);
     let genesis = Genesis {
         alloc: [(
             TIP403_REGISTRY_ADDRESS,
             GenesisAccount {
-                storage: Some(
-                    [(
-                        B256::from(policy_slot),
-                        B256::from(packed_policy.to_be_bytes::<32>()),
-                    )]
-                    .into(),
-                ),
+                storage: Some([(policy_slot.into(), packed_policy.into())].into()),
                 ..Default::default()
             },
         )]
@@ -464,9 +464,8 @@ fn genesis_state_witness(genesis: &Genesis) -> (B256, Vec<Bytes>, Vec<Bytes>) {
         }
 
         let code_hash = account
-            .code
-            .as_ref()
-            .map_or_else(|| keccak256([]), keccak256);
+            .code_hash()
+            .unwrap_or(alloy_consensus::constants::KECCAK_EMPTY);
         if let Some(code) = &account.code {
             bytecodes.entry(code_hash).or_insert_with(|| code.clone());
         }
@@ -492,14 +491,9 @@ fn genesis_state_witness(genesis: &Genesis) -> (B256, Vec<Bytes>, Vec<Bytes>) {
 
 fn storage_trie(account: &GenesisAccount) -> (B256, Vec<Bytes>) {
     let leaves = account
-        .storage
-        .iter()
-        .flat_map(|storage| storage.iter())
+        .storage_slots()
         .filter(|(_, value)| !value.is_zero())
-        .map(|(slot, value)| {
-            let value = U256::from_be_bytes(value.0);
-            (keccak256(slot), alloy_rlp::encode(value))
-        })
+        .map(|(slot, value)| (keccak256(slot), alloy_rlp::encode(value)))
         .collect();
     trie(leaves)
 }

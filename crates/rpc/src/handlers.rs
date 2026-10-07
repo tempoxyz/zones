@@ -447,6 +447,8 @@ async fn handle_call(
         );
     }
 
+    let block = block.map(normalize_block_id);
+
     api_result(
         id,
         Method::EthCall,
@@ -474,6 +476,8 @@ async fn handle_estimate_gas(
             JsonRpcError::invalid_params("state overrides not allowed"),
         );
     }
+
+    let block = block.map(normalize_block_id);
 
     api_result(
         id,
@@ -722,6 +726,15 @@ fn normalize_block_number(number: BlockNumberOrTag) -> BlockNumberOrTag {
     }
 }
 
+/// Applies [`normalize_block_number`] to a block id. Without it `pending` resolves to a block
+/// the engine has executed but not yet made canonical.
+fn normalize_block_id(block: BlockId) -> BlockId {
+    match block {
+        BlockId::Number(number) => BlockId::Number(normalize_block_number(number)),
+        hash @ BlockId::Hash(_) => hash,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::Address;
@@ -761,8 +774,24 @@ mod tests {
         stub!(block_by_hash, _hash: B256, _full: bool, _auth: AuthContext);
         stub!(transaction_by_hash, _hash: B256, _auth: AuthContext);
         stub!(transaction_receipt, _hash: B256, _auth: AuthContext);
-        stub!(call, _request: TempoTransactionRequest, _block: Option<BlockId>, _state_override: Option<StateOverride>, _auth: AuthContext);
-        stub!(estimate_gas, _request: TempoTransactionRequest, _block: Option<BlockId>, _state_override: Option<StateOverride>, _auth: AuthContext);
+        fn call(
+            &self,
+            _request: TempoTransactionRequest,
+            block: Option<BlockId>,
+            _state_override: Option<StateOverride>,
+            _auth: AuthContext,
+        ) -> BoxFut<'_> {
+            Box::pin(async move { to_raw(&block) })
+        }
+        fn estimate_gas(
+            &self,
+            _request: TempoTransactionRequest,
+            block: Option<BlockId>,
+            _state_override: Option<StateOverride>,
+            _auth: AuthContext,
+        ) -> BoxFut<'_> {
+            Box::pin(async move { to_raw(&block) })
+        }
         stub!(send_raw_transaction, _data: Bytes, _auth: AuthContext);
         stub!(send_raw_transaction_sync, _data: Bytes, _auth: AuthContext);
         stub!(fill_transaction, _request: TempoTransactionRequest, _auth: AuthContext);
@@ -971,6 +1000,36 @@ mod tests {
         let err = resp.error.expect("should reject state overrides");
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "state overrides not allowed");
+    }
+
+    #[tokio::test]
+    async fn simulations_treat_pending_as_latest() {
+        let api = MockZoneRpcApi::default();
+        for method in ["eth_call", "eth_estimateGas"] {
+            // The mock echoes the block it is asked to run against.
+            for (requested, forwarded) in [
+                (json!("pending"), json!("latest")),
+                (json!("latest"), json!("latest")),
+                (json!("0x10"), json!("0x10")),
+            ] {
+                let resp = dispatch(
+                    &request(
+                        method,
+                        json!([
+                            {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
+                            requested,
+                        ]),
+                    ),
+                    &auth(),
+                    &api,
+                )
+                .await;
+
+                let block: serde_json::Value =
+                    serde_json::from_str(resp.result.expect("should dispatch").get()).unwrap();
+                assert_eq!(block, forwarded, "{method} at {requested}");
+            }
+        }
     }
 
     #[tokio::test]

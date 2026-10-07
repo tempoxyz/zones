@@ -6,16 +6,16 @@
 
 use alloc::vec::Vec;
 
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+use ::aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use alloy_primitives::{Address, B256};
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
     elliptic_curve::{PrimeField, sec1::ToEncodedPoint},
 };
-use tempo_zone_contracts::Withdrawal;
+use tempo_zone_contracts::{ChaumPedersenProof, Withdrawal};
 
 use crate::{
-    aes_gcm::AesGcmDecrypt,
+    aes_gcm,
     chaum_pedersen::{challenge_hash, recover_point},
 };
 
@@ -63,8 +63,7 @@ pub struct EcdhProofResult {
     /// Y parity of the shared secret point (0x02 or 0x03).
     pub shared_secret_y_parity: u8,
     /// Chaum-Pedersen proof of correct shared secret derivation.
-    pub cp_proof_s: B256,
-    pub cp_proof_c: B256,
+    pub cp_proof: ChaumPedersenProof,
 }
 
 /// Result of sequencer-side ECIES decryption of an encrypted deposit.
@@ -115,8 +114,10 @@ pub fn compute_ecdh_proof(
     Some(EcdhProofResult {
         shared_secret: B256::from(shared_secret_x),
         shared_secret_y_parity,
-        cp_proof_s: B256::from_slice(s.to_repr().as_ref()),
-        cp_proof_c: B256::from_slice(c.to_repr().as_ref()),
+        cp_proof: ChaumPedersenProof {
+            s: B256::from_slice(s.to_repr().as_ref()),
+            c: B256::from_slice(c.to_repr().as_ref()),
+        },
     })
 }
 
@@ -148,7 +149,7 @@ pub fn decrypt_deposit(
     let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
 
     // AES-256-GCM decrypt
-    let (plaintext, valid) = AesGcmDecrypt::decrypt(&aes_key, nonce, ciphertext, &[], tag);
+    let (plaintext, valid) = aes_gcm::decrypt(&aes_key, nonce, ciphertext, &[], tag);
     if !valid || plaintext.len() != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE {
         return None;
     }
@@ -332,7 +333,7 @@ fn derive_authenticated_withdrawal_nonce(
 }
 
 fn authenticated_withdrawal_derivation_key(encryption_privkey: &k256::SecretKey) -> [u8; 32] {
-    let secret = secret_scalar_bytes(encryption_privkey);
+    let secret = encryption_privkey.to_bytes();
     // Derive a purpose-specific HMAC key first, so the raw ECIES private scalar
     // is not reused directly across the ephemeral-scalar and nonce derivations.
     hmac_sha256(&secret, AUTH_WITHDRAWAL_DERIVATION_KEY_DOMAIN)
@@ -355,13 +356,6 @@ fn authenticated_withdrawal_context(
     msg.extend_from_slice(tx_hash.as_slice());
     msg.extend_from_slice(&fallback_nonce.to_be_bytes());
     msg
-}
-
-fn secret_scalar_bytes(secret_key: &k256::SecretKey) -> [u8; 32] {
-    let repr = secret_key.to_nonzero_scalar().to_repr();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(repr.as_ref());
-    out
 }
 
 /// Decrypt an authenticated-withdrawal `encryptedSender` payload.
@@ -396,7 +390,7 @@ pub fn decrypt_authenticated_withdrawal(
     let info = authenticated_withdrawal_hkdf_info(&eph_pubkey);
     let aes_key = hkdf_sha256(&shared_secret_x, b"authenticated-withdrawal-aes-key", &info);
 
-    let (plaintext, valid) = AesGcmDecrypt::decrypt(&aes_key, &nonce, ciphertext, &[], &tag);
+    let (plaintext, valid) = aes_gcm::decrypt(&aes_key, &nonce, ciphertext, &[], &tag);
     if !valid || plaintext.len() != AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE {
         return None;
     }
@@ -660,8 +654,7 @@ mod tests {
         let proof_a = compute_ecdh_proof(&f.seq_key, &f.eph_pub_x, f.eph_pub_y_parity).unwrap();
         let proof_b = compute_ecdh_proof(&f.seq_key, &f.eph_pub_x, f.eph_pub_y_parity).unwrap();
 
-        assert_eq!(proof_a.cp_proof_s, proof_b.cp_proof_s);
-        assert_eq!(proof_a.cp_proof_c, proof_b.cp_proof_c);
+        assert_eq!(proof_a.cp_proof, proof_b.cp_proof);
     }
 
     #[test]
@@ -959,13 +952,10 @@ mod tests {
         // Encrypt a 63-byte plaintext (wrong length — should be 64)
         let short_plaintext = [0u8; 63];
         let aes_key = {
-            use k256::{
-                AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint,
-            };
+            use k256::{AffinePoint, ProjectivePoint, Scalar};
             let seq_scalar: Scalar = *f.seq_key.to_nonzero_scalar();
             let shared = AffinePoint::from(ProjectivePoint::from(f.eph_pub) * seq_scalar);
-            let ss_enc = shared.to_encoded_point(true);
-            let ss_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
+            let (ss_x, _) = super::compressed_x_and_parity(&shared);
             let info = super::hkdf_info(&f.portal, &f.key_index, &f.eph_pub_x, &f.sender);
             hkdf_sha256(&ss_x, b"ecies-aes-key", &info)
         };
@@ -990,12 +980,11 @@ mod tests {
         // RFC 4231 Test Case 2
         let key = b"Jefe";
         let data = b"what do ya want for nothing?";
-        let expected =
-            const_hex::decode("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
-                .unwrap();
+        let expected = alloy_primitives::hex!(
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
 
-        let result = hmac_sha256(key, data);
-        assert_eq!(result.as_slice(), expected.as_slice());
+        assert_eq!(hmac_sha256(key, data), expected);
     }
 
     #[test]

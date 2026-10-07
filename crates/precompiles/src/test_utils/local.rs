@@ -3,14 +3,11 @@ use alloy_evm::{
     precompiles::{DynPrecompile, Precompile as _, PrecompileInput},
 };
 use alloy_primitives::{Address, B256, U256};
-use k256::{
-    AffinePoint, ProjectivePoint, Scalar,
-    elliptic_curve::{ops::Reduce, sec1::ToEncodedPoint},
-};
+use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::ops::Reduce};
 use revm::{
     Context,
     context::{CfgEnv, TxEnv},
-    database::{CacheDB, EmptyDB},
+    database::InMemoryDB,
     precompile::PrecompileResult,
 };
 use std::{cell::RefCell, rc::Rc};
@@ -30,12 +27,16 @@ use crate::{
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
 
 /// EVM context used by local precompile unit tests.
-pub(crate) type TestContext =
-    Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
+pub(crate) type TestContext = Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, InMemoryDB>;
 
-/// Create an empty test EVM context at the 1st Tempo hardfork with zone deployments.
+/// Create an empty test EVM context at the latest Tempo hardfork affecting Zones.
 pub(crate) fn test_context() -> TestContext {
-    Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::T8)
+    test_context_with_hardfork(TempoHardfork::T13)
+}
+
+/// Create a test EVM context with the specified hardfork.
+pub(crate) fn test_context_with_hardfork(hardfork: TempoHardfork) -> TestContext {
+    Context::new(InMemoryDB::default(), hardfork)
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.
@@ -60,7 +61,6 @@ pub(crate) fn test_storage_provider(
 pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
     ZonePrecompileEnv::new(
         &ctx.cfg,
-        zone_hardfork::ZoneHardfork::Z0,
         StorageActions::disabled(),
         Rc::new(RefCell::new(NonCreditableSlots::empty())),
     )
@@ -96,8 +96,8 @@ pub(crate) fn assert_cp_proof_valid(
     ephemeral_pub: &AffinePoint,
     sequencer_pub: &AffinePoint,
 ) {
-    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof_s.0.into());
-    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof_c.0.into());
+    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof.s.0.into());
+    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof.c.0.into());
     let shared_pt =
         recover_point(&dec.proof.shared_secret.0, dec.proof.shared_secret_y_parity).unwrap();
 
@@ -153,8 +153,7 @@ impl EncryptedDepositFixture {
         // ECDH (depositor side)
         let shared_proj = ProjectivePoint::from(seq_pub) * eph_scalar;
         let shared_affine = AffinePoint::from(shared_proj);
-        let ss_enc = shared_affine.to_encoded_point(true);
-        let shared_secret_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
+        let (shared_secret_x, _) = compressed_x_and_parity(&shared_affine);
 
         let portal = Address::repeat_byte(0xAA);
         let key_index = U256::from(42u64);

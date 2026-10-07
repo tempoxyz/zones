@@ -4,8 +4,35 @@ use crate::network::MAX_MESSAGE_SIZE;
 
 const BLOCK_FRAME: u8 = 0;
 const COMPLETE_FRAME: u8 = 1;
+const CAPABILITIES_FRAME: u8 = 2;
 const REQUEST_LEN: usize = 16;
 const RESPONSE_HEADER_LEN: usize = 1 + std::mem::size_of::<u64>();
+
+/// A block's RLP bytes and optional CBOR-encoded witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedBlock {
+    pub block: Vec<u8>,
+    pub witness: Option<Vec<u8>>,
+}
+
+impl EncodedBlock {
+    /// Versioned prefix of the witnessed block envelope.
+    pub const WITNESS_PREFIX: &[u8] = b"ZWIT\x01";
+
+    /// Encode a witness envelope when present, otherwise preserve bare RLP.
+    pub fn encode(&self) -> Vec<u8> {
+        if let Some(witness) = &self.witness {
+            let mut encoded =
+                Vec::with_capacity(Self::WITNESS_PREFIX.len() + self.block.len() + witness.len());
+            encoded.extend_from_slice(Self::WITNESS_PREFIX);
+            encoded.extend_from_slice(&self.block);
+            encoded.extend_from_slice(witness);
+            encoded
+        } else {
+            self.block.clone()
+        }
+    }
+}
 
 /// A peer's advertised canonical tip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,13 +101,23 @@ impl RequestFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResponseFrame {
-    Block { request_id: u64, block: Vec<u8> },
-    Complete { request_id: u64, tip: PeerTip },
+    Block {
+        request_id: u64,
+        block: Vec<u8>,
+    },
+    Complete {
+        request_id: u64,
+        tip: PeerTip,
+    },
+    /// Unsolicited capability version on the existing response channel. Old receivers
+    /// ignore this unknown frame tag without disconnecting the authenticated transport.
+    Capabilities(u8),
 }
 
 impl ResponseFrame {
     pub(crate) fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         match self {
+            Self::Capabilities(version) => Ok(vec![CAPABILITIES_FRAME, *version]),
             Self::Block { request_id, block } => {
                 let frame_len = block.len().saturating_add(RESPONSE_HEADER_LEN);
                 if frame_len > MAX_MESSAGE_SIZE as usize {
@@ -109,6 +146,12 @@ impl ResponseFrame {
         let Some((&tag, payload)) = bytes.split_first() else {
             return Err(DecodeError::EmptyResponse);
         };
+        if tag == CAPABILITIES_FRAME {
+            return match payload {
+                [version] => Ok(Self::Capabilities(*version)),
+                _ => Err(DecodeError::InvalidCapabilities),
+            };
+        }
         if !matches!(tag, BLOCK_FRAME | COMPLETE_FRAME) {
             return Err(DecodeError::UnknownResponseTag(tag));
         }
@@ -145,6 +188,8 @@ impl ResponseFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum DecodeError {
+    #[error("invalid capabilities announcement")]
+    InvalidCapabilities,
     #[error("incorrect request length: expected {expected} bytes, got {actual}")]
     IncorrectRequestLength { expected: usize, actual: usize },
     #[error("empty response")]
@@ -223,6 +268,30 @@ mod tests {
         assert_eq!(&encoded[1..9], &7_u64.to_be_bytes());
         assert_eq!(encoded.len(), RESPONSE_HEADER_LEN + PeerTip::ENCODED_LEN);
         assert_eq!(ResponseFrame::decode(&encoded), Ok(complete));
+    }
+
+    #[test]
+    fn capabilities_are_a_versioned_unsolicited_frame() {
+        let announcement = ResponseFrame::Capabilities(1).encode().unwrap();
+        assert_eq!(announcement, [2, 1]);
+        assert_eq!(
+            ResponseFrame::decode(&announcement),
+            Ok(ResponseFrame::Capabilities(1))
+        );
+        // The old decoder accepts only tags 0/1, returning UnknownResponseTag for this
+        // announcement before trying to read a request ID. Its coordinator ignores that error.
+        assert!(!matches!(announcement[0], 0 | 1));
+        for version in 0..=u8::MAX {
+            let frame = ResponseFrame::Capabilities(version);
+            assert_eq!(frame.encode().unwrap(), [2, version]);
+            assert_eq!(ResponseFrame::decode(&[2, version]), Ok(frame));
+        }
+        for bytes in [&[2][..], &[2, 1, 0]] {
+            assert_eq!(
+                ResponseFrame::decode(bytes),
+                Err(DecodeError::InvalidCapabilities)
+            );
+        }
     }
 
     #[test]

@@ -4,10 +4,9 @@
 //! finalized raw L1 storage via `L1StateCache` and rejects mutating calls. The cache is populated
 //! directly in tests (no L1 subscriber).
 
-use alloy::primitives::{TxKind, U256, address};
+use alloy::primitives::{Address, U256, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::TransactionRequest;
-use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{
     ITIP20,
@@ -17,7 +16,7 @@ use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_regist
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
+    DEFAULT_TIMEOUT, PolicySeed, TIP20_TX_GAS, l1_dev_signer, seed_raw_tip403_policy,
     seed_raw_tip403_token_policy, start_local_zone_with_fixture,
 };
 
@@ -31,9 +30,7 @@ async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
-    let alice_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let alice_signer = l1_dev_signer();
     let alice = alice_signer.address();
 
     let bob = address!("0x0000000000000000000000000000000000000B0B");
@@ -103,9 +100,7 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
     reth_tracing::init_test_tracing();
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
-    let alice_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let alice_signer = l1_dev_signer();
     let alice = alice_signer.address();
 
     let deposit_amount = 1_000_000u128;
@@ -140,12 +135,10 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
     let alice_provider = ProviderBuilder::new()
         .wallet(alice_signer)
         .connect_http(zone.http_url().clone());
-    let request = TransactionRequest {
-        to: Some(TxKind::Call(alice)),
-        gas: Some(TIP20_TX_GAS),
-        gas_price: Some(TEMPO_T0_BASE_FEE as u128),
-        ..Default::default()
-    };
+    let request = TransactionRequest::default()
+        .to(alice)
+        .gas_limit(TIP20_TX_GAS)
+        .gas_price(TEMPO_T0_BASE_FEE as u128);
 
     let nonce_before = alice_provider.get_transaction_count(alice).await?;
     let error = alice_provider
@@ -331,10 +324,7 @@ async fn test_policy_proxy_reverts_mutating_calls() -> eyre::Result<()> {
 
     // createPolicy should revert
     let result = registry
-        .createPolicy(
-            address!("0x0000000000000000000000000000000000000001"),
-            PolicyType::WHITELIST,
-        )
+        .createPolicy(Address::with_last_byte(1), PolicyType::WHITELIST)
         .call()
         .await;
 

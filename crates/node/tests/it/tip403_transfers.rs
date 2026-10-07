@@ -11,7 +11,6 @@
 
 use alloy::primitives::{B256, U256, address};
 use alloy_provider::{Provider, ProviderBuilder};
-use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_node::rpc::NATIVE_BALANCE_PLACEHOLDER;
@@ -19,8 +18,8 @@ use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox,
-    local_dev_zone_account, start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox, l1_dev_signer,
+    local_dev_zone_account, signer_at, start_local_zone_with_fixture,
 };
 
 /// Deposit pathUSD to the dev account, then transfer a portion to Bob.
@@ -203,23 +202,15 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
     let (zone, mut fixture) = start_local_zone_with_fixture(20).await?;
 
     // Alice = dev account (mnemonic index 0)
-    let alice_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
+    let alice_signer = l1_dev_signer();
     let alice = alice_signer.address();
 
     // Bob = mnemonic index 1
-    let bob_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .index(1)?
-        .build()?;
+    let bob_signer = signer_at(1);
     let bob = bob_signer.address();
 
     // Charlie = mnemonic index 2
-    let charlie_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .index(2)?
-        .build()?;
+    let charlie_signer = signer_at(2);
     let charlie = charlie_signer.address();
 
     let deposit_amount: u128 = 2_000_000;

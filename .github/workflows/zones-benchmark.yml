@@ -58,11 +58,6 @@ on:
         type: string
         required: true
         default: "2000000"
-      activity-amount:
-        description: Amount for each ordinary Zone TIP-20 transfer.
-        type: string
-        required: true
-        default: "1"
       withdrawal-amount:
         description: Net amount for each Zone withdrawal request.
         type: string
@@ -141,6 +136,11 @@ on:
         type: string
         required: false
         default: ""
+      tempo-hardfork:
+        description: Latest Tempo hardfork active during the benchmark, or `latest`.
+        type: string
+        required: false
+        default: latest
       txgen-ref:
         description: Exact txgen commit SHA; empty resolves the current txgen HEAD.
         type: string
@@ -165,6 +165,9 @@ env:
 
 jobs:
   authorize:
+    permissions:
+      contents: read
+      id-token: write
     name: Resolve benchmark request
     # Scheduled benchmarks use upstream-only infrastructure and credentials.
     # Private copies can still run an explicitly dispatched benchmark.
@@ -198,10 +201,14 @@ jobs:
       setup-settlement-timeout-secs: ${{ steps.config.outputs.setup-settlement-timeout-secs }}
       drain-timeout: ${{ steps.config.outputs.drain-timeout }}
       seed: ${{ steps.config.outputs.seed }}
+      tempo-hardfork: ${{ steps.config.outputs.tempo-hardfork }}
       tempo-ref: ${{ steps.config.outputs.tempo-ref }}
       txgen-ref: ${{ steps.config.outputs.txgen-ref }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -218,7 +225,7 @@ jobs:
           INPUT_FORCE_BLOAT: ${{ inputs.force-bloat == true }}
           INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '2000000' }}
           INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
-          INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
+          INPUT_ACTIVITY_AMOUNT: "1"
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
           INPUT_SWAP_MECHANISM: direct-swap
           INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
@@ -234,6 +241,7 @@ jobs:
           INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ inputs.setup-settlement-timeout-secs || '120' }}
           INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
           INPUT_SEED: ${{ inputs.seed || '' }}
+          INPUT_TEMPO_HARDFORK: ${{ inputs.tempo-hardfork || 'latest' }}
           INPUT_TXGEN_REF: ${{ inputs.txgen-ref || '' }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -241,6 +249,11 @@ jobs:
           set -euo pipefail
 
           INPUT_TEMPO_REF="$(sed -nE 's/^tempo-alloy.*rev = "([0-9a-f]{40})".*/\1/p' Cargo.toml)"
+          INPUT_TEMPO_HARDFORK="${INPUT_TEMPO_HARDFORK,,}"
+          if [[ "$INPUT_TEMPO_HARDFORK" != latest && ! "$INPUT_TEMPO_HARDFORK" =~ ^t[0-9]+[a-z]*$ ]]; then
+            echo "::error::tempo-hardfork must be latest or a hardfork such as t11"
+            exit 1
+          fi
 
           if [ -z "$INPUT_TXGEN_REF" ]; then
             INPUT_TXGEN_REF="$(git ls-remote https://github.com/tempoxyz/txgen HEAD | awk '{print $1}')"
@@ -437,6 +450,7 @@ jobs:
             echo "setup-settlement-timeout-secs=$INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS"
             echo "drain-timeout=$INPUT_DRAIN_TIMEOUT"
             echo "seed=$INPUT_SEED"
+            echo "tempo-hardfork=$INPUT_TEMPO_HARDFORK"
             echo "tempo-ref=$INPUT_TEMPO_REF"
             echo "txgen-ref=$INPUT_TXGEN_REF"
           } >> "$GITHUB_OUTPUT"
@@ -477,6 +491,7 @@ jobs:
       ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ needs.authorize.outputs.setup-settlement-timeout-secs }}
       ZONES_BENCH_DRAIN_TIMEOUT: ${{ needs.authorize.outputs.drain-timeout }}
       ZONES_BENCH_SEED: ${{ needs.authorize.outputs.seed }}
+      ZONES_BENCH_TEMPO_HARDFORK: ${{ needs.authorize.outputs.tempo-hardfork }}
       ZONES_BENCH_TEMPO_REF: ${{ needs.authorize.outputs.tempo-ref }}
       ZONES_BENCH_TXGEN_REF: ${{ needs.authorize.outputs.txgen-ref }}
       ZONES_BENCH_ZONES_REF: ${{ needs.authorize.outputs.sha }}
@@ -502,7 +517,10 @@ jobs:
       ZONES_BENCH_TOPOLOGY_DIR: target/zones-benchmark/topology
       TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
@@ -510,19 +528,23 @@ jobs:
 
       - name: Mint read-only Earn token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@8819cf80bdcb39c36c34700e3f2ecc08bde54f23 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
           scope: tempoxyz/earn
           policy: zones-read
       - name: Check out Earn contracts
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tempoxyz/earn
           ref: main
           path: earn
           token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
-          submodules: true
+
+      - name: Initialize Earn public dependencies
+        working-directory: earn
+        # PropAMM is private and only needed by Earn's integration tests.
+        run: git submodule update --init lib/forge-std lib/openzeppelin-contracts lib/openzeppelin-contracts-upgradeable
 
       - name: Prepare persistent topology control path
         env:
@@ -556,7 +578,7 @@ jobs:
           echo "::add-mask::$CLICKHOUSE_PASSWORD"
 
       - name: Check out pinned Tempo L1
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tempoxyz/tempo
           ref: ${{ needs.authorize.outputs.tempo-ref }}
@@ -564,13 +586,17 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
           toolchain: stable
-
-      - uses: tempoxyz/gh-actions/actions/setup-foundry@84404f82f267db9b96abab32a50bf835a524d8c7
+      - uses: tempoxyz/gh-actions/actions/setup-mold@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          version: nightly
+          version: v0.15.0
+
+      - uses: tempoxyz/gh-actions/actions/setup-foundry@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Resolve Solidity cache key
         id: solidity-key
@@ -585,7 +611,7 @@ jobs:
           echo "ZONES_BENCH_EARN_REVISION=$earn_sha" >> "$GITHUB_ENV"
 
       - name: Restore Solidity artifacts
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             earn/cache
@@ -674,13 +700,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
-            --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
+            --locked --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
           nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
             '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
             'jemalloc,asm-keccak,keccak-cache-global,otlp' \
             '$ZONES_BENCH_TEMPO_REF'"
           cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
-            --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
+            --locked --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
             echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
             echo "SPF_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone-prover-utils"
@@ -732,6 +758,7 @@ jobs:
           fi
           {
             echo "ZONES_BENCH_L1_CACHE_REBUILT=$ZONES_BENCH_L1_CACHE_REBUILT"
+            echo "ZONES_BENCH_TEMPO_HARDFORK=$ZONES_BENCH_TEMPO_HARDFORK"
             echo "ZONES_BENCH_L1_CACHE_KEY=$ZONES_BENCH_L1_CACHE_KEY"
             echo "ZONES_BENCH_L1_CACHE_GENERATION=$ZONES_BENCH_L1_CACHE_GENERATION"
           } >> "$GITHUB_ENV"
@@ -755,17 +782,14 @@ jobs:
           echo "ZONES_BENCH_TUNED=1" >> "$GITHUB_ENV"
           nu -c "source '$TEMPO_ROOT/tempo.nu'; apply-system-tuning | ignore"
 
-      - name: Install Samply profiler
+      - name: Install pinned Samply profiler
         run: |
           set -euo pipefail
-          samply_help="$(samply record --help 2>/dev/null || true)"
-          if ! grep -Eq '^[[:space:]]+--share([[:space:]]|$)' <<< "$samply_help"; then
-            cargo install samply \
-              --git https://github.com/DaniPopes/samply \
-              --branch edge \
-              --locked \
-              --force
-          fi
+          cargo install samply \
+            --git https://github.com/DaniPopes/samply \
+            --rev 06f9075697ad144feaf3e15c2254a043b243fdbf \
+            --locked \
+            --force
           samply_path="$(command -v samply)"
           "$samply_path" --version
           samply_help="$(samply record --help)"
@@ -934,6 +958,7 @@ jobs:
             echo "- Target: \`${ZONES_BENCH_TARGET_ID:-unavailable}\`"
             echo "- Zones revision: \`$ZONES_BENCH_ZONES_REF\`"
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
+            echo "- Tempo hardfork: \`${ZONES_BENCH_TEMPO_HARDFORK:-unavailable}\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
             echo "- Earn revision: \`${ZONES_BENCH_EARN_REVISION:-unavailable}\`"
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
@@ -961,6 +986,7 @@ jobs:
           jq -n \
             --arg zonesRevision "$ZONES_BENCH_ZONES_REF" \
             --arg tempoRevision "$ZONES_BENCH_TEMPO_REF" \
+            --arg tempoHardfork "${ZONES_BENCH_TEMPO_HARDFORK:-}" \
             --arg txgenRevision "$ZONES_BENCH_TXGEN_REF" \
             --arg earnRevision "${ZONES_BENCH_EARN_REVISION:-}" \
             --arg buildProfile "$ZONES_BENCH_BUILD_PROFILE" \
@@ -1006,6 +1032,7 @@ jobs:
             '{
               zonesRevision: $zonesRevision,
               tempoRevision: $tempoRevision,
+              tempoHardfork: $tempoHardfork,
               txgenRevision: $txgenRevision,
               earnRevision: $earnRevision,
               buildProfile: $buildProfile,

@@ -190,10 +190,10 @@ pub fn build_token_fields(
 
 /// Build the signing digest from the canonical fixed-width token fields.
 fn token_digest(fields: &[u8; TOKEN_FIELDS_LEN]) -> B256 {
-    let mut msg = Vec::with_capacity(32 + TOKEN_FIELDS_LEN);
-    msg.extend_from_slice(&TEMPO_ZONE_RPC_MAGIC);
-    msg.extend_from_slice(fields);
-    keccak256(&msg)
+    let mut msg = [0; TEMPO_ZONE_RPC_MAGIC.len() + TOKEN_FIELDS_LEN];
+    msg[..TEMPO_ZONE_RPC_MAGIC.len()].copy_from_slice(&TEMPO_ZONE_RPC_MAGIC);
+    msg[TEMPO_ZONE_RPC_MAGIC.len()..].copy_from_slice(fields);
+    keccak256(msg)
 }
 
 /// Parse a hex-encoded authorization token from the header value.
@@ -206,6 +206,7 @@ pub fn parse_auth_header(header_value: &str) -> Result<AuthorizationToken, AuthE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::b256;
 
     const ZONE_ID: u32 = 42;
     const CHAIN_ID: u64 = 1_337;
@@ -237,9 +238,7 @@ mod tests {
         );
         assert_eq!(
             digest,
-            "0xf827387a933f40dfedece81ba4933feaef89e98a269f52f4f54dda2f1dac4171"
-                .parse::<B256>()
-                .unwrap()
+            b256!("0xf827387a933f40dfedece81ba4933feaef89e98a269f52f4f54dda2f1dac4171")
         );
 
         let mut blob = vec![0xabu8; 65];

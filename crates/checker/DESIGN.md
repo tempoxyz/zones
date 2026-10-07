@@ -57,6 +57,16 @@ For each canonical Zone block, the checker:
 
 The candidate is discarded on failure, leaving the last verified state intact.
 
+For checkpoint-only blocks, the checker requires the sole `advanceTempoHeaders`
+transaction and its successful `TempoBlockFinalized` event, with no bridge or
+transfer events. Accounting stays at the last full import while the verified
+Zone height advances. Supply is checked against the unchanged ledger, and
+custody remains anchored at that full import. On the next full block, all Tempo
+blocks since the accounting anchor are authenticated by their parent hashes and
+their Portal effects are applied in chronological order before the Zone effects.
+Keeping the existing durable Tempo coordinate as the accounting anchor prevents
+checkpoint-only progress from dropping deferred work on restart.
+
 ## Invariants
 
 ### Account balances

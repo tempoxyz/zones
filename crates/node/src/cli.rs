@@ -19,13 +19,13 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
+    ZoneNode, ZoneProverConfig, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
     BatchAnchorConfig, DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
-    MAX_WITHDRAWAL_BATCH_GAS, WithdrawalBatchLimits,
+    HardforkProverAddress, MAX_WITHDRAWAL_BATCH_GAS, ProverAddresses, WithdrawalBatchLimits,
 };
 
 const MAX_LOGS_PER_RESPONSE: u64 = 1_000_000;
@@ -99,32 +99,23 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
+    let l1_rpc_url = match std::env::var("L1_HTTP_RPC_URL") {
         Ok(url) if !url.is_empty() => {
             let url = url
                 .parse()
                 .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
-            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
-                .map_err(|error| {
-                    eyre::eyre!(
-                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
-                    )
-                })?
-                .parse()
-                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
-            eyre::ensure!(
-                !portal_address.is_zero(),
-                "L1_PORTAL_ADDRESS must be nonzero"
-            );
-            Some((url, portal_address))
+            Some(url)
         }
         Ok(_) | Err(std::env::VarError::NotPresent) => None,
         Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
     };
 
     let components = move |spec: Arc<ZoneChainSpec>| {
-        let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
-        (evm_config, TempoConsensus::new(spec))
+        let evm_config = cli_evm_config(spec.clone(), l1_rpc_url.clone());
+        (
+            evm_config,
+            TempoConsensus::new(spec).with_allow_equal_timestamps(true),
+        )
     };
 
     cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
@@ -142,9 +133,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             manifest_mode,
             builder.config().txpool.max_tx_input_bytes,
         )?;
-        if manifest_mode {
-            // Replicate only durable blocks. Persist every block immediately so followers can
-            // acknowledge each block without waiting for Reth's in-memory buffer to fill.
+        if manifest_mode || args.enable_sequencer {
+            // Settlement and replication only consume durable blocks. Persist every block
+            // immediately so they do not wait for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
@@ -192,7 +183,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     l1_rpc_url: args.l1_rpc_url.clone(),
                     portal_address: args.portal_address,
                     zone_id,
-                    zone_chain_id: builder.config().chain.chain().id(),
+                    zone_chain_id: builder.config().chain.chain_id(),
                     database_path: builder.config().datadir().data_dir().join("checker"),
                     l1_block_tracker: node.l1_block_tracker(),
                 });
@@ -208,15 +199,13 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     })
 }
 
-/// Creates the EVM config used by CLI subcommands.
-fn cli_evm_config(
-    chain_spec: Arc<ZoneChainSpec>,
-    l1_config: Option<(url::Url, Address)>,
-) -> ZoneEvmConfig {
-    let Some((l1_rpc_url, portal_address)) = l1_config else {
+/// Creates the EVM config used by CLI subcommands, deriving the portal from the chain's zone ID.
+fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_rpc_url: Option<url::Url>) -> ZoneEvmConfig {
+    let Some(l1_rpc_url) = l1_rpc_url else {
         return ZoneEvmConfig::new_without_l1(chain_spec);
     };
 
+    let portal_address = tempo_precompiles::zone_factory::portal_address(chain_spec.zone_id());
     let cache = L1StateCache::default();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .connect_http(l1_rpc_url)
@@ -272,9 +261,34 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks,
-        "--sequencer.enable-prover requires a promotable sequencer node"
+        args.shadow_prover_pcrs.is_none() || (rpc_only && !should_sequence_blocks),
+        "--shadow-prover.pcrs requires an rpc_only follower; it is not a settlement policy"
     );
+    let policy = args
+        .prover_attestation_policy
+        .as_deref()
+        .map(std::fs::read)
+        .transpose()?;
+    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone(), policy.as_deref())?;
+    let prover_config = if !args.enable_prover {
+        None
+    } else if should_sequence_blocks {
+        let addresses = prover_addresses.ok_or_else(|| {
+            eyre::eyre!(
+                "settlement proving requires --sequencer.prover-address for Nitro attestation"
+            )
+        })?;
+        Some(ZoneProverConfig::Settlement(addresses))
+    } else {
+        eyre::ensure!(
+            rpc_only,
+            "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
+        );
+        Some(ZoneProverConfig::Shadow {
+            prover_addresses,
+            proof_verifier: args.shadow_prover_pcrs.clone(),
+        })
+    };
 
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
@@ -293,9 +307,10 @@ async fn configure_sequencing(
                 max_batch_gas: args.withdrawal_max_batch_gas,
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
-            enable_prover: args.enable_prover,
-            prover_address: args.prover_address.clone(),
         });
+    }
+    if let Some(config) = prover_config {
+        node = node.with_prover(config);
     }
     if let Some(config) = p2p_config {
         node = node.with_p2p(config);
@@ -565,18 +580,41 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Validate finalized batch candidates with the SPF without changing settlement.
+    /// Require Nitro-attested SPF validation for settlement, or run observational SPF validation
+    /// on an rpc_only follower.
+    ///
+    /// Enables durable witness persistence.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 
-    /// Send witnesses to this remote prover instead of executing the SPF locally.
+    /// Route to an immutable prover release for each exact live L1 hardfork. Repeat per hardfork.
     #[arg(
         long = "sequencer.prover-address",
         env = "SEQUENCER_PROVER_ADDRESS",
-        value_name = "HOST:PORT",
-        requires = "enable_prover"
+        value_name = "HARDFORK=HOST:PORT",
+        value_delimiter = ',',
+        requires_all = ["enable_prover", "prover_attestation_policy"]
     )]
-    pub prover_address: Option<String>,
+    pub prover_addresses: Vec<HardforkProverAddress>,
+
+    /// JSON PCR allowlist required to authenticate remote provers.
+    #[arg(
+        long = "sequencer.prover-attestation-policy",
+        env = "SEQUENCER_PROVER_ATTESTATION_POLICY",
+        value_name = "PATH",
+        requires_all = ["enable_prover", "prover_addresses"]
+    )]
+    pub prover_attestation_policy: Option<PathBuf>,
+
+    /// Verify shadow Nitro proofs locally against independently approved PCR0, PCR1 and PCR2.
+    /// Works before T13; applies only to RPC followers and never enables settlement enforcement.
+    #[arg(
+        long = "shadow-prover.pcrs",
+        env = "SHADOW_PROVER_PCRS",
+        value_name = "PCR0,PCR1,PCR2",
+        requires = "prover_addresses"
+    )]
+    pub shadow_prover_pcrs: Option<zone_prover::ShadowProofVerifier>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -649,6 +687,158 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[test]
+    fn re_execute_parses_without_portal_address() {
+        use reth_chainspec::EthChainSpec as _;
+
+        let parent = tempo_chainspec::spec::MODERATO.clone();
+        let mut genesis = parent.genesis().clone();
+        genesis.config.chain_id =
+            zone_primitives::constants::zone_chain_id(parent.chain_id(), 11).unwrap();
+        let genesis = serde_json::to_string(&genesis).unwrap();
+        let parsed =
+            ZoneCli::try_parse_from(["tempo-zone", "re-execute", "--chain", &genesis]).unwrap();
+        assert!(matches!(parsed, ZoneCli::Node(_)));
+    }
+
+    #[tokio::test]
+    async fn cli_evm_derives_portal_from_chain_spec() {
+        use alloy_evm::EvmFactory as _;
+        use reth_chainspec::EthChainSpec as _;
+        use reth_evm::ConfigureEvm as _;
+
+        let parent = tempo_chainspec::spec::MODERATO.clone();
+        for (zone_id, expected) in [
+            (
+                11,
+                alloy_primitives::address!("5ad000000000000000000000000000000000000b"),
+            ),
+            (
+                0x0102_0304,
+                alloy_primitives::address!("5ad0000000000000000000000000000001020304"),
+            ),
+        ] {
+            let mut genesis = parent.genesis().clone();
+            genesis.config.chain_id =
+                zone_primitives::constants::zone_chain_id(parent.chain_id(), zone_id).unwrap();
+            let spec =
+                std::sync::Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
+            let config =
+                super::cli_evm_config(spec, Some("http://localhost:8545".parse().unwrap()));
+            let evm = config
+                .evm_factory()
+                .create_evm(revm::database::EmptyDB::default(), Default::default());
+            assert_eq!(
+                evm.ctx().journaled_state.database.l1_state().portal(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_verification_requires_remote_proving_and_complete_measurements() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x5ad0000000000000000000000000000000000002",
+        ];
+        let pcr = "11".repeat(48);
+        let pcrs = format!("{pcr},{pcr},{pcr}");
+        assert!(
+            ZoneArgsParser::try_parse_from(
+                common
+                    .into_iter()
+                    .chain(["--shadow-prover.pcrs", pcrs.as_str(),])
+            )
+            .is_err()
+        );
+        let args = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.enable-prover",
+            "--sequencer.prover-attestation-policy",
+            "policy.json",
+            "--sequencer.prover-address",
+            "T13=localhost:5000",
+            "--shadow-prover.pcrs",
+            pcrs.as_str(),
+        ]))
+        .unwrap();
+        assert!(args.zone.shadow_prover_pcrs.is_some());
+        assert!(
+            ZoneArgsParser::try_parse_from(common.into_iter().chain([
+                "--sequencer.enable-prover",
+                "--sequencer.prover-attestation-policy",
+                "policy.json",
+                "--sequencer.prover-address",
+                "T13=localhost:5000",
+                "--shadow-prover.pcrs",
+                "00,00,00",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn prover_addresses_accept_repeated_and_comma_separated_assignments() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer.enable-prover",
+            "--sequencer.prover-attestation-policy",
+            "policy.json",
+        ];
+        for flags in [
+            vec![
+                "--sequencer.prover-address",
+                "T12=old:5000",
+                "--sequencer.prover-address",
+                "T13=new:5000",
+                "--sequencer.prover-address",
+                "T14=t14:5000",
+            ],
+            vec![
+                "--sequencer.prover-address",
+                "T12=old:5000,T13=new:5000,T14=t14:5000",
+            ],
+        ] {
+            let args = ZoneArgsParser::try_parse_from(common.into_iter().chain(flags))
+                .unwrap()
+                .zone;
+            assert_eq!(args.prover_addresses.len(), 3);
+            assert!(args.prover_attestation_policy.is_some());
+        }
+        let local_prover =
+            ZoneArgsParser::try_parse_from(common[..common.len() - 2].iter().copied())
+                .unwrap()
+                .zone;
+        assert!(local_prover.enable_prover);
+        assert!(local_prover.prover_addresses.is_empty());
+        assert!(local_prover.prover_attestation_policy.is_none());
+        let missing_policy = ZoneArgsParser::try_parse_from(
+            common[..common.len() - 2]
+                .iter()
+                .copied()
+                .chain(["--sequencer.prover-address", "T12=old:5000"]),
+        )
+        .unwrap_err();
+        assert!(
+            missing_policy
+                .to_string()
+                .contains("--sequencer.prover-attestation-policy")
+        );
+        let error = ZoneArgsParser::try_parse_from(
+            common
+                .into_iter()
+                .chain(["--sequencer.prover-address", "old:5000"]),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
@@ -795,9 +985,7 @@ mod tests {
 
         assert_eq!(
             signer.address(),
-            "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
-                .parse::<alloy_primitives::Address>()
-                .unwrap()
+            alloy_primitives::address!("0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
         );
     }
 
@@ -866,9 +1054,7 @@ mod tests {
 
         assert_eq!(
             signer.address(),
-            "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
-                .parse::<alloy_primitives::Address>()
-                .unwrap()
+            alloy_primitives::address!("0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf")
         );
     }
 

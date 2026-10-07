@@ -9,6 +9,7 @@ set -Eeuo pipefail
 readonly L1_SNAPSHOT_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly L1_SNAPSHOT_ZONES_ROOT="$(cd -- "$L1_SNAPSHOT_SCRIPT_DIR/../.." && pwd)"
 readonly L1_SNAPSHOT_SCHEMA=1
+readonly L1_SNAPSHOT_FUTURE_HARDFORK_TIME=4102444800
 readonly L1_SNAPSHOT_ZONE_FACTORY="0x5aF2000000000000000000000000000000000000"
 readonly L1_SNAPSHOT_PORTAL_IMPL="0x5AD1000000000000000000000000000000000000"
 readonly L1_SNAPSHOT_VERIFIER="0x5a56000000000000000000000000000000000000"
@@ -37,6 +38,53 @@ l1_snapshot_require_uint() {
     local name="$1"
     local value="${!name:-}"
     [[ "$value" =~ ^[0-9]+$ ]] || l1_snapshot_die "$name must be an unsigned integer"
+}
+
+l1_snapshot_resolve_hardfork() {
+    local requested="${ZONES_BENCH_TEMPO_HARDFORK:-latest}"
+    requested="$(printf '%s' "$requested" | tr '[:upper:]' '[:lower:]')"
+    [[ "$requested" == latest || "$requested" =~ ^t[0-9]+[a-z]*$ ]] \
+        || l1_snapshot_die "ZONES_BENCH_TEMPO_HARDFORK must be latest or a hardfork such as t11"
+
+    L1_SNAPSHOT_SUPPORTED_HARDFORKS=()
+    local hardfork
+    while IFS= read -r hardfork; do
+        L1_SNAPSHOT_SUPPORTED_HARDFORKS+=("$hardfork")
+    done < <(
+        "$L1_SNAPSHOT_TEMPO_XTASK_BIN" generate-localnet --help \
+            | sed -nE 's/^[[:space:]]*--(t[0-9]+[a-z]*)-time([[:space:]].*)?$/\1/p'
+    )
+    (( ${#L1_SNAPSHOT_SUPPORTED_HARDFORKS[@]} > 0 )) \
+        || l1_snapshot_die "could not discover Tempo hardfork arguments"
+
+    if [[ "$requested" == latest ]]; then
+        local last_index
+        last_index=$((${#L1_SNAPSHOT_SUPPORTED_HARDFORKS[@]} - 1))
+        L1_SNAPSHOT_HARDFORK="${L1_SNAPSHOT_SUPPORTED_HARDFORKS[$last_index]}"
+    else
+        local found=0
+        for hardfork in "${L1_SNAPSHOT_SUPPORTED_HARDFORKS[@]}"; do
+            if [[ "$hardfork" == "$requested" ]]; then
+                found=1
+                L1_SNAPSHOT_HARDFORK="$hardfork"
+                break
+            fi
+        done
+        (( found )) \
+            || l1_snapshot_die "Tempo revision does not support hardfork '$requested'; supported: ${L1_SNAPSHOT_SUPPORTED_HARDFORKS[*]}"
+    fi
+
+    L1_SNAPSHOT_HARDFORK_ARGS=()
+    local activation=0 selected=0
+    for hardfork in "${L1_SNAPSHOT_SUPPORTED_HARDFORKS[@]}"; do
+        if (( selected )); then
+            activation=$L1_SNAPSHOT_FUTURE_HARDFORK_TIME
+        fi
+        L1_SNAPSHOT_HARDFORK_ARGS+=("--${hardfork}-time" "$activation")
+        if [[ "$hardfork" == "$L1_SNAPSHOT_HARDFORK" ]]; then
+            selected=1
+        fi
+    done
 }
 
 l1_snapshot_sha256() {
@@ -157,8 +205,10 @@ l1_snapshot_load_config() {
     l1_snapshot_require_command df
     l1_snapshot_require_command forge
     l1_snapshot_require_command jq
+    l1_snapshot_require_command sed
     l1_snapshot_require_command sha256sum
     l1_snapshot_require_command stat
+    l1_snapshot_require_command tr
     l1_snapshot_validate_secret_file
 
     [[ -n "${TEMPO_ROOT:-}" ]] || l1_snapshot_die "TEMPO_ROOT must be set"
@@ -168,6 +218,8 @@ l1_snapshot_load_config() {
     l1_snapshot_require_executable "$L1_SNAPSHOT_TEMPO_BIN"
     l1_snapshot_require_executable "$L1_SNAPSHOT_TEMPO_XTASK_BIN"
     l1_snapshot_require_executable "$L1_SNAPSHOT_ZONES_XTASK_BIN"
+    l1_snapshot_resolve_hardfork
+    ZONES_BENCH_TEMPO_HARDFORK="$L1_SNAPSHOT_HARDFORK"
 
     ZONES_BENCH_ACCOUNT_START="${ZONES_BENCH_ACCOUNT_START:-16}"
     ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-200}"
@@ -257,6 +309,7 @@ l1_snapshot_prepare_expectations() {
 
     L1_SNAPSHOT_EXPECTED_CONFIG="$(jq -cnS \
         --arg tempoRevision "${tempo_revision,,}" \
+        --arg tempoHardfork "$L1_SNAPSHOT_HARDFORK" \
         --arg tempoPatchSha256 "$tempo_patch_hash" \
         --arg genesisInputsSha256 "$genesis_inputs_hash" \
         --arg factoryArtifactSha256 "$factory_hash" \
@@ -277,7 +330,11 @@ l1_snapshot_prepare_expectations() {
         --argjson localnetSeed "$L1_SNAPSHOT_LOCALNET_SEED" '
         {
           schema: $schema,
-          tempo: {revision: $tempoRevision, mnemonicFilePatchSha256: $tempoPatchSha256},
+          tempo: {
+            revision: $tempoRevision,
+            hardfork: $tempoHardfork,
+            mnemonicFilePatchSha256: $tempoPatchSha256
+          },
           zonesGenesis: {
             inputsSha256: $genesisInputsSha256,
             factoryArtifactSha256: $factoryArtifactSha256,
@@ -389,6 +446,7 @@ l1_snapshot_write_status() {
     local temporary="$L1_SNAPSHOT_STATUS_FILE.tmp.$$"
     (umask 077; {
         printf 'export ZONES_BENCH_L1_CACHE_REBUILT=%q\n' "$rebuilt"
+        printf 'export ZONES_BENCH_TEMPO_HARDFORK=%q\n' "$L1_SNAPSHOT_HARDFORK"
         printf 'export ZONES_BENCH_L1_CACHE_KEY=%q\n' "$L1_SNAPSHOT_CACHE_KEY"
         printf 'export ZONES_BENCH_L1_CACHE_GENERATION=%q\n' "$L1_SNAPSHOT_GENERATION_ID"
     } >"$temporary")
@@ -416,6 +474,7 @@ l1_snapshot_build() {
         --gas-limit "$L1_SNAPSHOT_GAS_LIMIT" \
         --general-gas-limit "$L1_SNAPSHOT_GENERAL_GAS_LIMIT" \
         --validators 127.0.0.2:8000,127.0.0.3:8100 \
+        "${L1_SNAPSHOT_HARDFORK_ARGS[@]}" \
         --seed "$L1_SNAPSHOT_LOCALNET_SEED"
 
     echo "installing the native ZoneFactory marker and shared runtimes in genesis"

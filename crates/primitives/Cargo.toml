@@ -12,10 +12,12 @@ workspace = true
 
 [dependencies]
 alloy-primitives = { workspace = true }
+alloy-rlp = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 tempo-hardfork = { workspace = true }
 thiserror = { version = "2", default-features = false }
 
 [features]
 default = ["std", "serde"]
 std = ["alloy-primitives/std", "thiserror/std"]
-serde = ["alloy-primitives/serde"]
+serde = ["dep:alloy-rlp", "dep:serde", "alloy-primitives/serde"]

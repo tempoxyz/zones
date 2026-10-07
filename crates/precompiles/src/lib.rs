@@ -10,9 +10,9 @@
 //!
 //! ## Cryptography
 //!
-//! - **Chaum-Pedersen verification** ([`chaum_pedersen`]) — verifies DLOG equality proofs
-//!   for ECDH shared secret derivation inside the native inbox.
-//! - **AES-256-GCM decryption** ([`aes_gcm`]) — decrypts ECIES ciphertext and verifies
+//! - **Chaum-Pedersen verification** — verifies DLOG equality proofs for ECDH shared secret
+//!   derivation inside the native inbox.
+//! - **AES-256-GCM decryption** — decrypts ECIES ciphertext and verifies
 //!   the GCM authentication tag inside the native inbox.
 //! - **ECIES** ([`ecies`]) — sequencer-side ECIES decryption logic.
 //!
@@ -51,17 +51,14 @@ macro_rules! zone_precompile {
 pub mod error;
 pub use error::{Result, ZonePrecompileError, ZoneResult};
 
-pub mod aes_gcm;
-pub mod chaum_pedersen;
+mod aes_gcm;
+mod chaum_pedersen;
 pub mod ecies;
 pub mod outbox;
 
-/// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
+/// Zone dispatch helpers for generic typed operations.
 pub mod dispatch {
-    pub use tempo_precompiles::{
-        dispatch::typed::{mutate, mutate_void, view},
-        metadata,
-    };
+    pub use tempo_precompiles::dispatch::typed::{mutate, view};
 }
 
 mod execution;
@@ -81,10 +78,8 @@ pub mod zone_fee_manager;
 pub mod zone_state;
 pub mod ztip20;
 
-pub use aes_gcm::AesGcmDecrypt;
-pub use chaum_pedersen::ChaumPedersenVerify;
-pub use inbox::{ADVANCE_TEMPO_SELECTOR, ZoneInbox};
-pub use outbox::{ZoneOutbox, is_finalize_withdrawal_batch_calldata};
+pub use inbox::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, ZoneInbox};
+pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
@@ -112,7 +107,6 @@ use tempo_precompiles::{
 #[cfg(feature = "std")]
 use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
-use zone_hardfork::ZoneHardfork;
 
 /// Registers every precompile that is available to a Zone EVM.
 ///
@@ -124,14 +118,13 @@ use zone_hardfork::ZoneHardfork;
 pub fn extend_zone_precompiles<P>(
     precompiles: &mut PrecompilesMap,
     cfg: &CfgEnv<TempoHardfork>,
-    zone_hardfork: ZoneHardfork,
     l1: L1State<P>,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 ) where
     P: L1StorageReader,
 {
-    let env = ZonePrecompileEnv::new(cfg, zone_hardfork, actions, non_creditable_slots);
+    let env = ZonePrecompileEnv::new(cfg, actions, non_creditable_slots);
 
     precompiles.set_precompile_lookup(move |address: &Address| {
         #[cfg(feature = "std")]

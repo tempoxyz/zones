@@ -21,6 +21,7 @@ zone-primitives = { workspace = true, features = ["std"] }
 tempo-chainspec.workspace = true
 tempo-evm.workspace = true
 tempo-primitives.workspace = true
+tempo-precompiles.workspace = true
 tempo-revm.workspace = true
 
 # Alloy / REVM

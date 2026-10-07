@@ -1,5 +1,4 @@
 use alloy_primitives::{B256, U256};
-use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use parking_lot::RwLock;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -141,11 +140,7 @@ impl EncryptionKeyRing {
 }
 
 fn public_key(key: &k256::SecretKey) -> (B256, u8) {
-    let encoded = key.public_key().to_encoded_point(true);
-    (
-        B256::from_slice(encoded.x().expect("compressed secp256k1 point has x")),
-        encoded.as_bytes()[0],
-    )
+    crate::precompiles::ecies::compressed_x_and_parity(key.public_key().as_affine())
 }
 
 #[cfg(test)]
@@ -177,10 +172,7 @@ mod tests {
         ring.apply_rotation(&rotation(&current, 1, 20)).unwrap();
 
         assert_eq!(ring.key(U256::ZERO).unwrap().to_bytes(), old.to_bytes());
-        assert_eq!(
-            ring.key(U256::from(1)).unwrap().to_bytes(),
-            current.to_bytes()
-        );
+        assert_eq!(ring.key(U256::ONE).unwrap().to_bytes(), current.to_bytes());
     }
 
     #[test]

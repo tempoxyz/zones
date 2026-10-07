@@ -1,8 +1,10 @@
 use alloy::{
+    consensus::BlockHeader as _,
     network::primitives::ReceiptResponse,
-    primitives::{Address, U256, address},
+    primitives::{Address, U256},
     providers::Provider,
     rpc::types::Filter,
+    signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
 use eyre::{WrapErr as _, eyre};
@@ -13,7 +15,7 @@ use std::{
 };
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZoneFactory, ZonePortal};
 
 /// Write a file that may contain key material with owner-only permissions on Unix.
 ///
@@ -50,11 +52,66 @@ pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// `zone.json` already provides a zone-specific value.
 /// Explorer: https://explore.moderato.tempo.xyz/address/0x5aF2000000000000000000000000000000000000
 pub(crate) const MODERATO_ZONE_FACTORY: Address = ZONE_FACTORY_ADDRESS;
-pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
-    address!("0xDEc0000000000000000000000000000000000000");
+pub(crate) use tempo_contracts::precompiles::STABLECOIN_DEX_ADDRESS;
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;
 const DEFAULT_WAIT_ATTEMPTS: usize = 120;
 const DEFAULT_WAIT_POLL: Duration = Duration::from_millis(500);
+const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
+
+/// Finds the block of the single ZoneCreated event for `zone_id` and `portal` in
+/// `from_block..=snapshot_block`.
+///
+/// Pass `0` when the creation block is unknown. Scanning from genesis issues one log query
+/// per 5,000 blocks, so callers that already know the creation block should start there.
+pub(crate) async fn find_zone_deployment_block<P: Provider<TempoNetwork>>(
+    provider: &P,
+    zone_id: u32,
+    portal: Address,
+    from_block: u64,
+    snapshot_block: u64,
+) -> eyre::Result<u64> {
+    let events = ZoneFactory::new(ZONE_FACTORY_ADDRESS, provider)
+        .ZoneCreated_filter()
+        .topic1(U256::from(zone_id))
+        .topic2(portal)
+        .from_block(from_block)
+        .to_block(snapshot_block)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .query()
+        .await
+        .wrap_err("failed scanning ZoneFactory ZoneCreated events")?;
+
+    eyre::ensure!(
+        events.len() == 1,
+        "expected exactly one ZoneCreated event for Zone {zone_id} and portal {portal}, found {}",
+        events.len()
+    );
+    let (event, log) = &events[0];
+    eyre::ensure!(
+        event.zoneId == zone_id && event.portal == portal,
+        "ZoneCreated event does not match Zone {zone_id} and portal {portal}"
+    );
+    eyre::ensure!(!log.removed, "ZoneCreated query returned a removed log");
+    let block_number = log
+        .block_number
+        .ok_or_else(|| eyre!("ZoneCreated log is missing its block number"))?;
+    let block_hash = log
+        .block_hash
+        .ok_or_else(|| eyre!("ZoneCreated log is missing its block hash"))?;
+    let header = provider
+        .get_header_by_number(block_number.into())
+        .await
+        .wrap_err_with(|| format!("failed reading ZoneCreated block {block_number}"))?
+        .ok_or_else(|| eyre!("ZoneCreated block {block_number} was not found"))?;
+    eyre::ensure!(
+        header.number() == block_number && header.hash == block_hash,
+        "ZoneCreated log block ({block_number}, {block_hash}) does not match canonical header ({}, {})",
+        header.number(),
+        header.hash
+    );
+    Ok(block_number)
+}
 
 pub(crate) struct ZoneMetadata {
     path: PathBuf,
@@ -130,6 +187,13 @@ pub(crate) fn normalize_http_rpc(rpc_url: &str) -> String {
     rpc_url
         .replace("wss://", "https://")
         .replace("ws://", "http://")
+}
+
+pub(crate) fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
+    Ok(private_key
+        .strip_prefix("0x")
+        .unwrap_or(private_key)
+        .parse()?)
 }
 
 pub(crate) fn check(receipt: &impl ReceiptResponse, label: &str) -> eyre::Result<()> {
@@ -295,4 +359,19 @@ pub(crate) async fn wait_for_withdrawal_processed<P: Provider<TempoNetwork>>(
     Err(eyre!(
         "timeout waiting for WithdrawalProcessed(to={to}, token={token}, amount={amount}, callbackSuccess={callback_success})"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_private_key;
+
+    #[test]
+    fn parses_prefixed_and_unprefixed_private_keys() {
+        let key = "1111111111111111111111111111111111111111111111111111111111111111";
+
+        assert_eq!(
+            parse_private_key(key).unwrap().to_bytes(),
+            parse_private_key(&format!("0x{key}")).unwrap().to_bytes()
+        );
+    }
 }

@@ -50,6 +50,7 @@ use crate::{
     settlement::{WithdrawalPage, find_processed_offset},
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
+use zone_primitives::constants::{MAX_UNPROCESSED_DEPOSITS, WITHDRAWAL_BOUNCEBACK_RESERVE};
 
 const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -578,14 +579,43 @@ impl WithdrawalProcessor {
                 return Ok(());
             }
 
-            let batches =
-                build_withdrawal_batches(remaining, self.config.batch_limits.max_batch_gas);
+            let (deposit_count, last_processed_deposit_number): (u64, u64) = self
+                .provider
+                .multicall()
+                .add(self.portal.depositCount())
+                .add(self.portal.lastProcessedDepositNumber())
+                .aggregate()
+                .await?;
+            let headroom =
+                withdrawal_deposit_headroom(deposit_count, last_processed_deposit_number)?;
+            if headroom == 0 {
+                debug!(
+                    deposit_count,
+                    last_processed_deposit_number,
+                    "Portal deposit backlog leaves no withdrawal bounce-back headroom"
+                );
+                return Ok(());
+            }
+            // Public deposits cannot consume the reserved suffix. Restricting each submission to
+            // that reserve prevents a public deposit landing after this read from racing the
+            // portal's withdrawal-capacity preflight.
+            let admitted = remaining
+                .len()
+                .min(headroom)
+                .min(WITHDRAWAL_BOUNCEBACK_RESERVE);
+            let fully_admitted = admitted == remaining.len();
+            let batches = build_withdrawal_batches(
+                &remaining[..admitted],
+                self.config.batch_limits.max_batch_gas,
+            );
             let total_gas = batches
                 .iter()
                 .fold(0u64, |total, batch| total.saturating_add(batch.gas_limit));
             info!(
                 slot = head_val,
                 withdrawals = remaining.len(),
+                admitted,
+                deposit_headroom = headroom,
                 transactions = batches.len(),
                 total_gas,
                 "Processing withdrawal batches"
@@ -611,12 +641,21 @@ impl WithdrawalProcessor {
 
             match outcome {
                 SubmitOutcome::Confirmed => {
-                    self.store.lock().remove_batch(head_val);
-                    info!(
-                        slot = head_val,
-                        count = remaining.len(),
-                        "Slot fully processed and removed from store"
-                    );
+                    if fully_admitted {
+                        self.store.lock().remove_batch(head_val);
+                        info!(
+                            slot = head_val,
+                            count = remaining.len(),
+                            "Slot fully processed and removed from store"
+                        );
+                    } else {
+                        info!(
+                            slot = head_val,
+                            processed = admitted,
+                            remaining = remaining.len() - admitted,
+                            "Processed portal-capacity-limited withdrawal prefix"
+                        );
+                    }
                 }
                 SubmitOutcome::Retry => {
                     // A lower nonce may have succeeded, changing every later batch's expected
@@ -826,6 +865,24 @@ impl WithdrawalProcessor {
     }
 }
 
+/// Return the number of withdrawals that can each append one deposit without exceeding the
+/// portal's unprocessed-deposit cap. This mirrors the `processWithdrawals` preflight using a live
+/// portal snapshot; the portal revalidates the bound when the transaction executes.
+fn withdrawal_deposit_headroom(
+    deposit_count: u64,
+    last_processed_deposit_number: u64,
+) -> eyre::Result<usize> {
+    let outstanding = deposit_count.checked_sub(last_processed_deposit_number).ok_or_else(|| {
+        eyre::eyre!(
+            "portal lastProcessedDepositNumber {last_processed_deposit_number} exceeds depositCount {deposit_count}"
+        )
+    })?;
+    let maximum =
+        u64::try_from(MAX_UNPROCESSED_DEPOSITS).expect("MAX_UNPROCESSED_DEPOSITS fits in u64");
+    Ok(usize::try_from(maximum.saturating_sub(outstanding))
+        .expect("withdrawal headroom fits in usize"))
+}
+
 struct SubmitBatches<'a> {
     slot: u64,
     offset: usize,
@@ -962,7 +1019,7 @@ mod tests {
     }
 
     fn abi_encode_u64(value: u64) -> Bytes {
-        Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>())
+        value.abi_encode().into()
     }
 
     fn abi_encode_multicall(values: Vec<Bytes>) -> Bytes {
@@ -982,7 +1039,7 @@ mod tests {
             "effectiveGasPrice": "0x0",
             "contractAddress": null,
             "logs": [],
-            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "logsBloom": format!("{:#x}", alloy_primitives::Bloom::ZERO),
             "status": "0x1",
             "type": "0x0",
             "feePayer": Address::repeat_byte(0x77),
@@ -1033,7 +1090,7 @@ mod tests {
 
     #[test]
     fn single_withdrawal_queue_hash() {
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
+        let w = test_withdrawal(Address::with_last_byte(0x42), 1000);
         let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
 
         let expected = keccak256((w, B256::ZERO).abi_encode_params());
@@ -1042,8 +1099,8 @@ mod tests {
 
     #[test]
     fn two_withdrawal_queue_hash() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000043"), 200);
+        let w0 = test_withdrawal(Address::with_last_byte(0x42), 100);
+        let w1 = test_withdrawal(Address::with_last_byte(0x43), 200);
 
         let hash = abi::Withdrawal::queue_hash(&[w0.clone(), w1.clone()]);
 
@@ -1142,6 +1199,15 @@ mod tests {
     }
 
     #[test]
+    fn withdrawal_admission_respects_global_deposit_headroom() {
+        assert_eq!(withdrawal_deposit_headroom(0, 0).unwrap(), 230);
+        assert_eq!(withdrawal_deposit_headroom(229, 0).unwrap(), 1);
+        assert_eq!(withdrawal_deposit_headroom(230, 0).unwrap(), 0);
+        assert_eq!(withdrawal_deposit_headroom(300, 100).unwrap(), 30);
+        assert!(withdrawal_deposit_headroom(9, 10).is_err());
+    }
+
+    #[test]
     fn oversized_withdrawal_is_a_singleton() {
         let mut withdrawals = simple_withdrawals(2);
         withdrawals[0].gasLimit = MAX_WITHDRAWAL_GAS_LIMIT;
@@ -1156,7 +1222,7 @@ mod tests {
     #[test]
     fn store_operations() {
         let mut store = WithdrawalStore::new();
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
+        let w = test_withdrawal(Address::with_last_byte(0x42), 100);
 
         assert_eq!(store.batch_count(), 0);
         assert!(!store.has_batch(0));
@@ -1181,7 +1247,7 @@ mod tests {
         // at tail=5, withdrawals end up in slot 0 while the withdrawal processor
         // looks for them in slot 5.
         let mut store = WithdrawalStore::new();
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
+        let w = test_withdrawal(Address::with_last_byte(0x42), 100);
 
         // Simulate storing under the wrong slot (tail=0 when portal is at 5).
         store.add_withdrawal(0, w.clone());
@@ -1200,7 +1266,7 @@ mod tests {
     #[test]
     fn store_add_batch() {
         let mut store = WithdrawalStore::new();
-        let addr = address!("0x0000000000000000000000000000000000000042");
+        let addr = Address::with_last_byte(0x42);
         let batch: Vec<_> = (0..3).map(|i| test_withdrawal(addr, i * 100)).collect();
 
         store.add_batch(0, batch);
@@ -1234,7 +1300,7 @@ mod tests {
     #[test]
     fn store_reconciles_head_page_and_preserves_tail() {
         let mut store = WithdrawalStore::new();
-        let addr = address!("0x0000000000000000000000000000000000000042");
+        let addr = Address::with_last_byte(0x42);
 
         store.add_batch(0, vec![test_withdrawal(addr, 100)]);
         store.add_batch(9, vec![test_withdrawal(addr, 900)]);
@@ -1307,7 +1373,7 @@ mod tests {
     }
 
     fn abi_encode_b256(value: B256) -> Bytes {
-        Bytes::copy_from_slice(value.as_slice())
+        value.into()
     }
 
     fn test_processor(
@@ -1448,13 +1514,9 @@ mod tests {
         l1.push_success(&abi_encode_b256(B256::repeat_byte(0xde)));
 
         let store = SharedWithdrawalStore::new();
-        store.lock().add_batch(
-            5,
-            vec![test_withdrawal(
-                address!("0x0000000000000000000000000000000000000042"),
-                100,
-            )],
-        );
+        store
+            .lock()
+            .add_batch(5, vec![test_withdrawal(Address::with_last_byte(0x42), 100)]);
 
         let repair_notify = Arc::new(Notify::new());
         let processor = test_processor(l1.clone(), store, repair_notify.clone());
@@ -1484,13 +1546,9 @@ mod tests {
         l1.push_success(&abi_encode_b256(B256::ZERO));
 
         let store = SharedWithdrawalStore::new();
-        store.lock().add_batch(
-            5,
-            vec![test_withdrawal(
-                address!("0x0000000000000000000000000000000000000042"),
-                100,
-            )],
-        );
+        store
+            .lock()
+            .add_batch(5, vec![test_withdrawal(Address::with_last_byte(0x42), 100)]);
 
         let repair_notify = Arc::new(Notify::new());
         let processor = test_processor(l1.clone(), store.clone(), repair_notify.clone());

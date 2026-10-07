@@ -1,12 +1,10 @@
 //! Tests for zone-specific precompile availability.
 
 use alloy_primitives::B256;
-use tempo_contracts::precompiles::ITIP20ChannelReserve;
+use tempo_contracts::precompiles::{IStablecoinDEX, ITIP20ChannelReserve};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS};
 
-use crate::utils::{
-    DEFAULT_TIMEOUT, STABLECOIN_DEX_ADDRESS, TestStablecoinDEX, start_local_zone_with_fixture,
-};
+use crate::utils::{DEFAULT_TIMEOUT, STABLECOIN_DEX_ADDRESS, start_local_zone_with_fixture};
 
 /// The StablecoinDEX precompile should be disabled on zones — any call to
 /// it must revert.
@@ -22,7 +20,7 @@ async fn test_dex_disabled_on_zone() -> eyre::Result<()> {
 
     // Attempt to call createPair on the DEX — should revert because the
     // precompile is not registered on the zone.
-    let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, zone.provider());
+    let dex = IStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, zone.provider());
     let result = dex.createPair(PATH_USD_ADDRESS).call().await;
 
     assert!(

@@ -56,14 +56,14 @@ pub use precompiles::*;
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
+    use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
     use alloy_sol_types::{SolCall, SolValue};
 
     #[test]
     fn test_withdrawal_bounce_back_abi_encode_vs_params() {
         let d = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            to: address!("0x0000000000000000000000000000000000000002"),
+            to: Address::with_last_byte(2),
             amount: 1000u128,
         };
 
@@ -84,7 +84,7 @@ mod tests {
     fn test_queued_withdrawal_bounce_back_encoding() {
         let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            to: address!("0x0000000000000000000000000000000000000002"),
+            to: Address::with_last_byte(2),
             amount: 1000u128,
         };
 
@@ -129,8 +129,8 @@ mod tests {
 
         println!("\nadvanceTempo calldata length: {}", calldata.len());
         println!(
-            "advanceTempo selector: 0x{}",
-            const_hex::encode(&calldata[..4])
+            "advanceTempo selector: {}",
+            const_hex::encode_prefixed(&calldata[..4])
         );
         println!(
             "advanceTempo full calldata:\n{}",
@@ -142,7 +142,7 @@ mod tests {
     fn test_withdrawal_bounce_back_hash_chain_matches_solidity() {
         let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            to: address!("0x0000000000000000000000000000000000000002"),
+            to: Address::with_last_byte(2),
             amount: 1000u128,
         };
         let prev_hash = B256::ZERO;
@@ -167,10 +167,10 @@ mod tests {
 
     #[test]
     fn test_decryption_data_encoding_uses_trimmed_layout() {
-        let shared_secret = B256::from([0x11; 32]);
+        let shared_secret = B256::repeat_byte(0x11);
         let shared_secret_y_parity = 0x02;
-        let proof_s = B256::from([0x33; 32]);
-        let proof_c = B256::from([0x44; 32]);
+        let proof_s = B256::repeat_byte(0x33);
+        let proof_c = B256::repeat_byte(0x44);
 
         let decryption = DecryptionData {
             sharedSecret: shared_secret,
@@ -182,8 +182,7 @@ mod tests {
         };
 
         let encoded = decryption.abi_encode();
-        let mut expected_y_parity_word = [0u8; 32];
-        expected_y_parity_word[31] = shared_secret_y_parity;
+        let expected_y_parity_word = B256::with_last_byte(shared_secret_y_parity);
 
         assert_eq!(
             encoded.len(),
@@ -197,7 +196,7 @@ mod tests {
         );
         assert_eq!(
             &encoded[32..64],
-            expected_y_parity_word,
+            expected_y_parity_word.as_slice(),
             "word 1 is sharedSecretYParity"
         );
         assert_eq!(&encoded[64..96], proof_s.as_slice(), "word 2 is cpProof.s");
@@ -206,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_sender_tag_matches_plaintext_hash() {
-        let sender = address!("0x0000000000000000000000000000000000000001");
+        let sender = Address::with_last_byte(1);
         let tx_hash = B256::repeat_byte(0x22);
         let fallback_nonce = 7u64;
         let plaintext = Withdrawal::authenticated_sender_plaintext(sender, tx_hash);
@@ -225,7 +224,7 @@ mod tests {
     #[test]
     fn test_router_callback_encoding_matches_tuple() {
         let encrypted = DepositPayload {
-            ephemeralPubkeyX: B256::from([0x22; 32]),
+            ephemeralPubkeyX: B256::repeat_byte(0x22),
             ephemeralPubkeyYParity: 0x02,
             ciphertext: Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]),
             nonce: [0x33; 12].into(),

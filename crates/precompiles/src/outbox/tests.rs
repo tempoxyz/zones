@@ -1,9 +1,9 @@
 use super::*;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Bytes, address, keccak256};
-use alloy_sol_types::{SolCall, SolInterface, SolValue};
-use revm::precompile::PrecompileResult;
+use alloy_primitives::{Bytes, address};
+use alloy_sol_types::{SolCall, SolInterface};
+use revm::precompile::{PrecompileHalt, PrecompileResult, PrecompileStatus};
 use tempo_precompiles::{
     storage::{StorageCtx, StorageKey},
     test_util::TIP20Setup,
@@ -25,12 +25,12 @@ const GAS: u64 = 10_000_000;
 const ANCHOR: u64 = 42;
 const TEST_MAX_TEMPO_GAS_RATE: u128 = 1_000_000_000_000_000_000;
 const TX_HASH: B256 = B256::repeat_byte(0x42);
-const PORTAL: Address = address!("0x7777777777777777777777777777777777777777");
-const ALICE: Address = address!("0x00000000000000000000000000000000000000a1");
-const BOB: Address = address!("0x00000000000000000000000000000000000000b2");
-const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000c3");
-const FEE_PAYER: Address = address!("0x00000000000000000000000000000000000000d4");
-const GATEWAY: Address = address!("0x00000000000000000000000000000000000000e5");
+const PORTAL: Address = Address::repeat_byte(0x77);
+const ALICE: Address = Address::with_last_byte(0xa1);
+const BOB: Address = Address::with_last_byte(0xb2);
+const SEQUENCER: Address = Address::with_last_byte(0xc3);
+const FEE_PAYER: Address = Address::with_last_byte(0xd4);
+const GATEWAY: Address = Address::with_last_byte(0xe5);
 
 struct Harness {
     ctx: TestContext,
@@ -44,10 +44,9 @@ impl Harness {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
         let l1 = MockL1Reader::default();
-        let sequencer_membership_slot = keccak256((SEQUENCER, portal::slots::ROLE).abi_encode());
         l1.insert(
             PORTAL,
-            sequencer_membership_slot.into(),
+            SEQUENCER.mapping_slot(portal::slots::ROLE),
             ANCHOR,
             U256::from(u8::from(Role::Sequencer)),
         );
@@ -207,9 +206,12 @@ impl Harness {
     }
 
     fn set_role(&self, account: Address, role: Role) {
-        let slot = keccak256((account, portal::slots::ROLE).abi_encode());
-        self.l1
-            .insert(PORTAL, slot.into(), ANCHOR, U256::from(u8::from(role)));
+        self.l1.insert(
+            PORTAL,
+            account.mapping_slot(portal::slots::ROLE),
+            ANCHOR,
+            U256::from(u8::from(role)),
+        );
     }
 
     fn set_token_enabled(&self, enabled: bool) {
@@ -667,9 +669,9 @@ fn callback_and_reveal_boundaries_are_enforced() -> eyre::Result<()> {
         ZoneOutboxError::invalid_reveal_to(),
     );
 
-    let valid = Bytes::copy_from_slice(&alloy_primitives::hex!(
+    let valid = alloy_primitives::bytes!(
         "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-    ));
+    );
     harness.request_custom(base(Bytes::new(), valid))?;
     Ok(())
 }
@@ -855,26 +857,30 @@ fn many_withdrawals_finalize_and_clear_pending_state() -> eyre::Result<()> {
 }
 
 #[test]
-fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
+fn static_mutation_halts_without_changing_state() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let token = harness.token;
-    assert_revert(
-        harness.call_static(
-            ALICE,
-            ZoneOutboxAbi::requestWithdrawalCall {
-                token,
-                to: BOB,
-                amount: 1,
-                memo: B256::ZERO,
-                gasLimit: 0,
-                zoneFallbackRecipient: ALICE,
-                data: Bytes::new(),
-                revealTo: Bytes::new(),
-            }
-            .abi_encode(),
-        ),
-        ZoneOutboxError::static_call_not_allowed(),
+    let output = harness.call_static(
+        ALICE,
+        ZoneOutboxAbi::requestWithdrawalCall {
+            token,
+            to: BOB,
+            amount: 1,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            zoneFallbackRecipient: ALICE,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        }
+        .abi_encode(),
+    )?;
+    assert_eq!(
+        output.status,
+        PrecompileStatus::Halt(PrecompileHalt::other_static(
+            "state change during static call"
+        ))
     );
+    assert!(output.bytes.is_empty());
     assert!(
         harness.l1.storage_requests().is_empty(),
         "static mutation must reach dispatch without portal reads"
@@ -908,10 +914,14 @@ fn fallback_recipient_nonce_is_private_and_consumed_once_by_inbox() -> eyre::Res
         ),
         ZoneOutboxError::invalid_fallback_recipient(),
     );
-    assert_revert(
-        harness.call_static(ZONE_INBOX_ADDRESS, &calldata),
-        ZoneOutboxError::static_call_not_allowed(),
+    let output = harness.call_static(ZONE_INBOX_ADDRESS, &calldata)?;
+    assert_eq!(
+        output.status,
+        PrecompileStatus::Halt(PrecompileHalt::other_static(
+            "state change during static call"
+        ))
     );
+    assert!(output.bytes.is_empty());
 
     // The failed static call must not consume the mapping entry.
     let output = harness.call(ZONE_INBOX_ADDRESS, &calldata)?;
