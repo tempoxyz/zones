@@ -385,7 +385,6 @@ where
 
         let payload = TempoBuiltPayload::new(
             eth_payload,
-            None,
             Some(executed_block),
             std::time::Duration::ZERO,
             std::time::Duration::ZERO,

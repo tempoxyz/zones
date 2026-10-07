@@ -134,11 +134,10 @@ impl PayloadTypes for ZonePayloadTypes {
 
     fn block_to_payload(
         block: SealedBlock<Block>,
-        bal: Option<alloy_primitives::Bytes>,
+        _bal: Option<alloy_primitives::Bytes>,
     ) -> Self::ExecutionData {
         TempoExecutionData {
             block: block.into(),
-            block_access_list: bal,
         }
     }
 }
@@ -150,10 +149,7 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
         &self,
         payload: TempoExecutionData,
     ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
-        let TempoExecutionData {
-            block,
-            block_access_list: _,
-        } = payload;
+        let TempoExecutionData { block } = payload;
         Ok(block.into_sealed_block())
     }
 
