@@ -58,6 +58,10 @@ Companion image tags publish only after this production check succeeds. This
 check gates their publication; it does not independently reproduce companion
 image contents.
 
+The Release workflow accepts only tags whose commits are already reachable
+from `main`, including for manual dry runs. This check runs before either
+OIDC-enabled binary build checks out and executes the tagged build script.
+
 ## Prover EIF
 
 The separate `reproducible_eif_verify` dispatch option compares unsigned prover
