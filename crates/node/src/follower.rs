@@ -468,11 +468,7 @@ where
             }
             return true;
         }
-        if let Err(err) = validate_pending_peer_block(
-            &peer_block.block.block,
-            &self.context.schedule,
-            peer_block.live_sender.as_ref(),
-        ) {
+        if let Err(err) = validate_peer_block_body(&peer_block.block.block) {
             tracing::error!(target: "zone::p2p", %err, "Rejected peer block before buffering");
             self.backfill.needed = true;
             return true;
@@ -741,23 +737,6 @@ fn head_advanced(previous: Option<u64>, current: Option<u64>) -> bool {
     previous
         .zip(current)
         .is_some_and(|(previous, current)| current > previous)
-}
-
-fn validate_pending_peer_block(
-    block: &SealedBlock<Block>,
-    schedule: &LeadershipSchedule,
-    live_sender: Option<&P2pPeerId>,
-) -> eyre::Result<()> {
-    if live_sender.is_some() {
-        let tempo_import = decode_advance_tempo(block)?;
-        validate_live_block_sender(
-            schedule,
-            live_sender,
-            tempo_import.leader_anchor()?,
-            block.number(),
-        )?;
-    }
-    validate_peer_block_body(block)
 }
 
 fn validate_live_block_sender(
@@ -1641,15 +1620,15 @@ mod tests {
         assert!(!head_advanced(Some(5), None));
     }
 
-    #[test]
-    fn pending_admission_rejects_wrong_live_producer() {
+    #[tokio::test]
+    async fn pending_block_waits_for_the_incoming_leaders_anchor() {
         let leader = PrivateKey::from_seed(1).public_key();
-        let other = PrivateKey::from_seed(2).public_key();
-        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, leader.clone(), 0));
+        let incoming = PrivateKey::from_seed(2).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, leader, 0));
         let prepared = zone_l1::PreparedL1Block {
             header: SealedHeader::seal_slow(TempoHeader {
                 inner: alloy_consensus::Header {
-                    number: 7,
+                    number: 10,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1666,16 +1645,53 @@ mod tests {
         };
         let header = TempoHeader {
             inner: alloy_consensus::Header {
+                number: 7,
                 transactions_root: body.calculate_tx_root(),
                 ommers_hash: body.calculate_ommers_root(),
                 ..Default::default()
             },
             ..Default::default()
         };
-        let block = SealedBlock::seal_slow(Block { header, body });
-        validate_pending_peer_block(&block, &schedule, Some(&leader)).unwrap();
-        assert!(validate_pending_peer_block(&block, &schedule, Some(&other)).is_err());
-        validate_pending_peer_block(&block, &schedule, None).unwrap();
+        let block = decode_peer_block(&alloy_rlp::encode(Block { header, body })).unwrap();
+        validate_peer_block_body(&block.block).unwrap();
+        let mut pending = PendingBlocks::default();
+        assert_eq!(
+            pending.insert(
+                7,
+                PendingPeerBlock {
+                    block,
+                    live_sender: Some(incoming.clone())
+                }
+            ),
+            None
+        );
+        let block = pending.take_next_after(6).unwrap();
+        let anchor = prepared.header.num_hash();
+        let tracker = L1BlockTracker::default();
+        let stop = sync::CancellationToken::new();
+        let inputs = AdvanceTempoPortalInputs {
+            deposits: vec![],
+            enabled_tokens: vec![],
+        };
+        let waiting = wait_for_validated_peer_anchor(
+            &tracker,
+            &schedule,
+            &inputs,
+            block.live_sender.as_ref(),
+            anchor,
+            7,
+            &stop,
+            PEER_ANCHOR_WAIT_TIMEOUT,
+        );
+        tokio::pin!(waiting);
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        schedule
+            .publish(LeadershipState::new(2, incoming, anchor.number))
+            .unwrap();
+        tracker
+            .record_with_portal_events(anchor, L1PortalEvents::default())
+            .unwrap();
+        waiting.await.unwrap();
     }
 
     #[test]

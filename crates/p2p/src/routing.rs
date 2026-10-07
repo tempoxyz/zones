@@ -168,10 +168,6 @@ impl<'a> RoutingPolicy<'a> {
     pub(crate) fn is_remote_quorum_peer(&self, peer: &PublicKey) -> bool {
         self.is_remote_peer(peer) && self.membership.is_quorum_member(peer)
     }
-
-    pub(crate) fn may_accept_block(&self, peer: &PublicKey) -> bool {
-        self.is_remote_retained_leader(peer)
-    }
 }
 
 #[cfg(test)]
@@ -244,10 +240,6 @@ mod tests {
         let follower_key = key(3);
         let follower = RoutingPolicy::new(&follower_key, &membership, &schedule);
         assert!(!follower.may_broadcast_block());
-        assert!(follower.may_accept_block(&key(1)));
-        assert!(follower.may_accept_block(&key(2)));
-        assert!(!follower.may_accept_block(&key(3)));
-        assert!(!follower.may_accept_block(&key(4)));
         assert_eq!(follower.preferred_backfill_leader(), Some(key(2)));
         assert_eq!(
             follower
