@@ -14395,6 +14395,7 @@ dependencies = [
  "aws-lc-rs",
  "futures",
  "keccak-const",
+ "libloading",
  "minicbor",
  "minicbor-serde",
  "rcgen",

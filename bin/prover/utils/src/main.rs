@@ -36,6 +36,7 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
+mod tdx;
 mod verifier_request;
 mod verify;
 
@@ -73,6 +74,8 @@ enum Command {
     Prove(ProveArgs),
     /// Verify a saved proof against the native L1 verifier using eth_call.
     Verify(verify::VerifyArgs),
+    /// Collect and locally verify experimental TDX evidence, or check attested TLS.
+    Tdx(tdx::TdxArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -203,6 +206,7 @@ async fn main() -> Result<()> {
         Command::GenerateInput(args) => generate_input(args).await,
         Command::Prove(args) => prove(args).await,
         Command::Verify(args) => verify::run(args).await,
+        Command::Tdx(args) => tdx::run(args).await,
     }
 }
 

@@ -252,3 +252,9 @@ otherwise. The check uses wall-clock time and the local chainspec, so it continu
 or prover connectivity. It stays `1` after an unconfigured fork activates. Alert on a value of `1`
 and configure the missing endpoint before activation. The monitor runs for the node's lifetime,
 independently of prover workers.
+
+## Experimental TDX backend
+
+The same service supports `--backend tdx` for a measured Linux x86_64 TDX guest.
+See [the TDX implementation and integration notes](../../../docs/TDX.md) for the
+DCAP libraries, measurement policy, and remaining Tempo settlement work.

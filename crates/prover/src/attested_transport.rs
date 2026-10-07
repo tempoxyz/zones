@@ -1,4 +1,4 @@
-//! Fresh Nitro attestation followed by ordinary TLS 1.3, before any prover payload is sent.
+//! Fresh hardware attestation followed by ordinary TLS 1.3, before any prover payload is sent.
 //!
 //! The plaintext bootstrap carries only a random challenge, certificate and attestation. The
 //! measured enclave binds its own certificate (never a caller-supplied key) to that challenge.
@@ -29,6 +29,7 @@ use tokio_rustls::{
 };
 
 const MAGIC: &[u8; 8] = b"TZRATLS2";
+const TDX_MAGIC: &[u8; 8] = b"TZTDX001";
 const CONTEXT: &[u8] = b"tempo-zone-prover/tls-bootstrap/v1\0";
 const SERVER_NAME: &str = "tempo-zone-prover.invalid";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,11 +52,17 @@ fn default_max_age_seconds() -> u64 {
     DEFAULT_MAX_AGE_SECS
 }
 
-/// Remote prover address with a required, validated Nitro policy.
+/// Remote prover address with a required, validated Nitro or experimental TDX policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteProverConfig {
     address: String,
-    policy: Policy,
+    policy: VerificationPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VerificationPolicy {
+    Nitro(Policy),
+    Tdx(crate::tdx::Policy),
 }
 
 impl RemoteProverConfig {
@@ -63,9 +70,18 @@ impl RemoteProverConfig {
         Self::from_policy_json(address, &std::fs::read(path)?)
     }
 
-    /// Parse a JSON PCR allowlist override for remote prover authentication.
+    /// Parse a Nitro PCR allowlist or a `backend: "tdx"` measurement policy.
     pub fn from_policy_json(address: String, bytes: &[u8]) -> io::Result<Self> {
         require(bytes.len() <= MAX_POLICY_BYTES, "invalid policy size")?;
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+        if value.get("backend").is_some() {
+            require(!address.trim().is_empty(), "invalid prover address")?;
+            let policy = crate::tdx::Policy::from_json(bytes)?;
+            return Ok(Self {
+                address,
+                policy: VerificationPolicy::Tdx(policy),
+            });
+        }
         let policy = serde_json::from_slice(bytes).map_err(io::Error::other)?;
         Self::new(address, policy)
     }
@@ -96,7 +112,10 @@ impl RemoteProverConfig {
                 "PCR must be a nonzero SHA-384 measurement",
             )?;
         }
-        Ok(Self { address, policy })
+        Ok(Self {
+            address,
+            policy: VerificationPolicy::Nitro(policy),
+        })
     }
 
     pub fn address(&self) -> &str {
@@ -107,7 +126,31 @@ impl RemoteProverConfig {
     pub async fn connect(&self) -> io::Result<ClientTlsStream<TcpStream>> {
         timeout(HANDSHAKE_TIMEOUT, async {
             let stream = TcpStream::connect(&self.address).await?;
-            connect_stream(stream, &self.policy, AWS_NITRO_ROOT_DER).await
+            match &self.policy {
+                VerificationPolicy::Nitro(policy) => {
+                    connect_stream(stream, policy, AWS_NITRO_ROOT_DER).await
+                }
+                VerificationPolicy::Tdx(policy) => {
+                    let policy = policy.clone();
+                    connect_stream_verified(
+                        stream,
+                        TDX_MAGIC,
+                        crate::tdx::MAX_QUOTE_BYTES,
+                        move |evidence, cert, nonce| async move {
+                            let data = crate::tdx::transport_report_data(
+                                &certificate_binding(&cert),
+                                &nonce,
+                            )?;
+                            tokio::task::spawn_blocking(move || {
+                                policy.verify(&evidence, &data, UnixTime::now().as_secs())
+                            })
+                            .await
+                            .map_err(io::Error::other)?
+                        },
+                    )
+                    .await
+                }
+            }
         })
         .await?
     }
@@ -115,18 +158,37 @@ impl RemoteProverConfig {
 
 type Attester = dyn Fn(&[u8], &[u8]) -> io::Result<Vec<u8>> + Send + Sync;
 
-/// One in-memory TLS key per enclave process. Construct only after configuring trusted entropy.
+/// One in-memory TLS key per guest process. Construct only after configuring trusted entropy.
 #[derive(Clone)]
 pub struct AttestedServer {
     acceptor: TlsAcceptor,
     certificate: CertificateDer<'static>,
     attester: Arc<Attester>,
+    magic: &'static [u8; 8],
+    maximum_evidence: usize,
 }
 
 impl AttestedServer {
     /// `attester(nonce, user_data)` must return an NSM document containing both fields verbatim.
     pub fn new(
         attester: impl Fn(&[u8], &[u8]) -> io::Result<Vec<u8>> + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        Self::with_profile(attester, MAGIC, MAX_DOCUMENT_SIZE)
+    }
+
+    /// TDX-specific bootstrap; report data binds certificate digest and client nonce.
+    pub fn new_tdx() -> io::Result<Self> {
+        Self::with_profile(
+            |nonce, binding| crate::tdx::quote(&crate::tdx::transport_report_data(binding, nonce)?),
+            TDX_MAGIC,
+            crate::tdx::MAX_QUOTE_BYTES,
+        )
+    }
+
+    fn with_profile(
+        attester: impl Fn(&[u8], &[u8]) -> io::Result<Vec<u8>> + Send + Sync + 'static,
+        magic: &'static [u8; 8],
+        maximum_evidence: usize,
     ) -> io::Result<Self> {
         let key = KeyPair::generate().map_err(io::Error::other)?;
         let mut params =
@@ -157,6 +219,8 @@ impl AttestedServer {
             acceptor: TlsAcceptor::from(Arc::new(config)),
             certificate,
             attester: Arc::new(attester),
+            magic,
+            maximum_evidence,
         })
     }
 
@@ -167,7 +231,7 @@ impl AttestedServer {
         timeout(HANDSHAKE_TIMEOUT, async {
             let mut magic = [0; 8];
             stream.read_exact(&mut magic).await?;
-            require(&magic == MAGIC, "invalid attestation bootstrap")?;
+            require(&magic == self.magic, "invalid attestation bootstrap")?;
             let mut nonce = [0; NONCE_LEN];
             stream.read_exact(&mut nonce).await?;
             let binding = certificate_binding(&self.certificate);
@@ -176,7 +240,7 @@ impl AttestedServer {
                 .await
                 .map_err(io::Error::other)??;
             write_frame(&mut stream, &self.certificate, MAX_CERT_BYTES).await?;
-            write_frame(&mut stream, &evidence, MAX_DOCUMENT_SIZE).await?;
+            write_frame(&mut stream, &evidence, self.maximum_evidence).await?;
             stream.flush().await?;
             self.acceptor.accept(stream).await
         })
@@ -185,29 +249,51 @@ impl AttestedServer {
 }
 
 async fn connect_stream<T: AsyncRead + AsyncWrite + Unpin>(
-    mut stream: T,
+    stream: T,
     policy: &Policy,
     root: &[u8],
 ) -> io::Result<ClientTlsStream<T>> {
+    connect_stream_verified(
+        stream,
+        MAGIC,
+        MAX_DOCUMENT_SIZE,
+        |evidence, cert, nonce| async move {
+            verify_evidence(
+                &evidence,
+                &cert,
+                &nonce,
+                policy,
+                root,
+                UnixTime::now().as_secs(),
+            )
+        },
+    )
+    .await
+}
+
+async fn connect_stream_verified<T, F, Fut>(
+    mut stream: T,
+    magic: &[u8; 8],
+    maximum: usize,
+    verify: F,
+) -> io::Result<ClientTlsStream<T>>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(Vec<u8>, Vec<u8>, [u8; NONCE_LEN]) -> Fut,
+    Fut: std::future::Future<Output = io::Result<()>>,
+{
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut nonce = [0; NONCE_LEN];
     provider
         .secure_random
         .fill(&mut nonce)
         .map_err(|error| io::Error::other(rustls::Error::from(error)))?;
-    stream.write_all(MAGIC).await?;
+    stream.write_all(magic).await?;
     stream.write_all(&nonce).await?;
     stream.flush().await?;
     let cert = read_frame(&mut stream, MAX_CERT_BYTES).await?;
-    let evidence = read_frame(&mut stream, MAX_DOCUMENT_SIZE).await?;
-    verify_evidence(
-        &evidence,
-        &cert,
-        &nonce,
-        policy,
-        root,
-        UnixTime::now().as_secs(),
-    )?;
+    let evidence = read_frame(&mut stream, maximum).await?;
+    verify(evidence, cert.clone(), nonce).await?;
 
     // No system roots or permissive verifier: the only anchor is the attested enclave key.
     let mut roots = RootCertStore::empty();
