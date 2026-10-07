@@ -455,6 +455,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.platform.target }}
+          mold: ${{ runner.os == 'Linux' }}
           sccache: "false"
 
       - name: Build binary
