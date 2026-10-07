@@ -769,7 +769,8 @@ jobs:
           set -euo pipefail
           docker builder prune --all --force
           mkdir -p "$RUNNER_TEMP/clean-image"
-          docker buildx bake -f docker/docker-bake.hcl --no-cache --pull --provenance=false \
+          docker buildx bake --allow "fs.write=$RUNNER_TEMP/clean-image" \
+            -f docker/docker-bake.hcl --no-cache --pull --provenance=false \
             --set 'tempo-zone.tags=tempo-zone:clean' \
             --set "tempo-zone.output=type=docker,dest=$RUNNER_TEMP/clean-image/tempo-zone.tar,rewrite-timestamp=true" \
             tempo-zone
