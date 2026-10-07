@@ -2,7 +2,6 @@
 
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::B256;
-use alloy_rlp::Decodable as _;
 use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_primitives_traits::SealedBlock;
