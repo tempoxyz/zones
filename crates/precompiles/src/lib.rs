@@ -108,23 +108,22 @@ use tempo_precompiles::{
 use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 
-/// Registers every precompile that is available to a Zone EVM.
+/// Returns every precompile that is available to a Zone EVM.
 ///
 /// The Zone wrappers all share one [`ZonePrecompileEnv`] and one execution-local [`L1State`].
 /// Sharing those values is important: the database overlay and the L1-backed precompiles must use
 /// the same Tempo anchor and the same storage-credit accounting state during a transaction.
-///
-/// Existing Tempo precompiles that are not supported by Zones are explicitly removed here.
-pub fn extend_zone_precompiles<P>(
-    precompiles: &mut PrecompilesMap,
+pub fn zone_precompiles<P>(
     cfg: &CfgEnv<TempoHardfork>,
     l1: L1State<P>,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
-) where
+) -> PrecompilesMap
+where
     P: L1StorageReader,
 {
     let env = ZonePrecompileEnv::new(cfg, actions, non_creditable_slots);
+    let mut precompiles = tempo_precompiles::ethereum_precompiles(cfg);
 
     precompiles.set_precompile_lookup(move |address: &Address| {
         #[cfg(feature = "std")]
@@ -172,6 +171,7 @@ pub fn extend_zone_precompiles<P>(
             None
         }
     });
+    precompiles
 }
 
 /// Creates the native ZoneOutbox over ordinary Zone storage and the L1-mirrored portal account.

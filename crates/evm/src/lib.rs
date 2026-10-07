@@ -19,10 +19,10 @@ pub use zone_evm::{ZoneEvm, validate_transaction};
 
 use crate::{
     fee_manager::ZoneProtocolFeeManager,
-    precompiles::{L1State, L1StorageReader, extend_zone_precompiles},
+    precompiles::{L1StorageReader, zone_precompiles},
 };
 use alloy_evm::{
-    Database, Evm, EvmEnv, EvmFactory,
+    Database, EvmEnv, EvmFactory,
     block::BlockExecutorFactory,
     precompiles::PrecompilesMap,
     revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
@@ -81,18 +81,19 @@ where
         }
     }
 
-    fn register_precompiles<DB: Database, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>>(
+    /// Builds the Tempo EVM over the L1-anchored database with only the Zone precompiles, keeping
+    /// L1-only code (e.g. the ZoneVerifier PCR policy) out of the prover binary.
+    fn create_tempo_evm<DB: Database>(
         &self,
-        evm: TempoEvm<L1OverlayDB<DB, L1>, I>,
-        l1: L1State<L1>,
-    ) -> TempoEvm<L1OverlayDB<DB, L1>, I> {
-        let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new());
-        let cfg = evm.ctx().cfg.clone();
-        let actions = StorageActions::disabled();
-        let non_creditable_slots = evm.non_creditable_slots();
-        let (_, _, precompiles) = evm.components_mut();
-        extend_zone_precompiles(precompiles, &cfg, l1, actions, non_creditable_slots);
-        evm
+        db: DB,
+        input: EvmEnv<TempoHardfork, TempoBlockEnv>,
+    ) -> TempoEvm<L1OverlayDB<DB, L1>> {
+        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
+        let l1 = db.l1_state().clone();
+        TempoEvm::new_with_precompiles(db, input, |cfg, actions, non_creditable_slots| {
+            zone_precompiles(cfg, l1, actions, non_creditable_slots)
+        })
+        .with_fee_manager(ZoneProtocolFeeManager::new())
     }
 }
 
@@ -114,10 +115,7 @@ where
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
-        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
-        let l1 = db.l1_state().clone();
-        let evm = TempoEvm::new(db, input);
-        ZoneEvm::new(self.register_precompiles(evm, l1))
+        ZoneEvm::new(self.create_tempo_evm(db, input))
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -126,10 +124,7 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
-        let l1 = db.l1_state().clone();
-        let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        ZoneEvm::new(self.register_precompiles(evm, l1))
+        ZoneEvm::new(self.create_tempo_evm(db, input).with_inspector(inspector))
     }
 }
 
@@ -471,6 +466,7 @@ mod tests {
     use super::*;
 
     use alloy_consensus::Sealable as _;
+    use alloy_evm::Evm as _;
     use alloy_primitives::{B256, U256, address};
     use alloy_sol_types::SolCall;
     use reth_chainspec::EthChainSpec;
