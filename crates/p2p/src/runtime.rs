@@ -727,6 +727,10 @@ where
             // Got a block
             result = blocks.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("block channel receive failed: {err}"))?;
+                if !RoutingPolicy::new(&local_ed25519_public_key, &membership, &leadership).may_accept_block(&peer) {
+                    warn!(target: "zone::p2p", %peer, "Ignoring live block from ineligible peer");
+                    continue;
+                }
                 let block = match into_bounded_payload(bytes, MAX_MESSAGE_SIZE as usize) {
                     Ok(block) => block,
                     Err(size) => {

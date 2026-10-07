@@ -479,7 +479,7 @@ where
         }
         self.backfill.observe_block(number, best);
         if let Some(dropped) = self.pending.insert(number, peer_block) {
-            tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, "Dropped far-future peer block because the pending block buffer is full");
+            tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, pending_byte_limit = MAX_PENDING_BYTES, "Dropped far-future peer block because the pending block buffer is full");
         }
         if number > best.saturating_add(1) {
             info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
@@ -1092,6 +1092,7 @@ mod tests {
 
     use alloy_eips::NumHash;
     use alloy_primitives::{Address, B256};
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_primitives_traits::BlockBody as _;
     use tokio_util::sync;
     use zone_l1::{DepositQueue, EnabledToken, L1BlockDeposits, L1BlockTracker, L1PortalEvents};
@@ -1642,8 +1643,6 @@ mod tests {
 
     #[test]
     fn pending_admission_rejects_wrong_live_producer() {
-        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-
         let leader = PrivateKey::from_seed(1).public_key();
         let other = PrivateKey::from_seed(2).public_key();
         let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, leader.clone(), 0));
