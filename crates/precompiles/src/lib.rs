@@ -91,7 +91,7 @@ use core::cell::RefCell;
 use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
-use revm::context::CfgEnv;
+use revm::{context::CfgEnv, handler::EthPrecompiles, primitives::hardfork::SpecId};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, Precompile as _,
@@ -123,7 +123,12 @@ where
     P: L1StorageReader,
 {
     let env = ZonePrecompileEnv::new(cfg, actions, non_creditable_slots);
-    let mut precompiles = tempo_precompiles::ethereum_precompiles(cfg);
+    let spec = if cfg.spec.is_t1c() {
+        cfg.spec.into()
+    } else {
+        SpecId::PRAGUE
+    };
+    let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::new(spec).precompiles);
 
     precompiles.set_precompile_lookup(move |address: &Address| {
         #[cfg(feature = "std")]
