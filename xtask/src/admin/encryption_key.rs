@@ -7,7 +7,7 @@ use alloy::{
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
 };
-use eyre::{Context as _, ensure, eyre};
+use eyre::{Context as _, OptionExt, ensure, eyre};
 use serde::Serialize;
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::ZonePortal;
@@ -118,7 +118,7 @@ impl Prepare {
         let active = view
             .portal
             .encryption_key
-            .ok_or_else(|| eyre!("Portal has no active encryption key to rotate"))?;
+            .ok_or_eyre("Portal has no active encryption key to rotate")?;
         ensure!(
             key_matches(active, old_key),
             "current key file does not derive the active Portal encryption key {}",
@@ -254,7 +254,7 @@ impl Register {
         let old_portal_key = view
             .portal
             .encryption_key
-            .ok_or_else(|| eyre!("Portal has no active encryption key to rotate"))?;
+            .ok_or_eyre("Portal has no active encryption key to rotate")?;
         let old_key = old_portal_key;
         let old_expected = ExpectedEncryptionKey {
             x: old_key.x,

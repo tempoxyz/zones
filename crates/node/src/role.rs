@@ -1086,7 +1086,7 @@ where
     provider
         .sealed_header(number)
         .map_err(eyre::Report::from)?
-        .ok_or_else(|| eyre::eyre!("no latest block header"))
+        .ok_or_eyre("no latest block header")
 }
 
 fn build_engine<P, Pool>(

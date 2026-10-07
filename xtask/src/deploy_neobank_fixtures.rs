@@ -8,7 +8,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
     sol_types::{SolCall, SolConstructor},
 };
-use eyre::{Context as _, ensure, eyre};
+use eyre::{Context as _, OptionExt, ensure, eyre};
 use serde::Serialize;
 use std::{fs, path::PathBuf};
 use tempo_alloy::{
@@ -421,7 +421,7 @@ impl DeployNeobankFixtures {
 
         let token_authority = swap_setup
             .token_authority
-            .ok_or_else(|| eyre!("token-authority setup did not return an authority address"))?;
+            .ok_or_eyre("token-authority setup did not return an authority address")?;
         let earn_router = deploy(
             &deployer_provider,
             with_constructor(

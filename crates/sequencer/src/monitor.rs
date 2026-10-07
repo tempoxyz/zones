@@ -33,7 +33,7 @@ use std::{
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
 use alloy_signer_local::PrivateKeySigner;
-use eyre::{Result, WrapErr};
+use eyre::{Result, WrapErr, ensure};
 use futures::StreamExt;
 use reth_chain_state::PersistedBlockSubscriptions;
 use tempo_alloy::TempoNetwork;
@@ -725,13 +725,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     break;
                 }
             };
-            if portal_hash != batch_data.prev_block_hash {
-                eyre::bail!(
-                    "portal block hash {portal_hash} no longer matches predecessor {} for zone \
+            ensure!(
+                portal_hash == batch_data.prev_block_hash,
+                "portal block hash {portal_hash} no longer matches predecessor {} for zone \
                      batch {last_zone_block}; invalidating prepared batch pipeline",
-                    batch_data.prev_block_hash
-                );
-            }
+                batch_data.prev_block_hash
+            );
 
             let submit_started = std::time::Instant::now();
             match self

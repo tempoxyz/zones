@@ -10,7 +10,7 @@ use std::{
 use alloy_consensus::BlockHeader as _;
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_rpc_types_eth::BlockNumberOrTag;
-use eyre::{Context as _, Result, ensure};
+use eyre::{Context as _, OptionExt, Result, ensure};
 use reth_metrics::metrics::Gauge;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoHardforks, hardfork::TempoHardfork};
@@ -64,11 +64,7 @@ impl ProverAddresses {
         if assignments.is_empty() {
             return Ok(None);
         }
-        let policy = policy.ok_or_else(|| {
-            eyre::eyre!(
-                "remote proving requires --sequencer.prover-attestation-policy; this Tempo release does not expose the verifier's PCR policy"
-            )
-        })?;
+        let policy = policy.ok_or_eyre("remote proving requires --sequencer.prover-attestation-policy; this Tempo release does not expose the verifier's PCR policy")?;
         let mut addresses = BTreeMap::new();
         for assignment in assignments {
             let HardforkProverAddress { hardfork, address } = assignment;
@@ -165,7 +161,7 @@ pub(crate) async fn active_l1_hardfork(
         .get_header_by_number(BlockNumberOrTag::Latest)
         .await
         .wrap_err("failed reading the latest Tempo L1 header")?
-        .ok_or_else(|| eyre::eyre!("latest Tempo L1 header is unavailable"))?;
+        .ok_or_eyre("latest Tempo L1 header is unavailable")?;
     Ok(chain_spec.tempo_hardfork_at(header.timestamp()))
 }
 

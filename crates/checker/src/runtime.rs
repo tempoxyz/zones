@@ -6,6 +6,7 @@ use alloy_consensus::BlockHeader as _;
 use alloy_eips::BlockNumHash;
 use alloy_provider::{DynProvider, Provider as _, ProviderBuilder};
 use alloy_rpc_client::{ConnectionConfig, RpcClient, WebSocketConfig};
+use eyre::OptionExt;
 use futures::{StreamExt as _, TryStreamExt as _, future};
 use reth_chainspec::ChainSpecProvider;
 use reth_exex::{ExExContext, ExExHead, ExExNotification};
@@ -75,8 +76,7 @@ where
     while let Some(notification) = ctx.notifications.next().await {
         let result = notification
             .and_then(|notification| {
-                notification_tip(&notification)
-                    .ok_or_else(|| eyre::eyre!("received an empty ExEx notification"))
+                notification_tip(&notification).ok_or_eyre("received an empty ExEx notification")
             })
             .and_then(|tip| ctx.send_finished_height(tip).map_err(Into::into));
         if let Err(error) = result {
@@ -157,8 +157,8 @@ where
             tracing::warn!(target: "zone::checker", "unexpected Zone revert; rebuilding from genesis");
             continue;
         }
-        let delivered_tip = notification_tip(&notification)
-            .ok_or_else(|| eyre::eyre!("received an empty ExEx notification"))?;
+        let delivered_tip =
+            notification_tip(&notification).ok_or_eyre("received an empty ExEx notification")?;
         if matches!(&snapshot.metadata.status, Status::Diverged { .. }) {
             snapshot = store.observe(&snapshot, delivered_tip.into())?;
             metrics.update(&snapshot);

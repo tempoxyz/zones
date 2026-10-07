@@ -6,7 +6,7 @@ use alloy::{
 };
 use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_eth::BlockId;
-use eyre::{WrapErr as _, ensure, eyre};
+use eyre::{OptionExt, WrapErr as _, ensure, eyre};
 use reth_evm::{
     Evm as _,
     revm::{DatabaseCommit, context::JournalTr, state::AccountInfo},
@@ -322,7 +322,7 @@ pub(crate) async fn finalized_pre_creation_anchor<P: Provider<TempoNetwork>>(
         .get_header_by_number(BlockNumberOrTag::Finalized)
         .await
         .wrap_err("failed to fetch finalized Tempo L1 block")?
-        .ok_or_else(|| eyre!("Tempo L1 returned no finalized block"))?;
+        .ok_or_eyre("Tempo L1 returned no finalized block")?;
     let finalized_block = finalized_header.number();
     if let Some(expected) = expected_creation_block {
         ensure!(
@@ -436,7 +436,7 @@ pub(crate) async fn wait_for_finalized_pre_creation_anchor<P: Provider<TempoNetw
             .get_header_by_number(BlockNumberOrTag::Finalized)
             .await
             .wrap_err("failed to fetch finalized Tempo L1 block")?
-            .ok_or_else(|| eyre!("Tempo L1 returned no finalized block"))?;
+            .ok_or_eyre("Tempo L1 returned no finalized block")?;
         if finalized.number() >= creation_block {
             return finalized_pre_creation_anchor(provider, portal, Some(creation_block)).await;
         }

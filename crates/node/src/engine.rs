@@ -41,7 +41,7 @@
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes as EthPayloadAttributes};
-use eyre::{OptionExt, WrapErr as _};
+use eyre::{OptionExt, WrapErr as _, ensure};
 use reth_chainspec::EthereumHardforks;
 use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
@@ -303,9 +303,10 @@ impl ZoneEngine {
         let state = self.forkchoice_state();
         let res = self.to_engine.fork_choice_updated(state, None).await?;
 
-        if !res.is_valid() {
-            eyre::bail!("Invalid fork choice update {state:?}: {res:?}");
-        }
+        ensure!(
+            res.is_valid(),
+            "Invalid fork choice update {state:?}: {res:?}"
+        );
 
         Ok(())
     }
@@ -407,9 +408,7 @@ impl ZoneEngine {
             .fork_choice_updated(self.forkchoice_state(), Some(attributes))
             .await?;
 
-        if res.is_invalid() {
-            eyre::bail!("Invalid payload status");
-        }
+        ensure!(!res.is_invalid(), "Invalid payload status");
 
         let payload_id = res.payload_id.ok_or_eyre("No payload id")?;
 
@@ -425,14 +424,12 @@ impl ZoneEngine {
         let block_number = header.number();
         let res = self.to_engine.new_payload(payload.into()).await?;
 
-        if !res.is_valid() {
-            eyre::bail!("Invalid payload for block {block_number}");
-        }
+        ensure!(res.is_valid(), "Invalid payload for block {block_number}");
 
         if let Some(collector) = &self.proof_collector {
             stop.run_until_cancelled(collector.collect_and_persist(block_number, header.hash()))
                 .await
-                .ok_or_else(|| eyre::eyre!("engine stopped while waiting for witness persistence"))?
+                .ok_or_eyre("engine stopped while waiting for witness persistence")?
                 .wrap_err_with(|| {
                     format!("collect proofs before canonicalizing Zone block {block_number}")
                 })?;

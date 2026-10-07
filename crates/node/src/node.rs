@@ -27,6 +27,7 @@ use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent as _;
+use eyre::OptionExt;
 use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
@@ -700,7 +701,7 @@ where
                             eyre::eyre!("failed reading finalized L1 replay boundary: {err}")
                         })?
                         .map(|header| header.number())
-                        .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
+                        .ok_or_eyre("L1 finalized block is not available")
                 };
                 let (historical_replay_through, ()) = tokio::try_join!(
                     finalized_replay_boundary,
@@ -998,7 +999,7 @@ where
             let sequencer_addr = config.sequencer_signer.address();
             let last_header = provider
                 .sealed_header(provider.best_block_number()?)?
-                .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+                .ok_or_eyre("no latest block header")?;
             let engine = ZoneEngine::new(
                 provider.chain_spec(),
                 engine_handle,
@@ -1107,18 +1108,16 @@ where
     let Some(recovery) = manifest.forced_recovery() else {
         return Ok(());
     };
-    let portal_leadership = schedule.latest().ok_or_else(|| {
-        eyre::eyre!(
-            "forced recovery requires a portal leadership snapshot at the local Tempo checkpoint"
-        )
-    })?;
+    let portal_leadership = schedule.latest().ok_or_eyre(
+        "forced recovery requires a portal leadership snapshot at the local Tempo checkpoint",
+    )?;
     let recovery_zone_height = canonical_recovery_height(provider, recovery.recovery_block_hash())?;
     let recovery_anchor = provider
         .history_by_block_number(recovery_zone_height)?
         .tempo_block_number()?;
     let recovery_start_tempo_block = recovery_anchor
         .checked_add(1)
-        .ok_or_else(|| eyre::eyre!("forced recovery Tempo anchor overflow"))?;
+        .ok_or_eyre("forced recovery Tempo anchor overflow")?;
 
     let recovery_portal_epoch = if recovery_anchor == snapshot_anchor {
         portal_leadership.epoch
@@ -1136,7 +1135,7 @@ where
     };
     let recovery_epoch = recovery_portal_epoch
         .checked_add(1)
-        .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
+        .ok_or_eyre("forced recovery epoch overflow")?;
 
     if portal_leadership.epoch >= recovery_epoch {
         warn!(
@@ -2097,7 +2096,7 @@ where
 
     let genesis_hash = provider
         .block_hash(0)?
-        .ok_or_else(|| eyre::eyre!("zone genesis block hash is unavailable"))?;
+        .ok_or_eyre("zone genesis block hash is unavailable")?;
     Ok(provider
         .state_by_block_hash(genesis_hash)?
         .tempo_num_hash()?

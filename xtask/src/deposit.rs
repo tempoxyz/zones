@@ -10,7 +10,7 @@ use alloy::{
     rpc::types::Filter,
     sol_types::SolEvent,
 };
-use eyre::{WrapErr as _, eyre};
+use eyre::{OptionExt, WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{DepositPayload, IZoneInbox, ZonePortal};
@@ -101,7 +101,7 @@ impl Deposit {
             self.portal,
             key_index,
         )
-        .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
+        .ok_or_eyre("ECIES encryption failed — invalid sequencer public key?")?;
 
         let payload = DepositPayload {
             ephemeralPubkeyX: enc.eph_pub_x,

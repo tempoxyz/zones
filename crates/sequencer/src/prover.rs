@@ -493,13 +493,17 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
                 return Err(error);
             }
         }
-    } else if context.config.proof_verifier.is_some() {
-        bail!("local proof verification requires a remote Nitro proof");
+    } else {
+        ensure!(
+            context.config.proof_verifier.is_none(),
+            "local proof verification requires a remote Nitro proof"
+        );
     }
 
-    if job.response.is_some() && proof_bundle.is_none() {
-        bail!("attested settlement requires a remote prover with Nitro NSM support");
-    }
+    ensure!(
+        job.response.is_none() || proof_bundle.is_some(),
+        "attested settlement requires a remote prover with Nitro NSM support"
+    );
     Ok((stats, proof_bundle))
 }
 

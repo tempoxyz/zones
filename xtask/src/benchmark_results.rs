@@ -1,5 +1,5 @@
 use clap::Parser;
-use eyre::{Context, Result, ensure};
+use eyre::{Context, OptionExt, Result, ensure};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -221,7 +221,7 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
     let submitted = submit_steps.iter().try_fold(0_u64, |total, step| {
         total
             .checked_add(step.report.success)
-            .ok_or_else(|| eyre::eyre!("successful submit count overflow"))
+            .ok_or_eyre("successful submit count overflow")
     })?;
     let aggregate_tps = submitted as f64 / elapsed_secs;
 
@@ -279,7 +279,7 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
             has_submit_step = true;
             successes = successes
                 .checked_add(step.report.success)
-                .ok_or_else(|| eyre::eyre!("successful chain submit count overflow"))?;
+                .ok_or_eyre("successful chain submit count overflow")?;
         }
         if !has_submit_step {
             continue;
@@ -441,15 +441,14 @@ fn validate_scenario_report(report: &ScenarioReport, scenario: &ScenarioSpec) ->
     )?;
     validate_latency("total scenario latency", &report.total_scenario_latency)?;
     if report.version >= 2 {
-        let client_observed = report.client_observed_e2e_latency.as_ref().ok_or_else(|| {
-            eyre::eyre!("txgen scenario report version 2 has no client-observed E2E latency")
-        })?;
+        let client_observed = report
+            .client_observed_e2e_latency
+            .as_ref()
+            .ok_or_eyre("txgen scenario report version 2 has no client-observed E2E latency")?;
         let critical_path = report
             .observed_critical_path_latency
             .as_ref()
-            .ok_or_else(|| {
-                eyre::eyre!("txgen scenario report version 2 has no observed critical-path latency")
-            })?;
+            .ok_or_eyre("txgen scenario report version 2 has no observed critical-path latency")?;
         validate_latency("client-observed E2E latency", client_observed)?;
         validate_latency("observed critical-path latency", critical_path)?;
     }
