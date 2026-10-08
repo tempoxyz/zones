@@ -227,99 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn withdrawal_attempt_allows_contract_calls_and_resets_between_transactions() {
-        use alloy_evm::EvmFactory;
-        use alloy_primitives::{TxKind, address, bytes};
-        use alloy_sol_types::{SolCall, SolInterface};
-        use revm::{
-            database::InMemoryDB,
-            state::{AccountInfo, Bytecode},
-        };
-        use tempo_chainspec::hardfork::TempoHardfork;
-        use tempo_precompiles::tip20::TIP20Error;
-        use tempo_primitives::transaction::Call;
-        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
-
-        let caller = Address::repeat_byte(0x11);
-        let forwarder = Address::repeat_byte(0x22);
-        let data: Bytes = IZoneOutbox::requestWithdrawalCall {
-            token: address!("0x20c000000000000000000000000000000000ffff"),
-            to: caller,
-            amount: 1,
-            memo: B256::ZERO,
-            gasLimit: 0,
-            zoneFallbackRecipient: caller,
-            data: Bytes::new(),
-            revealTo: Bytes::new(),
-        }
-        .abi_encode()
-        .into();
-
-        // Forward calldata with CALL, then return the inner call's revert data.
-        let mut code = bytes!("365f5f375f5f365f5f73").to_vec();
-        code.extend_from_slice(ZONE_OUTBOX_ADDRESS.as_slice());
-        code.extend_from_slice(&[0x5a, 0xf1, 0x50, 0x3d, 0x5f, 0x5f, 0x3e, 0x3d, 0x5f, 0xf3]);
-
-        for (target, batched) in [
-            (forwarder, false),
-            (ZONE_OUTBOX_ADDRESS, false),
-            (ZONE_OUTBOX_ADDRESS, true),
-        ] {
-            let reader = MockL1Reader::failing_storage();
-            let mut db = InMemoryDB::default();
-            db.insert_account_info(
-                forwarder,
-                AccountInfo::from_bytecode(Bytecode::new_raw(code.clone().into())),
-            );
-            let mut env = EvmEnv::default();
-            env.cfg_env.spec = TempoHardfork::T13;
-            let mut evm =
-                crate::ZoneEvmFactory::new(reader.clone(), Address::ZERO).create_evm(db, env);
-            let mut tx = TempoTxEnv {
-                fee_token: Some(tempo_precompiles::PATH_USD_ADDRESS),
-                inner: TxEnv {
-                    caller,
-                    kind: TxKind::Call(target),
-                    data: data.clone(),
-                    gas_limit: 1_000_000,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            if batched {
-                tx.tempo_tx_env = Some(Box::new(TempoBatchCallEnv {
-                    aa_calls: vec![
-                        Call {
-                            to: TxKind::Call(ZONE_OUTBOX_ADDRESS),
-                            value: U256::ZERO,
-                            input: IZoneOutbox::WITHDRAWAL_BASE_GASCall {}.abi_encode().into(),
-                        },
-                        Call {
-                            to: TxKind::Call(ZONE_OUTBOX_ADDRESS),
-                            value: U256::ZERO,
-                            input: data.clone(),
-                        },
-                    ],
-                    ..Default::default()
-                }));
-            }
-            for _ in 0..2 {
-                let result = evm
-                    .transact_raw(tx.clone())
-                    .expect("transaction must execute")
-                    .result;
-                assert_eq!(result.is_success(), target == forwarder);
-                // The first attempt reaches token validation, including through a contract.
-                assert_eq!(
-                    result.output().unwrap().as_ref(),
-                    TIP20Error::uninitialized().abi_encode()
-                );
-            }
-            assert!(reader.storage_requests().is_empty());
-        }
-    }
-
-    #[test]
     fn withdrawal_attempt_survives_evm_reverts_and_limits_native_batches() -> eyre::Result<()> {
         use alloy_evm::EvmFactory;
         use alloy_primitives::{TxKind, bytes};
@@ -352,38 +259,37 @@ mod tests {
         let recipient = Address::repeat_byte(0x44);
         let second_recipient = Address::repeat_byte(0x55);
         let portal_address = Address::repeat_byte(0x77);
-        // A single contract request, caught failure, success followed by another request,
-        // success undone by a parent revert, and native batches with one or two requests.
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T13);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            zone_precompiles::ZoneOutbox::new().initialize()?;
+            TIP20Setup::path_usd(caller)
+                .with_issuer(caller)
+                .with_issuer(ZONE_OUTBOX_ADDRESS)
+                .with_mint(caller, U256::from(100_000))
+                .with_mint(forwarder, U256::from(100_000))
+                .with_mint(parent, U256::from(100_000))
+                .with_approval(caller, ZONE_OUTBOX_ADDRESS, U256::MAX)
+                .with_approval(forwarder, ZONE_OUTBOX_ADDRESS, U256::MAX)
+                .with_approval(parent, ZONE_OUTBOX_ADDRESS, U256::MAX)
+                .apply()?;
+            Ok(())
+        })?;
+        let mut db = InMemoryDB::default();
+        for address in [PATH_USD_ADDRESS, ZONE_OUTBOX_ADDRESS] {
+            db.insert_account_info(address, storage.get_account_info(address).unwrap().clone());
+        }
+        for (address, slot, value) in storage.into_storage() {
+            db.insert_account_storage(address, slot, value)?;
+        }
+        // Caught failure, success, parent rollback, and native batches with one or two requests.
         for (first_succeeds, revert_parent, requests, native) in [
-            (true, false, 1, false),
             (false, false, 2, false),
             (true, false, 2, false),
             (true, true, 2, false),
             (true, false, 1, true),
             (true, false, 2, true),
         ] {
-            let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T13);
-            StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                zone_precompiles::ZoneOutbox::new().initialize()?;
-                TIP20Setup::path_usd(caller)
-                    .with_issuer(caller)
-                    .with_issuer(ZONE_OUTBOX_ADDRESS)
-                    .with_mint(caller, U256::from(100_000))
-                    .with_mint(forwarder, U256::from(100_000))
-                    .with_mint(parent, U256::from(100_000))
-                    .with_approval(caller, ZONE_OUTBOX_ADDRESS, U256::MAX)
-                    .with_approval(forwarder, ZONE_OUTBOX_ADDRESS, U256::MAX)
-                    .with_approval(parent, ZONE_OUTBOX_ADDRESS, U256::MAX)
-                    .apply()?;
-                Ok(())
-            })?;
-            let mut db = InMemoryDB::default();
-            for address in [PATH_USD_ADDRESS, ZONE_OUTBOX_ADDRESS] {
-                db.insert_account_info(address, storage.get_account_info(address).unwrap().clone());
-            }
-            for (address, slot, value) in storage.into_storage() {
-                db.insert_account_storage(address, slot, value)?;
-            }
+            let mut db = db.clone();
             let reader = MockL1Reader::default();
             reader.insert(
                 TIP403_REGISTRY_ADDRESS,
@@ -432,20 +338,16 @@ mod tests {
                     ZONE_OUTBOX_ADDRESS
                 },
             );
-            if requests == 1 {
-                code.extend_from_slice(&[0x50, 0x3d, 0x5f, 0x5f, 0x3e, 0x3d, 0x5f, 0xf3]);
-            } else {
-                // Save the first call's status/data above calldata, then try a fresh recipient.
-                code.extend_from_slice(&[
-                    0x61, 0x02, 0x00, 0x52, 0x3d, 0x5f, 0x61, 0x02, 0x20, 0x3e, 0x73,
-                ]);
-                code.extend_from_slice(second_recipient.as_slice());
-                code.extend_from_slice(&[0x60, 0x24, 0x52]);
-                append_call(&mut code, ZONE_OUTBOX_ADDRESS);
-                code.extend_from_slice(&[
-                    0x50, 0x3d, 0x5f, 0x61, 0x02, 0x40, 0x3e, 0x60, 0x60, 0x61, 0x02, 0x00, 0xf3,
-                ]);
-            }
+            // Save the first call's status/data above calldata, then try a fresh recipient.
+            code.extend_from_slice(&[
+                0x61, 0x02, 0x00, 0x52, 0x3d, 0x5f, 0x61, 0x02, 0x20, 0x3e, 0x73,
+            ]);
+            code.extend_from_slice(second_recipient.as_slice());
+            code.extend_from_slice(&[0x60, 0x24, 0x52]);
+            append_call(&mut code, ZONE_OUTBOX_ADDRESS);
+            code.extend_from_slice(&[
+                0x50, 0x3d, 0x5f, 0x61, 0x02, 0x40, 0x3e, 0x60, 0x60, 0x61, 0x02, 0x00, 0xf3,
+            ]);
             db.insert_account_info(
                 forwarder,
                 AccountInfo::from_bytecode(Bytecode::new_raw(code.into())),
@@ -501,44 +403,47 @@ mod tests {
                     ..Default::default()
                 }));
             }
-            let result = evm.transact_raw(tx)?.result;
-            let committed = first_succeeds && !revert_parent && !(native && requests == 2);
-            assert_eq!(result.is_success(), !(native && requests == 2));
-            assert_eq!(
-                result
-                    .logs()
-                    .iter()
-                    .filter(|log| log.address == ZONE_OUTBOX_ADDRESS)
-                    .count(),
-                usize::from(committed),
-                "case {first_succeeds}/{revert_parent}/{requests}/{native}: {:?}",
-                result.output()
-            );
-            let output = result.output().unwrap();
-            if native && requests == 2 {
+            // Reusing the same simulation hash must still reset the allowance per execution.
+            for _ in 0..2 {
+                let result = evm.transact_raw(tx.clone())?.result;
+                let committed = first_succeeds && !revert_parent && !(native && requests == 2);
+                assert_eq!(result.is_success(), !(native && requests == 2));
                 assert_eq!(
-                    output.as_ref(),
-                    ZoneOutboxError::withdrawal_already_attempted().abi_encode()
+                    result
+                        .logs()
+                        .iter()
+                        .filter(|log| log.address == ZONE_OUTBOX_ADDRESS)
+                        .count(),
+                    usize::from(committed),
+                    "case {first_succeeds}/{revert_parent}/{requests}/{native}: {:?}",
+                    result.output()
                 );
-            } else if requests == 2 {
-                assert_eq!(
-                    U256::from_be_slice(&output[..32]),
-                    U256::from(u8::from(first_succeeds && !revert_parent))
-                );
-                if revert_parent {
+                let output = result.output().unwrap();
+                if native && requests == 2 {
                     assert_eq!(
-                        U256::from_be_slice(&output[32..64]),
-                        U256::ONE,
-                        "withdrawal succeeded before its parent reverted"
+                        output.as_ref(),
+                        ZoneOutboxError::withdrawal_already_attempted().abi_encode()
+                    );
+                } else if requests == 2 {
+                    assert_eq!(
+                        U256::from_be_slice(&output[..32]),
+                        U256::from(u8::from(first_succeeds && !revert_parent))
+                    );
+                    if revert_parent {
+                        assert_eq!(
+                            U256::from_be_slice(&output[32..64]),
+                            U256::ONE,
+                            "withdrawal succeeded before its parent reverted"
+                        );
+                    }
+                    assert_eq!(
+                        &output[64..68],
+                        ZoneOutboxError::withdrawal_already_attempted().abi_encode()
                     );
                 }
-                assert_eq!(
-                    &output[64..68],
-                    ZoneOutboxError::withdrawal_already_attempted().abi_encode()
-                );
+                assert!(reader.requested(0, &portal.role[recipient]));
+                assert!(!reader.requested(0, &portal.role[second_recipient]));
             }
-            assert!(reader.requested(0, &portal.role[recipient]));
-            assert!(!reader.requested(0, &portal.role[second_recipient]));
         }
         Ok(())
     }

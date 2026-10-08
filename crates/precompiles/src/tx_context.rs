@@ -73,18 +73,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn publishes_and_clears_current_transaction() {
-        let tx_hash = B256::repeat_byte(0x42);
-        let fee_payer = Address::repeat_byte(0x24);
-
-        let guard = set_current_transaction(tx_hash, fee_payer);
-        assert_eq!(current_transaction(), Some((tx_hash, fee_payer)));
-
-        drop(guard);
-        assert_eq!(current_transaction(), None, "guard must clear the context");
-    }
-
-    #[test]
     fn withdrawal_allowance_requires_context_and_resets_for_each_execution() {
         assert_eq!(
             consume_withdrawal_attempt(),
@@ -92,12 +80,18 @@ mod tests {
         );
         // Simulations may reuse the same synthetic hash; each execution still gets an allowance.
         for _ in 0..2 {
-            let _guard = set_current_transaction(B256::repeat_byte(0xff), Address::ZERO);
+            let guard = set_current_transaction(B256::repeat_byte(0xff), Address::ZERO);
+            assert_eq!(
+                current_transaction(),
+                Some((B256::repeat_byte(0xff), Address::ZERO))
+            );
             assert_eq!(consume_withdrawal_attempt(), Ok(()));
             assert_eq!(
                 consume_withdrawal_attempt(),
                 Err(ZoneOutboxError::withdrawal_already_attempted().into())
             );
+            drop(guard);
+            assert_eq!(current_transaction(), None);
         }
         let _guard = set_current_transaction(B256::ZERO, Address::ZERO);
         assert_eq!(
