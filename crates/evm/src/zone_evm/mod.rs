@@ -300,19 +300,15 @@ mod tests {
         Ok((evm, reader))
     }
 
-    fn withdrawal(to: Address) -> Bytes {
-        withdrawal_call(PATH_USD_ADDRESS, to, 1, CALLER)
-            .abi_encode()
-            .into()
-    }
-
     fn withdrawal_tx(target: Address) -> TempoTxEnv {
         TempoTxEnv {
             fee_token: Some(PATH_USD_ADDRESS),
             inner: TxEnv {
                 caller: CALLER,
                 kind: TxKind::Call(target),
-                data: withdrawal(RECIPIENT),
+                data: withdrawal_call(PATH_USD_ADDRESS, RECIPIENT, 1, CALLER)
+                    .abi_encode()
+                    .into(),
                 gas_limit: 10_000_000,
                 ..Default::default()
             },
@@ -388,11 +384,13 @@ mod tests {
             let mut calls = vec![batch_call(
                 IZoneOutbox::WITHDRAWAL_BASE_GASCall {}.abi_encode().into(),
             )];
-            calls.extend(
-                [RECIPIENT, SECOND_RECIPIENT][..requests]
-                    .iter()
-                    .map(|&to| batch_call(withdrawal(to))),
-            );
+            calls.extend([RECIPIENT, SECOND_RECIPIENT][..requests].iter().map(|&to| {
+                batch_call(
+                    withdrawal_call(PATH_USD_ADDRESS, to, 1, CALLER)
+                        .abi_encode()
+                        .into(),
+                )
+            }));
             let mut tx = withdrawal_tx(ZONE_OUTBOX_ADDRESS);
             tx.tempo_tx_env = Some(Box::new(TempoBatchCallEnv {
                 aa_calls: calls,
