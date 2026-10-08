@@ -219,14 +219,13 @@ mod tests {
         Call, RecoveredTempoAuthorization, TempoSignature, TempoSignedAuthorization,
     };
     use tempo_revm::TempoBatchCallEnv;
-    use zone_precompiles::test_utils::MockL1Reader;
+    use zone_precompiles::test_utils::{MockL1Reader, setup_outbox, withdrawal_call};
 
     use alloy_sol_types::{SolCall, SolInterface};
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
         storage::{StorageCtx, StorageKey, hashmap::HashMapStorageProvider},
-        test_util::TIP20Setup,
         tip403_registry::{ALLOW_ALL_POLICY_ID, slots as registry_slots},
         zone_factory::portal::{self, ZonePortalStorage},
     };
@@ -261,20 +260,8 @@ mod tests {
         MockL1Reader,
     )> {
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T13);
-        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-            zone_precompiles::ZoneOutbox::new().initialize()?;
-            let mut token = TIP20Setup::path_usd(CALLER)
-                .with_issuer(CALLER)
-                .with_issuer(ZONE_OUTBOX_ADDRESS);
-            for account in [CALLER, FORWARDER, PARENT] {
-                token = token.with_mint(account, U256::from(100_000)).with_approval(
-                    account,
-                    ZONE_OUTBOX_ADDRESS,
-                    U256::MAX,
-                );
-            }
-            token.apply()?;
-            Ok(())
+        StorageCtx::enter(&mut storage, || {
+            setup_outbox(CALLER, [CALLER, FORWARDER, PARENT], U256::from(100_000))
         })?;
         let mut db = InMemoryDB::default();
         for address in [PATH_USD_ADDRESS, ZONE_OUTBOX_ADDRESS] {
@@ -294,7 +281,7 @@ mod tests {
         let portal = ZonePortalStorage::new(PORTAL);
         for slot in [
             portal.token_configs[PATH_USD_ADDRESS].enabled.slot(),
-            portal::slots::IS_ACCESS_ENFORCED.into(),
+            portal::slots::IS_ACCESS_ENFORCED,
         ] {
             reader.insert(PORTAL, slot, 0, U256::ONE);
         }
@@ -314,18 +301,9 @@ mod tests {
     }
 
     fn withdrawal(to: Address) -> Bytes {
-        IZoneOutbox::requestWithdrawalCall {
-            token: PATH_USD_ADDRESS,
-            to,
-            amount: 1,
-            zoneFallbackRecipient: CALLER,
-            memo: B256::ZERO,
-            gasLimit: 0,
-            data: Bytes::new(),
-            revealTo: Bytes::new(),
-        }
-        .abi_encode()
-        .into()
+        withdrawal_call(PATH_USD_ADDRESS, to, 1, CALLER)
+            .abi_encode()
+            .into()
     }
 
     fn withdrawal_tx(target: Address) -> TempoTxEnv {
