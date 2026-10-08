@@ -33,6 +33,25 @@ class Results(unittest.TestCase):
         req, runs = fixture("a" * 40)
         self.assertEqual(m.evaluate(req, runs)["verdict"], "unstable_control")
 
+    def test_control_detects_consistent_slowdown(self):
+        req, runs = fixture("a" * 40)
+        for run in runs:
+            if run["side"] == "candidate":
+                run["report"]["client_observed_e2e_latency"]["mean_ms"] = 110
+        self.assertEqual(m.evaluate(req, runs)["verdict"], "unstable_control")
+
+    def test_control_tail_difference_is_instability(self):
+        req, runs = fixture("a" * 40)
+        runs[1]["report"]["client_observed_e2e_latency"]["p99_ms"] = 170
+        self.assertEqual(m.evaluate(req, runs)["verdict"], "unstable_control")
+
+    def test_control_detects_tail_speedup_without_mean_shift(self):
+        req, runs = fixture("a" * 40)
+        for run in runs:
+            run["report"]["client_observed_e2e_latency"]["mean_ms"] = 100
+        runs[1]["report"]["client_observed_e2e_latency"]["p99_ms"] = 130
+        self.assertEqual(m.evaluate(req, runs)["verdict"], "unstable_control")
+
     def test_incomplete_or_invalid_work_is_rejected(self):
         for field, value in (("completed", 99), ("failed", 1), ("timed_out", 1), ("version", 1)):
             with self.subTest(field=field):

@@ -59,6 +59,7 @@ def main():
                              k.removeprefix("ZONES_BENCH_") in {
                                  "TEMPO_REF", "TXGEN_REF", "EARN_REVISION", "SAMPLY_REF", "TEMPO_HARDFORK", "L1_CACHE_KEY",
                                  "L1_CACHE_GENERATION", "BUILD_PROFILE", "L1_A_CPUS", "L1_B_CPUS", "ZONE_CPUS", "CPUSET"}}}
+    manifest["python"] = sys.version
     manifest["toolchain"] = subprocess.check_output(["rustc", "-vV"], text=True)
     manifest["rustflags"] = os.environ.get("RUSTFLAGS", "")
     manifest["host"] = {"cpus": os.cpu_count(), "load": os.getloadavg(),
@@ -71,6 +72,7 @@ def main():
     try:
         for side in ("baseline", "candidate"):
             sha = req[f"{side}_sha"]
+            print(f"Preparing {side} revision {sha}", flush=True)
             if side == "candidate" and sha == req["baseline_sha"]:
                 binaries[side] = binaries["baseline"]
                 for suffix in ("build.log", "tests.log"):
@@ -114,6 +116,7 @@ def main():
         schedule += [(0, side, True) for side in ("baseline", "candidate")]
         for pair, side, profiled in schedule:
             label = f'{"profile" if profiled else "pair"}-{pair}-{side}'
+            print(f"Starting {label}", flush=True)
             directory = OUTPUT / label
             directory.mkdir()
             for volume, mount in (("a", "/reth-bench-a"), ("b", "/reth-bench-b")):
@@ -145,6 +148,7 @@ def main():
                      "validated_spf_sha256": digest(directory / "spf-input.json")}
             if profiled:
                 entry["profile_sha256"] = digest(directory / "zone-profile.json.gz")
+            print(f"Completed {label}: {entry['report']['completed']} journeys", flush=True)
             manifest["profiles" if profiled else "runs"].append(entry)
             save(manifest)
         manifest["result"] = evaluate(req, manifest["runs"])

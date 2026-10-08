@@ -86,11 +86,19 @@ def evaluate(req, runs):
     median = statistics.median(improvements)
     tail_regression = max(b / a - 1 for a, b in zip(tails["baseline"], tails["candidate"]))
     verdict = "no_measurable_improvement"
-    if any(b > a * (1 + POLICY["maximum_p99_regression"])
-           for a, b in zip(tails["baseline"], tails["candidate"])):
+    tail_violated = any(b > a * (1 + POLICY["maximum_p99_regression"])
+                        for a, b in zip(tails["baseline"], tails["candidate"]))
+    significant = p_value <= POLICY["alpha"]
+    control_tail_changed = any(b < a * (1 - POLICY["maximum_p99_regression"]) or b > a * (1 + POLICY["maximum_p99_regression"])
+                               for a, b in zip(tails["baseline"], tails["candidate"]))
+    if req["baseline_sha"] == req["candidate_sha"] and (
+        control_tail_changed or (abs(median) >= POLICY["minimum_improvement"] and significant)
+    ):
+        verdict = "unstable_control"
+    elif tail_violated:
         verdict = "regression"
-    elif median >= POLICY["minimum_improvement"] and p_value <= POLICY["alpha"]:
-        verdict = "unstable_control" if req["baseline_sha"] == req["candidate_sha"] else "performance_candidate"
+    elif median >= POLICY["minimum_improvement"] and significant:
+        verdict = "performance_candidate"
     return {"version": 1, "experiment_id": req["experiment_id"], "verdict": verdict,
             "paired_improvements": improvements, "median_improvement": median,
             "p_value": p_value, "maximum_p99_regression": tail_regression,
