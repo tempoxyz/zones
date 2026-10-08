@@ -3,7 +3,7 @@
 use alloy_primitives::{Address, B256, U256};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{charge_input_cost, dispatch, storage::Handler, view};
-use tempo_zone_contracts::IZoneOutbox;
+use tempo_zone_contracts::{IZoneOutbox, ZoneOutboxError};
 use zone_primitives::constants::MAX_WITHDRAWAL_GAS_LIMIT;
 
 use crate::{
@@ -20,6 +20,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         calldata: &[u8],
         msg_sender: Address,
+        tx_caller: Address,
         tx_hash: B256,
         fee_payer: Address,
     ) -> PrecompileResult {
@@ -50,6 +51,10 @@ impl ZoneOutbox {
                 setTempoGasRate(call) => mutate(call, msg_sender, |sender, call| self.set_tempo_gas_rate(l1, sender, call)),
                 setMaxWithdrawalsPerBlock(call) => mutate(call, msg_sender, |sender, call| self.set_max_withdrawals_per_block(l1, sender, call)),
                 requestWithdrawal(call) => mutate(call, msg_sender, |sender, call| {
+                    // Forwarders can catch reverts and repeat expensive L1 policy reads.
+                    if sender != tx_caller {
+                        return Err(ZoneOutboxError::only_transaction_caller().into());
+                    }
                     self.request_withdrawal(l1, sender, fee_payer, tx_hash, call)
                 }),
                 enqueueDepositBounceBack(call) => mutate(call, msg_sender, |sender, call| self.enqueue_deposit_bounce_back(sender, call)),

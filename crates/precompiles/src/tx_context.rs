@@ -1,7 +1,7 @@
 //! Transaction execution context for authenticated withdrawals.
 //!
-//! The zone outbox needs the real hash and effective fee payer of the currently executing user
-//! transaction. The Zone EVM publishes both into a thread-local context before EVM execution for
+//! The zone outbox needs the real hash, caller, and effective fee payer of the executing user
+//! transaction. The Zone EVM publishes them into a thread-local context before EVM execution for
 //! the native outbox to read.
 
 use std::{cell::RefCell, thread_local};
@@ -15,6 +15,7 @@ thread_local! {
 #[derive(Clone, Copy)]
 struct TransactionContext {
     tx_hash: B256,
+    caller: Address,
     fee_payer: Address,
 }
 
@@ -27,20 +28,28 @@ impl Drop for TransactionContextGuard {
     }
 }
 
-/// Publish the current transaction hash and effective fee payer for EVM execution.
-pub fn set_current_transaction(tx_hash: B256, fee_payer: Address) -> TransactionContextGuard {
+/// Publish the current transaction hash, caller, and effective fee payer for EVM execution.
+pub fn set_current_transaction(
+    tx_hash: B256,
+    caller: Address,
+    fee_payer: Address,
+) -> TransactionContextGuard {
     CURRENT_TRANSACTION.with(|slot| {
-        *slot.borrow_mut() = Some(TransactionContext { tx_hash, fee_payer });
+        *slot.borrow_mut() = Some(TransactionContext {
+            tx_hash,
+            caller,
+            fee_payer,
+        });
     });
     TransactionContextGuard
 }
 
-/// Return the current transaction hash and effective fee payer, when published by the EVM.
-pub(crate) fn current_transaction() -> Option<(B256, Address)> {
+/// Return the current transaction hash, caller, and effective fee payer, when published by the EVM.
+pub(crate) fn current_transaction() -> Option<(B256, Address, Address)> {
     CURRENT_TRANSACTION.with(|slot| {
         slot.borrow()
             .as_ref()
-            .map(|context| (context.tx_hash, context.fee_payer))
+            .map(|context| (context.tx_hash, context.caller, context.fee_payer))
     })
 }
 
@@ -51,10 +60,11 @@ mod tests {
     #[test]
     fn publishes_and_clears_current_transaction() {
         let tx_hash = B256::repeat_byte(0x42);
+        let caller = Address::repeat_byte(0x12);
         let fee_payer = Address::repeat_byte(0x24);
 
-        let guard = set_current_transaction(tx_hash, fee_payer);
-        assert_eq!(current_transaction(), Some((tx_hash, fee_payer)));
+        let guard = set_current_transaction(tx_hash, caller, fee_payer);
+        assert_eq!(current_transaction(), Some((tx_hash, caller, fee_payer)));
 
         drop(guard);
         assert_eq!(current_transaction(), None, "guard must clear the context");

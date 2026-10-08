@@ -97,7 +97,7 @@ impl Harness {
 
     #[rustfmt::skip]
     fn call_inner(&mut self, caller: Address, fee_payer: Address, data: impl AsRef<[u8]>, with_context: bool, is_static: bool) -> PrecompileResult {
-        let _guard = with_context.then(|| tx_context::set_current_transaction(TX_HASH, fee_payer));
+        let _guard = with_context.then(|| tx_context::set_current_transaction(TX_HASH, caller, fee_payer));
         call_precompile(
             &mut self.ctx, &self.precompile, caller, data.as_ref(), GAS, is_static, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_ADDRESS
         )
@@ -337,6 +337,44 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
         harness.l1.request_count(ANCHOR, &portal.is_access_enforced),
         2
     );
+    Ok(())
+}
+
+#[test]
+fn request_withdrawal_rejects_forwarders_before_portal_reads() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let balance_before = harness.balance_of(ALICE)?;
+    for sender in [BOB, tempo_contracts::MULTICALL3_ADDRESS] {
+        // A forwarding fee payer must not be mistaken for the original caller.
+        let _guard = tx_context::set_current_transaction(TX_HASH, ALICE, sender);
+        for recipient in 16..80 {
+            let data = ZoneOutboxAbi::requestWithdrawalCall {
+                token: harness.token,
+                to: Address::with_last_byte(recipient),
+                amount: 1,
+                memo: B256::ZERO,
+                gasLimit: 0,
+                zoneFallbackRecipient: ALICE,
+                data: Bytes::new(),
+                revealTo: Bytes::new(),
+            }
+            .abi_encode();
+            let result = call_precompile(
+                &mut harness.ctx,
+                &harness.precompile,
+                sender,
+                &data,
+                GAS,
+                false,
+                ZONE_OUTBOX_ADDRESS,
+                ZONE_OUTBOX_ADDRESS,
+            );
+            assert_revert(result, ZoneOutboxError::only_transaction_caller());
+        }
+    }
+    assert!(harness.l1.storage_requests().is_empty());
+    assert_eq!(harness.balance_of(ALICE)?, balance_before);
+    assert!(harness.pending()?.is_empty());
     Ok(())
 }
 

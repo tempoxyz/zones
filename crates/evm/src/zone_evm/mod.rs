@@ -151,8 +151,11 @@ where
             ExecutionContext::Transaction { tx_hash } => tx_hash,
             ExecutionContext::Simulation => B256::repeat_byte(0xff),
         };
-        let _tx_context_guard =
-            tx_context::set_current_transaction(tx_hash, tx.fee_payer().unwrap_or(tx.caller));
+        let _tx_context_guard = tx_context::set_current_transaction(
+            tx_hash,
+            tx.caller,
+            tx.fee_payer().unwrap_or(tx.caller),
+        );
         self.execute_and_sanitize(|evm| evm.transact_raw(tx))
     }
 
@@ -224,6 +227,100 @@ mod tests {
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
         let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default(), Address::ZERO);
         ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()))
+    }
+
+    #[test]
+    fn withdrawal_caller_binding_rejects_forwarding_and_preserves_native_batches() {
+        use alloy_evm::EvmFactory;
+        use alloy_primitives::{TxKind, address, bytes};
+        use alloy_sol_types::{SolCall, SolInterface};
+        use revm::{
+            database::InMemoryDB,
+            state::{AccountInfo, Bytecode},
+        };
+        use tempo_chainspec::hardfork::TempoHardfork;
+        use tempo_precompiles::tip20::TIP20Error;
+        use tempo_primitives::transaction::Call;
+        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZoneOutboxError};
+
+        let caller = Address::repeat_byte(0x11);
+        let forwarder = Address::repeat_byte(0x22);
+        let data: Bytes = IZoneOutbox::requestWithdrawalCall {
+            token: address!("0x20c000000000000000000000000000000000ffff"),
+            to: caller,
+            amount: 1,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            zoneFallbackRecipient: caller,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        }
+        .abi_encode()
+        .into();
+
+        // Forward calldata with CALL, then return the inner call's revert data.
+        let mut code = bytes!("365f5f375f5f365f5f73").to_vec();
+        code.extend_from_slice(ZONE_OUTBOX_ADDRESS.as_slice());
+        code.extend_from_slice(&[0x5a, 0xf1, 0x50, 0x3d, 0x5f, 0x5f, 0x3e, 0x3d, 0x5f, 0xf3]);
+
+        for (target, batched) in [
+            (forwarder, false),
+            (ZONE_OUTBOX_ADDRESS, false),
+            (ZONE_OUTBOX_ADDRESS, true),
+        ] {
+            let reader = MockL1Reader::failing_storage();
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(
+                forwarder,
+                AccountInfo::from_bytecode(Bytecode::new_raw(code.clone().into())),
+            );
+            let mut env = EvmEnv::default();
+            env.cfg_env.spec = TempoHardfork::T13;
+            let mut evm =
+                crate::ZoneEvmFactory::new(reader.clone(), Address::ZERO).create_evm(db, env);
+            let mut tx = TempoTxEnv {
+                fee_token: Some(tempo_precompiles::PATH_USD_ADDRESS),
+                inner: TxEnv {
+                    caller,
+                    kind: TxKind::Call(target),
+                    data: data.clone(),
+                    gas_limit: 1_000_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            if batched {
+                tx.tempo_tx_env = Some(Box::new(TempoBatchCallEnv {
+                    aa_calls: vec![
+                        Call {
+                            to: TxKind::Call(ZONE_OUTBOX_ADDRESS),
+                            value: U256::ZERO,
+                            input: IZoneOutbox::WITHDRAWAL_BASE_GASCall {}.abi_encode().into(),
+                        },
+                        Call {
+                            to: TxKind::Call(ZONE_OUTBOX_ADDRESS),
+                            value: U256::ZERO,
+                            input: data.clone(),
+                        },
+                    ],
+                    ..Default::default()
+                }));
+            }
+            let result = evm
+                .transact_raw(tx)
+                .expect("transaction must execute")
+                .result;
+            let expected = if target == forwarder {
+                assert!(result.is_success());
+                ZoneOutboxError::only_transaction_caller().abi_encode()
+            } else {
+                assert!(!result.is_success());
+                // Direct/native calls pass the caller check and reach normal token validation.
+                TIP20Error::uninitialized().abi_encode()
+            };
+            assert_eq!(result.output().unwrap().as_ref(), expected);
+            assert!(reader.storage_requests().is_empty());
+        }
     }
 
     fn registry_write() -> AddressMap<Account> {

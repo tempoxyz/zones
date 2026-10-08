@@ -1155,6 +1155,7 @@ interface IZoneOutbox {
     error TooManyWithdrawalsThisBlock();
     error InvalidRevealTo();
     error InvalidCurrentTxHash();
+    error OnlyTransactionCaller();
     error ZeroAmountWithdrawal();
     error StaticCallNotAllowed();
 
