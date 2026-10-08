@@ -1,0 +1,62 @@
+name: Zones Autoopt
+run-name: ${{ inputs.request && format('zones-autoopt-{0}', fromJSON(inputs.request).experiment_id) || format('zones-autoopt-baseline-{0}', github.sha) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: Versioned exact-commit experiment JSON. Empty collects a baseline control and profiles.
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+jobs:
+  request:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    outputs:
+      request: ${{ steps.request.outputs.request }}
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: request
+        env:
+          REQUEST: ${{ inputs.request }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          sys.path.insert(0, 'contrib/bench')
+          from autoopt_results import canonical, request
+          if os.environ['REQUEST']:
+              value = json.loads(os.environ['REQUEST'])
+              if value != request(value['baseline_sha'], value['candidate_sha'], value['workload'], value.get('attempt_id')):
+                  raise ValueError('invalid request')
+          else:
+              sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+              txgen = subprocess.check_output(['git', 'ls-remote', 'https://github.com/tempoxyz/txgen', 'HEAD'], text=True).split()[0]
+              value = request(sha, sha, {'preset': 'encrypted-deposit', 'accounts': 100,
+                  'count': 1000, 'tps': 20,
+                  'max-concurrent': 12, 'state-bloat-gib': 1,
+                  'seed': 424242, 'txgen-ref': txgen})
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('request=' + canonical(value) + '\n')
+          PY
+  benchmark:
+    permissions:
+      contents: read
+      id-token: write
+    needs: request
+    uses: ./.github/workflows/zones-benchmark.yml
+    with:
+      autoopt-request: ${{ needs.request.outputs.request }}
+    secrets:
+      CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}

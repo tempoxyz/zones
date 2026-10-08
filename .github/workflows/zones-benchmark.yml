@@ -1,6 +1,21 @@
 name: Zones benchmark
+run-name: ${{ inputs.autoopt-request && format('zones-autoopt-{0}', fromJSON(inputs.autoopt-request).experiment_id) || format('Zones benchmark {0}', github.ref_name) }}
 
 on:
+  workflow_call:
+    secrets:
+      CLICKHOUSE_URL:
+        required: true
+      CLICKHOUSE_USER:
+        required: true
+      CLICKHOUSE_PASSWORD:
+        required: true
+    inputs:
+      autoopt-request:
+        description: Versioned Autoopt comparison request with exact revisions and workload.
+        type: string
+        required: true
+
   schedule:
     - cron: "45 2 * * *"
 
@@ -157,7 +172,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
-  RUSTFLAGS: -C target-cpu=native
+  RUSTFLAGS: -C target-cpu=native -C force-frame-pointers=yes
   RUSTC_WRAPPER: sccache
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
@@ -215,6 +230,7 @@ jobs:
       - name: Resolve configuration
         id: config
         env:
+          AUTOOPT_REQUEST: ${{ inputs.autoopt-request }}
           EVENT_SHA: ${{ github.sha }}
           INPUT_PRESET: ${{ inputs.preset || 'full-journey' }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
@@ -247,6 +263,18 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
+
+          if [[ -n "$AUTOOPT_REQUEST" ]]; then
+            python3 -c 'import json, os, sys; sys.path.insert(0, "contrib/bench"); from autoopt_results import request; r=json.loads(os.environ["AUTOOPT_REQUEST"]); assert r == request(r["baseline_sha"],r["candidate_sha"],r["workload"],r.get("attempt_id")), "invalid experiment identity"'
+            INPUT_PRESET="$(jq -er '.workload["preset"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_ACCOUNTS="$(jq -er '.workload["accounts"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_COUNT="$(jq -er '.workload["count"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_TPS="$(jq -er '.workload["tps"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_MAX_CONCURRENT="$(jq -er '.workload["max-concurrent"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_STATE_BLOAT_GIB="$(jq -er '.workload["state-bloat-gib"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_SEED="$(jq -er '.workload["seed"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_TXGEN_REF="$(jq -er '.workload["txgen-ref"] | tostring' <<< "$AUTOOPT_REQUEST")"
+          fi
 
           INPUT_TEMPO_REF="$(sed -nE 's/^tempo-alloy.*rev = "([0-9a-f]{40})".*/\1/p' Cargo.toml)"
           INPUT_TEMPO_HARDFORK="${INPUT_TEMPO_HARDFORK,,}"
@@ -501,13 +529,14 @@ jobs:
       ZONES_BENCH_GITHUB_RUN_ID: ${{ github.run_id }}
       ZONES_BENCH_GITHUB_WORKFLOW: zones-benchmark.yml
       ZONES_BENCH_BUILD_PROFILE: profiling
+      ZONES_BENCH_SAMPLY_REF: d1f783d139dfbda60cc0109df9d134135983c551
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23
       ZONES_BENCH_ZONE_CPUS: 8-13,24-29
       ZONES_BENCH_CPUSET: 14-15,30-31
       ZONES_BENCH_OUTPUT: target/zones-benchmark/neobank-e2e
       ZONES_BENCH_REPORT: target/zones-benchmark/report-neobank-e2e.json
-      ZONES_BENCH_SPF_OUTPUT: target/zones-benchmark/spf-input.json
+      ZONES_BENCH_SPF_OUTPUT: target/zones-benchmark/spf-validation.json
       ZONES_BENCH_SPF_PROFILE: target/zones-benchmark/spf-profile.json.gz
       ZONES_BENCH_SPF_PROFILE_URL: target/zones-benchmark/spf-profile-url.txt
       ZONES_BENCH_SPF_REPORT: target/zones-benchmark/spf-report.txt
@@ -588,7 +617,7 @@ jobs:
 
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          toolchain: stable
+          toolchain: 1.98.0
       - uses: tempoxyz/gh-actions/actions/setup-mold@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
@@ -620,12 +649,10 @@ jobs:
             crates/contracts/benchmark-out
           key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.contracts-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
-      - name: Add file-backed mnemonic support to pinned Tempo xtask
+      - name: Ensure file-backed mnemonic support in pinned Tempo xtask
         run: |
           set -euo pipefail
-          patch=contrib/bench/patches/tempo-xtask-mnemonic-file.patch
-          git -C "$TEMPO_ROOT" apply --check "$GITHUB_WORKSPACE/$patch"
-          git -C "$TEMPO_ROOT" apply "$GITHUB_WORKSPACE/$patch"
+          contrib/bench/prepare-tempo-xtask.sh "$TEMPO_ROOT"
 
       - name: Prepare persistent build directories
         env:
@@ -674,11 +701,16 @@ jobs:
             echo "::error::runner-local benchmark mnemonic must not be a symbolic link"
             exit 1
           fi
-          if [ ! -s "$mnemonic_file" ]; then
+          if [ ! -s "$mnemonic_file" ] || [ "$(cat "$mnemonic_file")" = null ]; then
             temporary="$(mktemp "$identity_root/.mnemonic.XXXXXX")"
             chmod 600 "$temporary"
-            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
+            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -er '(.data // .).mnemonic | select(type == "string" and length > 0)')"
             printf '%s\n' "$mnemonic" > "$temporary"
+            if ! cast wallet address --mnemonic "$temporary" >/dev/null 2>&1; then
+              rm -f -- "$temporary"
+              echo "::error::generated benchmark mnemonic is invalid"
+              exit 1
+            fi
             mv -f -- "$temporary" "$mnemonic_file"
           else
             mnemonic="$(tr -d '\r\n' < "$mnemonic_file")"
@@ -691,6 +723,10 @@ jobs:
             echo "::error::runner-local benchmark mnemonic is empty or public"
             exit 1
           fi
+          if ! cast wallet address --mnemonic "$mnemonic_file" >/dev/null 2>&1; then
+            echo "::error::stored benchmark mnemonic is invalid"
+            exit 1
+          fi
           chmod 600 "$mnemonic_file"
           echo "::add-mask::$mnemonic"
           echo "ZONES_BENCH_MNEMONIC_FILE=$mnemonic_file" >> "$GITHUB_ENV"
@@ -701,17 +737,16 @@ jobs:
           set -euo pipefail
           cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
             --locked --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
-          nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
-            '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
-            'jemalloc,asm-keccak,keccak-cache-global,otlp' \
-            '$ZONES_BENCH_TEMPO_REF'"
+          cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
+            --locked --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling \
+            --no-default-features --features jemalloc,asm-keccak,keccak-cache-global,otlp --bin tempo
           cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
             --locked --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
             echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
             echo "SPF_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone-prover-utils"
             echo "ZONES_XTASK_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-xtask"
-            echo "TEMPO_BIN=$TEMPO_ROOT/target/profiling/tempo"
+            echo "TEMPO_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo"
             echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
           } >> "$GITHUB_ENV"
 
@@ -787,7 +822,7 @@ jobs:
           set -euo pipefail
           cargo install samply \
             --git https://github.com/DaniPopes/samply \
-            --rev 06f9075697ad144feaf3e15c2254a043b243fdbf \
+            --rev "$ZONES_BENCH_SAMPLY_REF" \
             --locked \
             --force
           samply_path="$(command -v samply)"
@@ -802,7 +837,48 @@ jobs:
             fi
           done
 
+      - name: Run Autoopt comparison
+        if: ${{ inputs.autoopt-request != '' }}
+        env:
+          ZONES_AUTOOPT_REQUEST: ${{ inputs.autoopt-request }}
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          ZONES_BENCH_REQUIRE_CLICKHOUSE: "1"
+        run: |
+          # Samply allocates a perf ring buffer for each CPU and attached thread.
+          # Raise only this step's inherited limit, not the runner's global sysctls.
+          printf 'memlock soft=%s hard=%s\n' "$(ulimit -Sl)" "$(ulimit -Hl)"
+          if ! ulimit -l unlimited; then
+            sudo -n prlimit --pid "$BASHPID" --memlock=unlimited:unlimited
+          fi
+          printf 'memlock effective=%s\n' "$(ulimit -Sl)"
+          samply record --save-only --output "$RUNNER_TEMP/zones-profile-preflight.json.gz" -- sleep 1
+          python3 contrib/bench/autoopt-run.py
+
+      - name: Upload Autoopt evidence
+        if: ${{ !cancelled() && inputs.autoopt-request != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zones-autoopt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/zones-benchmark/autoopt/experiment.json
+            target/zones-benchmark/autoopt/summary.md
+            target/zones-benchmark/autoopt/*-build.log
+            target/zones-benchmark/autoopt/*-tests.log
+            target/zones-benchmark/autoopt/*/report.json
+            target/zones-benchmark/autoopt/*/spf-validation.json
+            target/zones-benchmark/autoopt/*/run.log
+            target/zones-benchmark/autoopt/*/*.prom
+            target/zones-benchmark/autoopt/*/zone-profile*
+            target/zones-benchmark/autoopt/*/journeys/*.json
+            target/zones-benchmark/autoopt/*/journeys/*.log
+            target/zones-benchmark/autoopt/*/topology/logs/*.log
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Provision topology and run neobank workload
+        if: ${{ inputs.autoopt-request == '' }}
         env:
           CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
           CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
@@ -832,6 +908,7 @@ jobs:
           contrib/bench/run-neobank-private-flow.sh
 
       - name: Generate and validate SPF input
+        if: ${{ inputs.autoopt-request == '' }}
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$ZONES_BENCH_SPF_OUTPUT")"
@@ -841,11 +918,6 @@ jobs:
           [[ "$ZONES_BENCH_SPF_FROM_BLOCK" =~ ^[0-9]+$ ]]
           [[ "$ZONES_BENCH_SPF_TO_BLOCK" =~ ^[0-9]+$ ]]
           (( ZONES_BENCH_SPF_FROM_BLOCK <= ZONES_BENCH_SPF_TO_BLOCK ))
-          private_key="$(cast wallet private-key \
-            --mnemonic "$ZONES_BENCH_MNEMONIC_FILE" \
-            --mnemonic-index 4)"
-          trap 'unset private_key' EXIT
-
           samply_args=(
             record
             --save-only
@@ -854,13 +926,13 @@ jobs:
             --output "$ZONES_BENCH_SPF_PROFILE"
           )
           set +e
-          PRIVATE_KEY="$private_key" samply "${samply_args[@]}" -- \
+          samply "${samply_args[@]}" -- \
             taskset --cpu-list "$ZONES_BENCH_CPUSET" \
-              "$SPF_BIN" generate-input \
+              python3 contrib/bench/validate-spf-range.py --spf-bin "$SPF_BIN" \
+              --portal "$L1_PORTAL_ADDRESS" \
               --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
               --chain "$ZONES_BENCH_ZONE_GENESIS" \
-              --zone-private-rpc-url "$ZONE_PRIVATE_RPC_URL" \
-              --zone-unrestricted-rpc-url "$ZONE_RPC_URL" \
+              --zone-rpc-url "$ZONE_RPC_URL" \
               --from-block "$ZONES_BENCH_SPF_FROM_BLOCK" \
               --to-block "$ZONES_BENCH_SPF_TO_BLOCK" \
               --output "$ZONES_BENCH_SPF_OUTPUT" \
@@ -908,7 +980,7 @@ jobs:
           exit "$spf_status"
 
       - name: Publish benchmark results
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.autoopt-request == '' }}
         env:
           SUMMARY_STATE_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
         run: |
