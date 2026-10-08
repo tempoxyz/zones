@@ -19,14 +19,18 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def request(baseline, candidate, workload):
+def request(baseline, candidate, workload, attempt_id=None):
     for revision in (baseline, candidate):
         if not isinstance(revision, str) or not SHA.fullmatch(revision):
             raise ValueError("revisions must be full lowercase commit SHAs")
     if not isinstance(workload, dict) or not workload:
         raise ValueError("workload must be a nonempty mapping of resolved settings")
     body = {"version": 1, "baseline_sha": baseline, "candidate_sha": candidate,
-            "workload": workload, "policy": POLICY}
+            "workload": workload, "policy": POLICY.copy()}
+    if attempt_id is not None:
+        if not isinstance(attempt_id, str) or not re.fullmatch(r"[0-9a-f]{32}", attempt_id):
+            raise ValueError("attempt_id must be a UUID hex string")
+        body["attempt_id"] = attempt_id
     return dict(body, experiment_id=hashlib.sha256(canonical(body).encode()).hexdigest())
 
 
@@ -53,7 +57,7 @@ def measurement(report, count):
 
 
 def evaluate(req, runs):
-    expected = request(req["baseline_sha"], req["candidate_sha"], req["workload"])
+    expected = request(req["baseline_sha"], req["candidate_sha"], req["workload"], req.get("attempt_id"))
     if req != expected:
         raise ValueError("request identity or policy mismatch")
     count = req["workload"]["count"]

@@ -2,7 +2,12 @@
 # Run one isolated leg after the controller restores both virgin L1 snapshots.
 set -Eeuo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-trap '"$script_dir/provision-topology.sh" cleanup' EXIT
+cleanup() {
+    local status=$?
+    "$script_dir/provision-topology.sh" cleanup || status=1
+    exit "$status"
+}
+trap cleanup EXIT
 "$script_dir/provision-topology.sh" up
 set -a
 # shellcheck source=/dev/null

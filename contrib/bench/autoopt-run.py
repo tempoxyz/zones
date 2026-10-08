@@ -2,8 +2,10 @@
 """Build both revisions and collect paired live journeys on the dedicated runner."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -28,6 +30,11 @@ def git(*args):
     return subprocess.check_output(["git", "-C", str(ROOT), *args], text=True).strip()
 
 
+def digest(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
 def save(manifest):
     temporary = OUTPUT / "experiment.json.tmp"
     temporary.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n")
@@ -36,7 +43,7 @@ def save(manifest):
 
 def main():
     req = json.loads(os.environ["ZONES_AUTOOPT_REQUEST"])
-    if req != request(req["baseline_sha"], req["candidate_sha"], req["workload"]):
+    if req != request(req["baseline_sha"], req["candidate_sha"], req["workload"], req.get("attempt_id")):
         raise ValueError("invalid experiment identity or unsupported policy")
     if set(req["workload"]) != set(INPUTS):
         raise ValueError(f"workload must specify exactly {sorted(INPUTS)}")
@@ -47,10 +54,10 @@ def main():
     manifest = {"version": 1, "request": req, "harness_sha": git("rev-parse", "HEAD"),
                 "github_run_id": os.environ["GITHUB_RUN_ID"],
                 "github_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                "runs": [], "profiles": [], "status": "building",
+                "runs": [], "profiles": [], "builds": {}, "status": "building",
                 "resolved": {k: v for k, v in os.environ.items() if k.startswith("ZONES_BENCH_") and
                              k.removeprefix("ZONES_BENCH_") in {
-                                 "TEMPO_REF", "TXGEN_REF", "EARN_REVISION", "TEMPO_HARDFORK", "L1_CACHE_KEY",
+                                 "TEMPO_REF", "TXGEN_REF", "EARN_REVISION", "SAMPLY_REF", "TEMPO_HARDFORK", "L1_CACHE_KEY",
                                  "L1_CACHE_GENERATION", "BUILD_PROFILE", "L1_A_CPUS", "L1_B_CPUS", "ZONE_CPUS", "CPUSET"}}}
     manifest["toolchain"] = subprocess.check_output(["rustc", "-vV"], text=True)
     manifest["rustflags"] = os.environ.get("RUSTFLAGS", "")
@@ -64,6 +71,13 @@ def main():
     try:
         for side in ("baseline", "candidate"):
             sha = req[f"{side}_sha"]
+            if side == "candidate" and sha == req["baseline_sha"]:
+                binaries[side] = binaries["baseline"]
+                for suffix in ("build.log", "tests.log"):
+                    shutil.copy2(OUTPUT / f"baseline-{suffix}", OUTPUT / f"candidate-{suffix}")
+                manifest["builds"][side] = dict(manifest["builds"]["baseline"], reused_from="baseline")
+                save(manifest)
+                continue
             run(["git", "fetch", "--no-tags", "origin", sha], cwd=ROOT)
             checkout = scratch / side
             run(["git", "worktree", "add", "--detach", checkout, sha], cwd=ROOT)
@@ -84,8 +98,15 @@ def main():
                 shutil.copy2(Path(os.environ["ZONES_BENCH_ZONES_TARGET_DIR"]) / "profiling" / name, destination / name)
             binaries[side] = destination
             with (OUTPUT / f"{side}-tests.log").open("w") as log:
-                run(["cargo", "test", "--locked", "-p", "zone-sequencer", "-p", "zone-evm"],
+                run(["cargo", "test", "--locked", "--target-dir", os.environ["ZONES_BENCH_ZONES_TARGET_DIR"], "-p", "zone-sequencer", "-p", "zone-evm"],
                     cwd=checkout, stdout=log, stderr=subprocess.STDOUT)
+            test_output = re.sub(r"\x1b\[[0-9;]*m", "", (OUTPUT / f"{side}-tests.log").read_text())
+            if not re.search(r"test result: ok\. [1-9][0-9]* passed", test_output):
+                raise ValueError(f"{side} correctness command ran no passing tests")
+            manifest["builds"][side] = {"sha": sha, "binaries": {
+                name: digest(destination / name) for name in ("tempo-zone", "tempo-zone-prover-utils")},
+                "test_log_sha256": digest(OUTPUT / f"{side}-tests.log")}
+            save(manifest)
         manifest["status"] = "measuring"
         save(manifest)
         schedule = [(pair, side, False) for pair in range(POLICY["pairs"])
@@ -106,6 +127,8 @@ def main():
                        ZONES_BENCH_ZONES_REF=req[f"{side}_sha"],
                        ZONES_BENCH_OUTPUT=str(directory / "journeys"),
                        ZONES_BENCH_REPORT=str(directory / "report.json"),
+                       ZONES_BENCH_METRICS_BEFORE_FILE=str(directory / "zone-before.prom"),
+                       ZONES_BENCH_METRICS_AFTER_FILE=str(directory / "zone-after.prom"),
                        ZONES_BENCH_TOPOLOGY_DIR=str(directory / "topology"),
                        ZONES_BENCH_ENV_FILE=str(directory / "topology.env"),
                        ZONES_BENCH_SPF_RANGE=str(directory / "spf-range.env"),
@@ -117,7 +140,11 @@ def main():
             with (directory / "run.log").open("w") as log:
                 run([ROOT / "contrib/bench/autoopt-leg.sh"], env=env, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
             entry = {"pair": pair, "side": side, "sha": req[f"{side}_sha"], "profiled": profiled,
-                     "report": json.loads((directory / "report.json").read_text()), "directory": label}
+                     "report": json.loads((directory / "report.json").read_text()), "directory": label,
+                     "report_sha256": digest(directory / "report.json"),
+                     "validated_spf_sha256": digest(directory / "spf-input.json")}
+            if profiled:
+                entry["profile_sha256"] = digest(directory / "zone-profile.json.gz")
             manifest["profiles" if profiled else "runs"].append(entry)
             save(manifest)
         manifest["result"] = evaluate(req, manifest["runs"])

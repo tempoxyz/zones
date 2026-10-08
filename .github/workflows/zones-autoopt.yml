@@ -9,10 +9,6 @@ on:
         type: string
         required: false
         default: ""
-  # Temporary integration verification; removed once the remote producer passes.
-  push:
-    branches: [kit/zones-autoopt]
-    paths: [.github/workflows/zones-autoopt.yml]
 
 permissions:
   contents: read
@@ -30,7 +26,6 @@ jobs:
       - id: request
         env:
           REQUEST: ${{ inputs.request }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 - <<'PY'
           import json, os, subprocess, sys
@@ -38,15 +33,14 @@ jobs:
           from autoopt_results import canonical, request
           if os.environ['REQUEST']:
               value = json.loads(os.environ['REQUEST'])
-              if value != request(value['baseline_sha'], value['candidate_sha'], value['workload']):
+              if value != request(value['baseline_sha'], value['candidate_sha'], value['workload'], value.get('attempt_id')):
                   raise ValueError('invalid request')
           else:
               sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
               txgen = subprocess.check_output(['git', 'ls-remote', 'https://github.com/tempoxyz/txgen', 'HEAD'], text=True).split()[0]
-              smoke = os.environ['EVENT_NAME'] == 'push'
-              value = request(sha, sha, {'preset': 'encrypted-deposit', 'accounts': 20 if smoke else 100,
-                  'count': 20 if smoke else 1000, 'tps': 5 if smoke else 20,
-                  'max-concurrent': 4 if smoke else 12, 'state-bloat-gib': 0 if smoke else 1,
+              value = request(sha, sha, {'preset': 'encrypted-deposit', 'accounts': 100,
+                  'count': 1000, 'tps': 20,
+                  'max-concurrent': 12, 'state-bloat-gib': 1,
                   'seed': 424242, 'txgen-ref': txgen})
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('request=' + canonical(value) + '\n')

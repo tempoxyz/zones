@@ -752,6 +752,12 @@ build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
     --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
     --sample-instances "$sample_instances" "${scenario_report_args[@]}"
 stage_end private_flow
+if [[ -n "${ZONES_BENCH_METRICS_AFTER_FILE:-}" ]]; then
+    curl --fail --silent --show-error \
+        "${ZONES_BENCH_METRICS_URL:-http://127.0.0.1:9201/metrics}" \
+        >"$ZONES_BENCH_METRICS_AFTER_FILE"
+    [[ -s "$ZONES_BENCH_METRICS_AFTER_FILE" ]] || die "Zone metrics were empty after the measured private flow"
+fi
 if [[ -n "$profile_pid" ]]; then
     kill -INT "$profile_pid"
     wait "$profile_pid" || die "live Zone profiler failed"

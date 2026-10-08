@@ -165,7 +165,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
-  RUSTFLAGS: -C target-cpu=native
+  RUSTFLAGS: -C target-cpu=native -C force-frame-pointers=yes
   RUSTC_WRAPPER: sccache
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
@@ -258,7 +258,7 @@ jobs:
           set -euo pipefail
 
           if [[ -n "$AUTOOPT_REQUEST" ]]; then
-            python3 -c 'import json, os, sys; sys.path.insert(0, "contrib/bench"); from autoopt_results import request; r=json.loads(os.environ["AUTOOPT_REQUEST"]); assert r == request(r["baseline_sha"],r["candidate_sha"],r["workload"]), "invalid experiment identity"'
+            python3 -c 'import json, os, sys; sys.path.insert(0, "contrib/bench"); from autoopt_results import request; r=json.loads(os.environ["AUTOOPT_REQUEST"]); assert r == request(r["baseline_sha"],r["candidate_sha"],r["workload"],r.get("attempt_id")), "invalid experiment identity"'
             INPUT_PRESET="$(jq -er '.workload["preset"] | tostring' <<< "$AUTOOPT_REQUEST")"
             INPUT_ACCOUNTS="$(jq -er '.workload["accounts"] | tostring' <<< "$AUTOOPT_REQUEST")"
             INPUT_COUNT="$(jq -er '.workload["count"] | tostring' <<< "$AUTOOPT_REQUEST")"
@@ -522,6 +522,7 @@ jobs:
       ZONES_BENCH_GITHUB_RUN_ID: ${{ github.run_id }}
       ZONES_BENCH_GITHUB_WORKFLOW: zones-benchmark.yml
       ZONES_BENCH_BUILD_PROFILE: profiling
+      ZONES_BENCH_SAMPLY_REF: d1f783d139dfbda60cc0109df9d134135983c551
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23
       ZONES_BENCH_ZONE_CPUS: 8-13,24-29
@@ -720,17 +721,16 @@ jobs:
           set -euo pipefail
           cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
             --locked --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
-          nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
-            '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
-            'jemalloc,asm-keccak,keccak-cache-global,otlp' \
-            '$ZONES_BENCH_TEMPO_REF'"
+          cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
+            --locked --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling \
+            --no-default-features --features jemalloc,asm-keccak,keccak-cache-global,otlp --bin tempo
           cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
             --locked --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
             echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
             echo "SPF_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone-prover-utils"
             echo "ZONES_XTASK_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-xtask"
-            echo "TEMPO_BIN=$TEMPO_ROOT/target/profiling/tempo"
+            echo "TEMPO_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo"
             echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
           } >> "$GITHUB_ENV"
 
@@ -806,7 +806,7 @@ jobs:
           set -euo pipefail
           cargo install samply \
             --git https://github.com/DaniPopes/samply \
-            --rev 06f9075697ad144feaf3e15c2254a043b243fdbf \
+            --rev "$ZONES_BENCH_SAMPLY_REF" \
             --locked \
             --force
           samply_path="$(command -v samply)"
@@ -842,6 +842,7 @@ jobs:
             target/zones-benchmark/autoopt/*-tests.log
             target/zones-benchmark/autoopt/*/report.json
             target/zones-benchmark/autoopt/*/run.log
+            target/zones-benchmark/autoopt/*/*.prom
             target/zones-benchmark/autoopt/*/zone-profile*
             target/zones-benchmark/autoopt/*/journeys/*.json
             target/zones-benchmark/autoopt/*/journeys/*.log
