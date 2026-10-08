@@ -536,7 +536,7 @@ jobs:
       ZONES_BENCH_CPUSET: 14-15,30-31
       ZONES_BENCH_OUTPUT: target/zones-benchmark/neobank-e2e
       ZONES_BENCH_REPORT: target/zones-benchmark/report-neobank-e2e.json
-      ZONES_BENCH_SPF_OUTPUT: target/zones-benchmark/spf-input.json
+      ZONES_BENCH_SPF_OUTPUT: target/zones-benchmark/spf-validation.json
       ZONES_BENCH_SPF_PROFILE: target/zones-benchmark/spf-profile.json.gz
       ZONES_BENCH_SPF_PROFILE_URL: target/zones-benchmark/spf-profile-url.txt
       ZONES_BENCH_SPF_REPORT: target/zones-benchmark/spf-report.txt
@@ -849,6 +849,7 @@ jobs:
             target/zones-benchmark/autoopt/*-build.log
             target/zones-benchmark/autoopt/*-tests.log
             target/zones-benchmark/autoopt/*/report.json
+            target/zones-benchmark/autoopt/*/spf-validation.json
             target/zones-benchmark/autoopt/*/run.log
             target/zones-benchmark/autoopt/*/*.prom
             target/zones-benchmark/autoopt/*/zone-profile*
@@ -909,7 +910,8 @@ jobs:
           set +e
           samply "${samply_args[@]}" -- \
             taskset --cpu-list "$ZONES_BENCH_CPUSET" \
-              "$SPF_BIN" generate-input \
+              python3 contrib/bench/validate-spf-range.py --spf-bin "$SPF_BIN" \
+              --portal "$L1_PORTAL_ADDRESS" \
               --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
               --chain "$ZONES_BENCH_ZONE_GENESIS" \
               --zone-rpc-url "$ZONE_RPC_URL" \

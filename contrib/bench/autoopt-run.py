@@ -135,7 +135,7 @@ def main():
                        ZONES_BENCH_TOPOLOGY_DIR=str(directory / "topology"),
                        ZONES_BENCH_ENV_FILE=str(directory / "topology.env"),
                        ZONES_BENCH_SPF_RANGE=str(directory / "spf-range.env"),
-                       ZONES_BENCH_SPF_OUTPUT=str(directory / "spf-input.json"),
+                       ZONES_BENCH_SPF_OUTPUT=str(directory / "spf-validation.json"),
                        ZONES_BENCH_ZONE_STATE_ROOT=f"/reth-bench-a/autoopt-{os.environ['GITHUB_RUN_ID']}-{label}",
                        ZONES_BENCH_RUN_ID=f"{os.environ['GITHUB_RUN_ID']}-{label}")
             if profiled:
@@ -145,7 +145,8 @@ def main():
             entry = {"pair": pair, "side": side, "sha": req[f"{side}_sha"], "profiled": profiled,
                      "report": json.loads((directory / "report.json").read_text()), "directory": label,
                      "report_sha256": digest(directory / "report.json"),
-                     "validated_spf_sha256": digest(directory / "spf-input.json")}
+                     "spf_validation": json.loads((directory / "spf-validation.json").read_text()),
+                     "spf_validation_sha256": digest(directory / "spf-validation.json")}
             if profiled:
                 entry["profile_sha256"] = digest(directory / "zone-profile.json.gz")
             print(f"Completed {label}: {entry['report']['completed']} journeys", flush=True)
