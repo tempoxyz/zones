@@ -1,4 +1,5 @@
 name: Zones benchmark
+run-name: ${{ inputs.autoopt-request && format('zones-autoopt-{0}', fromJSON(inputs.autoopt-request).experiment_id) || format('Zones benchmark {0}', github.ref_name) }}
 
 on:
   schedule:
@@ -6,6 +7,11 @@ on:
 
   workflow_dispatch:
     inputs:
+      autoopt-request:
+        description: Optional versioned Autoopt comparison request JSON with exact revisions and workload.
+        type: string
+        required: false
+        default: ""
       preset:
         description: Neobank scenario to run.
         type: choice
@@ -588,7 +594,7 @@ jobs:
 
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
-          toolchain: stable
+          toolchain: 1.98.0
       - uses: tempoxyz/gh-actions/actions/setup-mold@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
@@ -800,7 +806,36 @@ jobs:
             fi
           done
 
+      - name: Run Autoopt comparison
+        if: ${{ inputs.autoopt-request != '' }}
+        env:
+          ZONES_AUTOOPT_REQUEST: ${{ inputs.autoopt-request }}
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          ZONES_BENCH_REQUIRE_CLICKHOUSE: "1"
+        run: python3 contrib/bench/autoopt-run.py
+
+      - name: Upload Autoopt evidence
+        if: ${{ !cancelled() && inputs.autoopt-request != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zones-autoopt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/zones-benchmark/autoopt/experiment.json
+            target/zones-benchmark/autoopt/*-build.log
+            target/zones-benchmark/autoopt/*-tests.log
+            target/zones-benchmark/autoopt/*/report.json
+            target/zones-benchmark/autoopt/*/run.log
+            target/zones-benchmark/autoopt/*/zone-profile*
+            target/zones-benchmark/autoopt/*/journeys/*.json
+            target/zones-benchmark/autoopt/*/journeys/*.log
+            target/zones-benchmark/autoopt/*/topology/logs/*.log
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Provision topology and run neobank workload
+        if: ${{ inputs.autoopt-request == '' }}
         env:
           CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
           CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
@@ -830,6 +865,7 @@ jobs:
           contrib/bench/run-neobank-private-flow.sh
 
       - name: Generate and validate SPF input
+        if: ${{ inputs.autoopt-request == '' }}
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$ZONES_BENCH_SPF_OUTPUT")"
@@ -906,7 +942,7 @@ jobs:
           exit "$spf_status"
 
       - name: Publish benchmark results
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.autoopt-request == '' }}
         env:
           SUMMARY_STATE_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
         run: |

@@ -462,8 +462,10 @@ secret_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-neobank-auth.XXXXXX")"
 chmod 700 "$secret_dir"
 export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
 auth_pid=""
+profile_pid=""
 cleanup() {
     local status=$?
+    [[ -z "$profile_pid" ]] || { kill -INT "$profile_pid" 2>/dev/null || true; wait "$profile_pid" 2>/dev/null || true; }
     [[ -z "$auth_pid" ]] || { kill -TERM "$auth_pid" 2>/dev/null || true; wait "$auth_pid" 2>/dev/null || true; }
     rm -f -- "$secret_dir/mnemonic" "$secret_dir/zone-auth.json" \
         "$secret_dir/auth-token-map.log" "$secret_dir/private-balance-request.json" \
@@ -732,6 +734,16 @@ if [[ -n "${ZONES_BENCH_METRICS_BEFORE_FILE:-}" ]]; then
     [[ -s "$ZONES_BENCH_METRICS_BEFORE_FILE" ]] ||
         die "Zone metrics were empty before the measured private flow"
 fi
+if [[ -n "${ZONES_BENCH_LIVE_PROFILE:-}" ]]; then
+    zone_pid="$(awk '$1 == "zone" { print $2 }' "$ZONES_BENCH_PID_FILE")"
+    [[ "$zone_pid" =~ ^[0-9]+$ ]] || die "cannot find the live Zone process"
+    kill -0 "$zone_pid"
+    samply record --save-only --presymbolicate --pid "$zone_pid" \
+        --output "$ZONES_BENCH_LIVE_PROFILE" >"$ZONES_BENCH_OUTPUT/profile.log" 2>&1 &
+    profile_pid=$!
+    sleep 2
+    kill -0 "$profile_pid" || die "live Zone profiler failed to attach"
+fi
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
@@ -740,6 +752,12 @@ build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
     --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
     --sample-instances "$sample_instances" "${scenario_report_args[@]}"
 stage_end private_flow
+if [[ -n "$profile_pid" ]]; then
+    kill -INT "$profile_pid"
+    wait "$profile_pid" || die "live Zone profiler failed"
+    profile_pid=""
+    [[ -s "$ZONES_BENCH_LIVE_PROFILE" ]] || die "live Zone profile is empty"
+fi
 private_flow_tip_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
 [[ "$private_flow_tip_block" =~ ^[0-9]+$ ]] ||
     die "could not read the Zone head after the measured private flow"
