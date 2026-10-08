@@ -356,8 +356,7 @@ where
         if already_applied(&current, block.header().number(), block.hash())? {
             continue;
         }
-        current =
-            verify_block(provider, l1, store, current, context, block, receipts).await?;
+        current = verify_block(provider, l1, store, current, context, block, receipts).await?;
     }
     Ok(Box::new(current))
 }

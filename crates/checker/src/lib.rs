@@ -20,7 +20,7 @@ use reth_exex::ExExContext;
 use reth_node_api::{FullNodeComponents, NodeTypes};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use tempo_chainspec::spec::TempoHardforks;
-use tempo_primitives::{TempoPrimitives};
+use tempo_primitives::TempoPrimitives;
 
 /// Whether an operation should be retried or disable the checker.
 #[derive(Debug)]

@@ -53,10 +53,7 @@ pub(crate) enum WithdrawalBounceBackStatus {
 /// Authenticated origin of one Zone withdrawal request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WithdrawalOrigin {
-    User {
-        sender: Address,
-        sender_tag: B256,
-    },
+    User { sender: Address, sender_tag: B256 },
     DepositBounceBack,
 }
 
