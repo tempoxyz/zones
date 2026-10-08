@@ -1,6 +1,6 @@
 use super::*;
 
-use alloy_evm::precompiles::DynPrecompile;
+use alloy_evm::{EvmInternals, precompiles::DynPrecompile};
 use alloy_primitives::{Bytes, address};
 use alloy_sol_types::{SolCall, SolInterface};
 use revm::precompile::{PrecompileHalt, PrecompileResult, PrecompileStatus};
@@ -97,7 +97,7 @@ impl Harness {
 
     #[rustfmt::skip]
     fn call_inner(&mut self, caller: Address, fee_payer: Address, data: impl AsRef<[u8]>, with_context: bool, is_static: bool) -> PrecompileResult {
-        let _guard = with_context.then(|| tx_context::set_current_transaction(TX_HASH, caller, fee_payer));
+        let _guard = with_context.then(|| tx_context::set_current_transaction(TX_HASH, fee_payer));
         call_precompile(
             &mut self.ctx, &self.precompile, caller, data.as_ref(), GAS, is_static, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_ADDRESS
         )
@@ -341,40 +341,121 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
 }
 
 #[test]
-fn request_withdrawal_rejects_forwarders_before_portal_reads() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    let balance_before = harness.balance_of(ALICE)?;
-    for sender in [BOB, tempo_contracts::MULTICALL3_ADDRESS] {
-        // A forwarding fee payer must not be mistaken for the original caller.
-        let _guard = tx_context::set_current_transaction(TX_HASH, ALICE, sender);
-        for recipient in 16..80 {
-            let data = ZoneOutboxAbi::requestWithdrawalCall {
-                token: harness.token,
-                to: Address::with_last_byte(recipient),
-                amount: 1,
-                memo: B256::ZERO,
-                gasLimit: 0,
-                zoneFallbackRecipient: ALICE,
-                data: Bytes::new(),
-                revealTo: Bytes::new(),
-            }
-            .abi_encode();
-            let result = call_precompile(
-                &mut harness.ctx,
-                &harness.precompile,
-                sender,
-                &data,
-                GAS,
-                false,
-                ZONE_OUTBOX_ADDRESS,
-                ZONE_OUTBOX_ADDRESS,
-            );
-            assert_revert(result, ZoneOutboxError::only_transaction_caller());
+fn request_withdrawal_limits_attempts_across_callers_success_and_reverts() -> eyre::Result<()> {
+    for (first_succeeds, revert_parent) in [(true, false), (false, false), (true, true)] {
+        let mut harness = Harness::new()?;
+        harness.set_gas_rate(1)?;
+        harness.set_modes(true, false);
+        if first_succeeds {
+            harness.set_role(BOB, Role::Account);
         }
+        let balance_before = harness.balance_of(FEE_PAYER)?;
+        let sponsor_balance_before = harness.balance_of(ALICE)?;
+        let guard = tx_context::set_current_transaction(TX_HASH, ALICE);
+        let checkpoint = EvmInternals::from_context(&mut harness.ctx).checkpoint();
+        let mut call = ZoneOutboxAbi::requestWithdrawalCall {
+            token: harness.token,
+            to: BOB,
+            amount: 1,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            zoneFallbackRecipient: FEE_PAYER,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        };
+        let first = harness.call_inner(FEE_PAYER, ALICE, call.abi_encode(), false, false);
+        if first_succeeds {
+            assert!(first?.is_success());
+        } else {
+            assert_revert(first, ZonePortalError::account_not_allowed(BOB));
+        }
+        if revert_parent || !first_succeeds {
+            EvmInternals::from_context(&mut harness.ctx).checkpoint_revert(checkpoint);
+        } else {
+            EvmInternals::from_context(&mut harness.ctx).checkpoint_commit();
+        }
+        let reads_after_first = harness.l1.storage_requests();
+        assert!(!reads_after_first.is_empty());
+        // Neither a different caller nor a fresh recipient restores the shared allowance.
+        for sender in [BOB, tempo_contracts::MULTICALL3_ADDRESS] {
+            for recipient in 16..80 {
+                call.to = Address::with_last_byte(recipient);
+                assert_revert(
+                    harness.call_inner(sender, ALICE, call.abi_encode(), false, false),
+                    ZoneOutboxError::withdrawal_already_attempted(),
+                );
+            }
+        }
+        assert_eq!(harness.l1.storage_requests(), reads_after_first);
+        drop(guard);
+        let committed = first_succeeds && !revert_parent;
+        assert_eq!(
+            harness.balance_of(FEE_PAYER)?,
+            balance_before - U256::from(u8::from(committed))
+        );
+        assert_eq!(
+            harness.balance_of(ALICE)?,
+            sponsor_balance_before - U256::from(if committed { WITHDRAWAL_BASE_GAS } else { 0 })
+        );
+        assert_eq!(harness.pending()?.len(), usize::from(committed));
     }
-    assert!(harness.l1.storage_requests().is_empty());
-    assert_eq!(harness.balance_of(ALICE)?, balance_before);
-    assert!(harness.pending()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn rejected_call_modes_and_getters_do_not_consume_withdrawal_attempt() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let _guard = tx_context::set_current_transaction(TX_HASH, ALICE);
+    let data = ZoneOutboxAbi::requestWithdrawalCall {
+        token: harness.token,
+        to: BOB,
+        amount: 1,
+        memo: B256::ZERO,
+        gasLimit: 0,
+        zoneFallbackRecipient: ALICE,
+        data: Bytes::new(),
+        revealTo: Bytes::new(),
+    }
+    .abi_encode();
+    assert!(
+        harness
+            .call_inner(ALICE, ALICE, &data, false, true)?
+            .is_halt()
+    );
+    assert!(
+        call_precompile(
+            &mut harness.ctx,
+            &harness.precompile,
+            ALICE,
+            &data,
+            GAS,
+            false,
+            BOB,
+            ZONE_OUTBOX_ADDRESS,
+        )?
+        .is_revert()
+    );
+    assert!(
+        harness
+            .call_inner(ALICE, ALICE, [0xff; 4], false, false)?
+            .is_revert()
+    );
+    assert!(
+        harness
+            .call_inner(
+                ALICE,
+                ALICE,
+                ZoneOutboxAbi::WITHDRAWAL_BASE_GASCall {}.abi_encode(),
+                false,
+                false,
+            )?
+            .is_success()
+    );
+    assert!(
+        harness
+            .call_inner(ALICE, ALICE, &data, false, false)?
+            .is_success()
+    );
     Ok(())
 }
 
