@@ -3,6 +3,13 @@ run-name: ${{ inputs.autoopt-request && format('zones-autoopt-{0}', fromJSON(inp
 
 on:
   workflow_call:
+    secrets:
+      CLICKHOUSE_URL:
+        required: true
+      CLICKHOUSE_USER:
+        required: true
+      CLICKHOUSE_PASSWORD:
+        required: true
     inputs:
       autoopt-request:
         description: Versioned Autoopt comparison request with exact revisions and workload.
@@ -838,6 +845,7 @@ jobs:
           name: zones-autoopt-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             target/zones-benchmark/autoopt/experiment.json
+            target/zones-benchmark/autoopt/summary.md
             target/zones-benchmark/autoopt/*-build.log
             target/zones-benchmark/autoopt/*-tests.log
             target/zones-benchmark/autoopt/*/report.json

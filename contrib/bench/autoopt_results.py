@@ -86,7 +86,8 @@ def evaluate(req, runs):
     median = statistics.median(improvements)
     tail_regression = max(b / a - 1 for a, b in zip(tails["baseline"], tails["candidate"]))
     verdict = "no_measurable_improvement"
-    if tail_regression > POLICY["maximum_p99_regression"]:
+    if any(b > a * (1 + POLICY["maximum_p99_regression"])
+           for a, b in zip(tails["baseline"], tails["candidate"])):
         verdict = "regression"
     elif median >= POLICY["minimum_improvement"] and p_value <= POLICY["alpha"]:
         verdict = "unstable_control" if req["baseline_sha"] == req["candidate_sha"] else "performance_candidate"
@@ -95,6 +96,27 @@ def evaluate(req, runs):
             "p_value": p_value, "maximum_p99_regression": tail_regression,
             "latency_ms": {side: {"median": statistics.median(xs), "min": min(xs), "max": max(xs)}
                            for side, xs in values.items()}}
+
+
+def render_summary(req, result, runs):
+    lines = ["# Zones experiment", "", f"Result: **{result['verdict']}**", "",
+             "A performance candidate requires correctness and causal review before acceptance.", "",
+             f"Baseline: `{req['baseline_sha']}`", f"Candidate: `{req['candidate_sha']}`", "",
+             f"Median paired mean-latency improvement: {result['median_improvement'] * 100:.2f}%.",
+             f"Paired sign-test p-value: {result['p_value']:.5f}.", "",
+             "| Pair | Baseline mean (ms) | Candidate mean (ms) | Baseline p99 (ms) | Candidate p99 (ms) |",
+             "| --- | ---: | ---: | ---: | ---: |"]
+    for pair in range(POLICY["pairs"]):
+        sides = {r["side"]: r["report"]["client_observed_e2e_latency"] for r in runs if r["pair"] == pair}
+        a, b = sides["baseline"], sides["candidate"]
+        lines.append(f"| {pair + 1} | {a['mean_ms']:.3f} | {b['mean_ms']:.3f} | {a['p99_ms']:.3f} | {b['p99_ms']:.3f} |")
+    lines += ["", "Every measured report completed all requested journeys with zero failures and timeouts.",
+              "Profile runs are separate and excluded from this table.", "", "## Workload", "", "```json",
+              json.dumps(req["workload"], indent=2), "```", "", "## Evidence review", "",
+              "Download this run's `zones-autoopt` artifact. Inspect `experiment.json`, both `profile-0-*` directories,",
+              "the raw journey reports and causal events, metrics snapshots, node logs, and correctness logs.",
+              "Establish the limiter and map the changed frame or wait to the source diff before accepting a gain."]
+    return "\n".join(lines) + "\n"
 
 
 def main():

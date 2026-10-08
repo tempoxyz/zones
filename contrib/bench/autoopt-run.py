@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from autoopt_results import POLICY, canonical, evaluate, request
+from autoopt_results import POLICY, evaluate, render_summary, request
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "target/zones-benchmark/autoopt"
@@ -150,6 +150,11 @@ def main():
         manifest["result"] = evaluate(req, manifest["runs"])
         manifest["status"] = "complete"
         save(manifest)
+        summary = render_summary(req, manifest["result"], manifest["runs"])
+        (OUTPUT / "summary.md").write_text(summary)
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as destination:
+                destination.write(summary)
     except BaseException:
         manifest["status"] = "failed"
         save(manifest)

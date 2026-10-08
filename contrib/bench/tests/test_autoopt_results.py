@@ -46,6 +46,20 @@ class Results(unittest.TestCase):
         runs[1]["report"]["client_observed_e2e_latency"]["p99_ms"] = 170
         self.assertEqual(m.evaluate(req, runs)["verdict"], "regression")
 
+    def test_exact_tail_limit_is_allowed(self):
+        req, runs = fixture()
+        for run in runs:
+            run["report"]["client_observed_e2e_latency"]["p99_ms"] = 100 if run["side"] == "baseline" else 105
+        self.assertEqual(m.evaluate(req, runs)["verdict"], "performance_candidate")
+
+    def test_summary_contains_all_measured_pairs(self):
+        req, runs = fixture()
+        summary = m.render_summary(req, m.evaluate(req, runs), runs)
+        self.assertIn("10.00%", summary)
+        self.assertIn("0.03125", summary)
+        self.assertIn("| 6 | 100.000 | 90.000 |", summary)
+        self.assertIn("correctness and causal review", summary)
+
     def test_rejects_profile_wrong_commit_order_or_missing_pair(self):
         req, original = fixture()
         mutations = [lambda r: r[0].update(profiled=True), lambda r: r[0].update(sha="c" * 40),
