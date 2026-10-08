@@ -4,7 +4,9 @@ use alloy_consensus::{TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{Address, B256, Log, U256};
 use alloy_sol_types::SolEvent;
 use tempo_precompiles::tip20::{ITIP20, TIP20Token};
-use tempo_zone_contracts::{IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{
+    IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+};
 
 use crate::decode_event;
 
@@ -51,7 +53,10 @@ pub(crate) enum WithdrawalBounceBackStatus {
 /// Authenticated origin of one Zone withdrawal request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WithdrawalOrigin {
-    User { sender: Address },
+    User {
+        sender: Address,
+        sender_tag: B256,
+    },
     DepositBounceBack,
 }
 
@@ -221,7 +226,7 @@ fn authenticate_receipt_withdrawals(
 
     for (request_index, event) in receipt.iter().enumerate() {
         let ReceiptEvent::Action(L2BridgeAction::WithdrawalRequested {
-            origin: WithdrawalOrigin::User { sender },
+            origin: WithdrawalOrigin::User { sender, .. },
             token,
             principal,
             fee,
@@ -370,12 +375,13 @@ impl EventCollector {
         R: TxReceipt<Log = Log>,
     {
         let successful = receipt.status();
+        let transaction_hash = *transaction.tx_hash();
         let mut events = Vec::new();
         for log in receipt.logs() {
             let event = if successful {
                 match log.address {
                     ZONE_INBOX_ADDRESS => decode_inbox(log, block)?,
-                    ZONE_OUTBOX_ADDRESS => decode_outbox(log, block)?,
+                    ZONE_OUTBOX_ADDRESS => decode_outbox(log, block, transaction_hash)?,
                     _ => decode_token_event(log, block)?,
                 }
             } else {
@@ -397,7 +403,6 @@ impl EventCollector {
             return Ok(());
         }
 
-        let transaction_hash = *transaction.tx_hash();
         authenticate_receipt_mints(transaction_hash, &events)?;
         authenticate_receipt_withdrawals(transaction_hash, &events)?;
         for event in events {
@@ -545,7 +550,11 @@ fn decode_token_event(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent
 }
 
 /// Decode one recognized Zone Outbox log.
-fn decode_outbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
+fn decode_outbox(
+    log: &Log,
+    block: u64,
+    transaction_hash: B256,
+) -> eyre::Result<Option<ReceiptEvent>> {
     let topic = log
         .topics()
         .first()
@@ -561,6 +570,11 @@ fn decode_outbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
                 (true, true) => WithdrawalOrigin::DepositBounceBack,
                 (false, false) => WithdrawalOrigin::User {
                     sender: event.sender,
+                    sender_tag: ZonePortal::Withdrawal::sender_tag(
+                        event.sender,
+                        transaction_hash,
+                        event.fallbackNonce,
+                    ),
                 },
                 _ => {
                     eyre::bail!(
@@ -863,9 +877,10 @@ mod tests {
         );
         assert!(
             matches!(events.actions[6], L2BridgeAction::WithdrawalRequested {
-            withdrawal_index: 4, origin: WithdrawalOrigin::User { sender }, token, principal, fee,
+            withdrawal_index: 4, origin: WithdrawalOrigin::User { sender, sender_tag }, token, principal, fee,
         } if sender == Address::repeat_byte(0x44) && token == token_b
-            && principal == U256::from(2000) && fee == U256::from(75))
+            && principal == U256::from(2000) && fee == U256::from(75)
+            && sender_tag == ZonePortal::Withdrawal::sender_tag(sender, *transaction().tx_hash(), 9))
         );
     }
 
@@ -981,7 +996,7 @@ mod tests {
             withdrawal_request_log(Address::ZERO, 1),
             withdrawal_request_log(Address::repeat_byte(1), 0),
         ] {
-            let error = decode_outbox(&log, 4).unwrap_err();
+            let error = decode_outbox(&log, 4, B256::ZERO).unwrap_err();
             assert!(
                 error
                     .to_string()
@@ -1207,7 +1222,10 @@ mod tests {
         let origin = if sender.is_zero() {
             WithdrawalOrigin::DepositBounceBack
         } else {
-            WithdrawalOrigin::User { sender }
+            WithdrawalOrigin::User {
+                sender,
+                sender_tag: B256::ZERO,
+            }
         };
         ReceiptEvent::Action(L2BridgeAction::WithdrawalRequested {
             withdrawal_index: 0,

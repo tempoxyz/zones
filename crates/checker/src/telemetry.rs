@@ -5,7 +5,7 @@ use std::fmt;
 use alloy_primitives::B256;
 use reth_metrics::{
     Metrics,
-    metrics::{Counter, Gauge},
+    metrics::{Counter, Gauge, Histogram},
 };
 
 use crate::{
@@ -14,6 +14,7 @@ use crate::{
         DepositResult, L2BlockEvidence, L2BridgeAction, WithdrawalBounceBackStatus,
         WithdrawalOrigin,
     },
+    latency::LatencySamples,
     persistence::{BlockRef, Snapshot, Status},
 };
 
@@ -133,6 +134,10 @@ pub(crate) struct CheckerMetrics {
     pub(crate) verified_zone_blocks_total: Counter,
     /// Number of checker-state rebuilds after local history changes.
     pub(crate) recovery_rebuilds_total: Counter,
+    /// Time from a deposit's Tempo block to the Zone block that processed it.
+    pub(crate) deposit_latency_seconds: Histogram,
+    /// Time from a user withdrawal's Zone request to the Tempo block that processed it.
+    pub(crate) withdrawal_latency_seconds: Histogram,
 }
 
 impl CheckerMetrics {
@@ -153,6 +158,16 @@ impl CheckerMetrics {
                 0.0
             },
         );
+    }
+
+    /// Record latencies completed by one verified Zone block.
+    pub(crate) fn record_latencies(&self, samples: &LatencySamples) {
+        for &latency in &samples.deposits {
+            self.deposit_latency_seconds.record(latency);
+        }
+        for &latency in &samples.withdrawals {
+            self.withdrawal_latency_seconds.record(latency);
+        }
     }
 }
 

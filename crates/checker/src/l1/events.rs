@@ -1,7 +1,7 @@
 //! Decoded L1 Portal events with their canonical receipt provenance.
 
 use alloy_network::ReceiptResponse as _;
-use alloy_primitives::{Address, Log};
+use alloy_primitives::{Address, B256, Log};
 use alloy_sol_types::SolEvent;
 use tempo_alloy::rpc::TempoTransactionReceipt;
 use tempo_zone_contracts::ZonePortal;
@@ -21,6 +21,7 @@ pub(crate) enum L1PortalEvent {
         token: Address,
     },
     WithdrawalProcessed {
+        sender_tag: B256,
         token: Address,
         amount: u128,
         callback_success: bool,
@@ -137,6 +138,7 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             let e =
                 decode_event::<ZonePortal::WithdrawalProcessed>(log, "WithdrawalProcessed", block)?;
             L1PortalEvent::WithdrawalProcessed {
+                sender_tag: e.senderTag,
                 token: e.token,
                 amount: e.amount,
                 callback_success: e.callbackSuccess,

@@ -39,6 +39,7 @@ tempo-alloy.workspace = true
 tempo-chainspec = { workspace = true, features = ["reth"] }
 tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
+tempo-primitives.workspace = true
 tempo-revm = { workspace = true, features = ["reth"] }
 
 # zones
@@ -66,6 +67,5 @@ alloy-rpc-types-eth.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-primitives-traits = { workspace = true, features = ["std", "test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
-tempo-primitives.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
