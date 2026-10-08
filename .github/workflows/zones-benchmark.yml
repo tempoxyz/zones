@@ -836,7 +836,16 @@ jobs:
           CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
           CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
           ZONES_BENCH_REQUIRE_CLICKHOUSE: "1"
-        run: python3 contrib/bench/autoopt-run.py
+        run: |
+          # Samply allocates a perf ring buffer for each CPU and attached thread.
+          # Raise only this step's inherited limit, not the runner's global sysctls.
+          printf 'memlock soft=%s hard=%s\n' "$(ulimit -Sl)" "$(ulimit -Hl)"
+          if ! ulimit -l unlimited; then
+            sudo -n prlimit --pid "$BASHPID" --memlock=unlimited:unlimited
+          fi
+          printf 'memlock effective=%s\n' "$(ulimit -Sl)"
+          samply record --save-only --output "$RUNNER_TEMP/zones-profile-preflight.json.gz" -- sleep 1
+          python3 contrib/bench/autoopt-run.py
 
       - name: Upload Autoopt evidence
         if: ${{ !cancelled() && inputs.autoopt-request != '' }}
