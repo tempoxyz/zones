@@ -47,12 +47,15 @@ class SpfRange(unittest.TestCase):
             self.assertFalse(path.exists())
 
     def test_waits_for_last_measured_block_to_be_submitted(self):
-        with patch.object(m.subprocess, "check_output", side_effect=["hash", '{"number":"0x4"}', "hash", '{"number":"0x6"}']), patch.object(m.time, "sleep") as sleep:
+        with patch.object(m.subprocess, "check_output", side_effect=["hash", "4\n", "hash", "6\n"]), patch.object(m.time, "sleep") as sleep:
             m.wait_for_submission(5, "portal", "tempo", "zone", 120)
             sleep.assert_called_once_with(1)
+            m.subprocess.check_output.assert_any_call(
+                ["cast", "block", "hash", "--field", "number", "--rpc-url", "zone"],
+                text=True, timeout=30)
 
     def test_unsubmitted_range_times_out(self):
-        with patch.object(m.subprocess, "check_output", side_effect=["hash", '{"number":"0x4"}']), patch.object(m.time, "monotonic", side_effect=[0, 121]):
+        with patch.object(m.subprocess, "check_output", side_effect=["hash", "4\n"]), patch.object(m.time, "monotonic", side_effect=[0, 121]):
             with self.assertRaises(TimeoutError):
                 m.wait_for_submission(5, "portal", "tempo", "zone", 120)
 

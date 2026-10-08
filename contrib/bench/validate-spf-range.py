@@ -46,10 +46,10 @@ def wait_for_submission(last, portal, tempo_rpc, zone_rpc, timeout):
         block_hash = subprocess.check_output([
             "cast", "call", portal, "blockHash()(bytes32)", "--rpc-url", tempo_rpc],
             text=True, timeout=30).strip()
-        block = json.loads(subprocess.check_output([
-            "cast", "block", block_hash, "--json", "--rpc-url", zone_rpc], text=True, timeout=30))
-        number = block["number"]
-        committed = int(number, 16) if isinstance(number, str) and number.startswith("0x") else int(number)
+        number = subprocess.check_output([
+            "cast", "block", block_hash, "--field", "number", "--rpc-url", zone_rpc],
+            text=True, timeout=30).strip()
+        committed = int(number, 16) if number.startswith("0x") else int(number)
         if committed >= last:
             return
         if time.monotonic() >= deadline:
