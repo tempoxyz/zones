@@ -2,16 +2,18 @@ name: Zones benchmark
 run-name: ${{ inputs.autoopt-request && format('zones-autoopt-{0}', fromJSON(inputs.autoopt-request).experiment_id) || format('Zones benchmark {0}', github.ref_name) }}
 
 on:
+  workflow_call:
+    inputs:
+      autoopt-request:
+        description: Versioned Autoopt comparison request with exact revisions and workload.
+        type: string
+        required: true
+
   schedule:
     - cron: "45 2 * * *"
 
   workflow_dispatch:
     inputs:
-      autoopt-request:
-        description: Optional versioned Autoopt comparison request JSON with exact revisions and workload.
-        type: string
-        required: false
-        default: ""
       preset:
         description: Neobank scenario to run.
         type: choice
@@ -221,6 +223,7 @@ jobs:
       - name: Resolve configuration
         id: config
         env:
+          AUTOOPT_REQUEST: ${{ inputs.autoopt-request }}
           EVENT_SHA: ${{ github.sha }}
           INPUT_PRESET: ${{ inputs.preset || 'full-journey' }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
@@ -253,6 +256,18 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
+
+          if [[ -n "$AUTOOPT_REQUEST" ]]; then
+            python3 -c 'import json, os, sys; sys.path.insert(0, "contrib/bench"); from autoopt_results import request; r=json.loads(os.environ["AUTOOPT_REQUEST"]); assert r == request(r["baseline_sha"],r["candidate_sha"],r["workload"]), "invalid experiment identity"'
+            INPUT_PRESET="$(jq -er '.workload["preset"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_ACCOUNTS="$(jq -er '.workload["accounts"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_COUNT="$(jq -er '.workload["count"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_TPS="$(jq -er '.workload["tps"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_MAX_CONCURRENT="$(jq -er '.workload["max-concurrent"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_STATE_BLOAT_GIB="$(jq -er '.workload["state-bloat-gib"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_SEED="$(jq -er '.workload["seed"] | tostring' <<< "$AUTOOPT_REQUEST")"
+            INPUT_TXGEN_REF="$(jq -er '.workload["txgen-ref"] | tostring' <<< "$AUTOOPT_REQUEST")"
+          fi
 
           INPUT_TEMPO_REF="$(sed -nE 's/^tempo-alloy.*rev = "([0-9a-f]{40})".*/\1/p' Cargo.toml)"
           INPUT_TEMPO_HARDFORK="${INPUT_TEMPO_HARDFORK,,}"

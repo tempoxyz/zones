@@ -1,0 +1,59 @@
+name: Zones Autoopt
+run-name: ${{ inputs.request && format('zones-autoopt-{0}', fromJSON(inputs.request).experiment_id) || format('zones-autoopt-baseline-{0}', github.sha) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: Versioned exact-commit experiment JSON. Empty collects a baseline control and profiles.
+        type: string
+        required: false
+        default: ""
+  # Temporary integration verification; removed once the remote producer passes.
+  push:
+    branches: [kit/zones-autoopt]
+    paths: [.github/workflows/zones-autoopt.yml]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    outputs:
+      request: ${{ steps.request.outputs.request }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: request
+        env:
+          REQUEST: ${{ inputs.request }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          sys.path.insert(0, 'contrib/bench')
+          from autoopt_results import canonical, request
+          if os.environ['REQUEST']:
+              value = json.loads(os.environ['REQUEST'])
+              if value != request(value['baseline_sha'], value['candidate_sha'], value['workload']):
+                  raise ValueError('invalid request')
+          else:
+              sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+              txgen = subprocess.check_output(['git', 'ls-remote', 'https://github.com/tempoxyz/txgen', 'HEAD'], text=True).split()[0]
+              smoke = os.environ['EVENT_NAME'] == 'push'
+              value = request(sha, sha, {'preset': 'encrypted-deposit', 'accounts': 20 if smoke else 100,
+                  'count': 20 if smoke else 1000, 'tps': 5 if smoke else 20,
+                  'max-concurrent': 4 if smoke else 12, 'state-bloat-gib': 0 if smoke else 1,
+                  'seed': 424242, 'txgen-ref': txgen})
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('request=' + canonical(value) + '\n')
+          PY
+  benchmark:
+    needs: request
+    uses: ./.github/workflows/zones-benchmark.yml
+    with:
+      autoopt-request: ${{ needs.request.outputs.request }}
+    secrets: inherit
