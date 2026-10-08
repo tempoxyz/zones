@@ -701,11 +701,16 @@ jobs:
             echo "::error::runner-local benchmark mnemonic must not be a symbolic link"
             exit 1
           fi
-          if [ ! -s "$mnemonic_file" ]; then
+          if [ ! -s "$mnemonic_file" ] || [ "$(cat "$mnemonic_file")" = null ]; then
             temporary="$(mktemp "$identity_root/.mnemonic.XXXXXX")"
             chmod 600 "$temporary"
-            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
+            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -er '(.data // .).mnemonic | select(type == "string" and length > 0)')"
             printf '%s\n' "$mnemonic" > "$temporary"
+            if ! cast wallet address --mnemonic "$temporary" >/dev/null 2>&1; then
+              rm -f -- "$temporary"
+              echo "::error::generated benchmark mnemonic is invalid"
+              exit 1
+            fi
             mv -f -- "$temporary" "$mnemonic_file"
           else
             mnemonic="$(tr -d '\r\n' < "$mnemonic_file")"
@@ -716,6 +721,10 @@ jobs:
           fi
           if [ -z "$mnemonic" ] || [ "$mnemonic" = "test test test test test test test test test test test junk" ]; then
             echo "::error::runner-local benchmark mnemonic is empty or public"
+            exit 1
+          fi
+          if ! cast wallet address --mnemonic "$mnemonic_file" >/dev/null 2>&1; then
+            echo "::error::stored benchmark mnemonic is invalid"
             exit 1
           fi
           chmod 600 "$mnemonic_file"
