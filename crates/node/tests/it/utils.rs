@@ -708,6 +708,8 @@ where
 type RpcApiFuture =
     Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>>>>>;
 type RpcApiFactory = dyn Fn(zone_node::rpc::RedactedRpcConfig) -> RpcApiFuture + Send + Sync;
+type FeeRecipientFuture = Pin<Box<dyn Future<Output = eyre::Result<Vec<Address>>> + Send>>;
+type FeeRecipientChecker = dyn Fn(Vec<Address>, Address) -> FeeRecipientFuture + Send + Sync;
 
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
@@ -718,6 +720,7 @@ pub(crate) struct ZoneTestNode {
     l1_state_cache: L1StateCache,
     l1_block_tracker: L1BlockTracker,
     rpc_api_factory: Arc<RpcApiFactory>,
+    fee_recipient_checker: Arc<FeeRecipientChecker>,
     node_handle: Box<dyn TestNodeHandle>,
     /// Cancels the `ZoneEngine`, when this node runs one.
     ///
@@ -883,6 +886,15 @@ impl ZoneTestNode {
         config: zone_node::rpc::RedactedRpcConfig,
     ) -> eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>> {
         (self.rpc_api_factory)(config).await
+    }
+
+    /// Returns the `tokens` whose TIP-403 policy rejects `recipient` as a fee recipient.
+    pub(crate) async fn unauthorized_fee_tokens(
+        &self,
+        tokens: Vec<Address>,
+        recipient: Address,
+    ) -> eyre::Result<Vec<Address>> {
+        (self.fee_recipient_checker)(tokens, recipient).await
     }
 
     /// Subscribe to canonical state notifications.
@@ -1570,6 +1582,13 @@ impl ZoneTestNode {
         // Build the real redacted RPC API while the handle is still concrete,
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
+        let fee_recipient_api = eth_handlers.api.clone();
+        let fee_recipient_checker = Arc::new(move |tokens: Vec<Address>, recipient: Address| {
+            let api = fee_recipient_api.clone();
+            Box::pin(async move {
+                zone_node::fee_recipient::unauthorized_fee_tokens(&api, tokens, recipient).await
+            }) as FeeRecipientFuture
+        });
         let rpc_enabled_tokens = enabled_tokens.clone();
         let rpc_l1_provider = redacted_l1_provider;
         let rpc_api_factory = Arc::new(move |config: zone_node::rpc::RedactedRpcConfig| {
@@ -1596,6 +1615,7 @@ impl ZoneTestNode {
             l1_state_cache,
             l1_block_tracker,
             rpc_api_factory,
+            fee_recipient_checker,
             node_handle: Box::new(node_handle),
             engine_stop,
             leadership,

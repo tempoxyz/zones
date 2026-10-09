@@ -49,6 +49,7 @@ mod zone_transaction_pool_alias {
 
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
+    fee_recipient::FeeRecipientCheck,
     follower::{BlockSyncP2p, FollowerBlockSync, FollowerBlockSyncContext, PeerTipRegistry},
     replication::{
         BroadcasterShutdown, broadcast_persisted_blocks, collect_follower_settlement_signatures,
@@ -93,6 +94,8 @@ pub(crate) struct RoleControllerContext<P, Pool> {
     pub peer_tips: PeerTipRegistry,
     /// Live role/readiness snapshot shared with the status RPC.
     pub status: SharedRoleStatus,
+    /// Checks that each new leader's fee recipient can receive the Zone fee tokens.
+    pub fee_recipient_check: FeeRecipientCheck,
 }
 
 /// Live role and promotion-readiness snapshot for observability and the status RPC.
@@ -991,6 +994,9 @@ where
 
             // Canonical head writer: the engine with the per-anchor production permit.
             let engine = build_engine(context, sequencer, last_header);
+            context
+                .fee_recipient_check
+                .spawn(sequencer.config.sequencer_signer.address());
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
             tasks.spawn(async move {
