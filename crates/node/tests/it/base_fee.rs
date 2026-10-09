@@ -157,13 +157,14 @@ async fn t14_activates_dynamic_base_fee() -> eyre::Result<()> {
         .map_err(|err| eyre::eyre!(err.to_string()))?;
     assert_eq!(
         serde_json::from_str::<U256>(gas_price.get())?,
-        u128::from(
+        U256::from(tempo_t7_next_block_base_fee(
             first
                 .header
                 .base_fee_per_gas()
-                .expect("first block base fee")
-        ),
-        "eth_gasPrice must follow the active Zone base fee"
+                .expect("first block base fee"),
+            first.header.gas_used(),
+        )),
+        "eth_gasPrice must quote the next block's base fee"
     );
     let fee_history = rpc
         .fee_history(1, BlockNumberOrTag::Number(0), Some(Vec::new()))
@@ -272,8 +273,11 @@ async fn sponsored_transaction_settles_nonzero_base_fee() -> eyre::Result<()> {
         .map_err(|err| eyre::eyre!(err.to_string()))?;
     assert_eq!(
         serde_json::from_str::<U256>(gas_price.get())?,
-        u128::from(base_fee),
-        "eth_gasPrice must not include the sampled priority fee"
+        U256::from(tempo_t7_next_block_base_fee(
+            base_fee,
+            block.header.gas_used()
+        )),
+        "eth_gasPrice must quote the next block's base fee without the sampled priority fee"
     );
 
     let filled = rpc

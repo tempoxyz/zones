@@ -24,7 +24,7 @@ use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, tempo_t7_next_block_base_fee};
 use tempo_contracts::precompiles::{
     IAccountKeychain, INonce, IStorageCredits, ITIP20 as ContractTip20, ITIP403Registry,
     TIP403_REGISTRY_ADDRESS,
@@ -529,9 +529,12 @@ async fn test_public_methods() -> eyre::Result<()> {
         .get_block_by_number(Default::default())
         .await?
         .expect("latest Zone block");
-    let base_fee = latest.header.base_fee_per_gas().expect("Zone base fee");
+    let next_base_fee = tempo_t7_next_block_base_fee(
+        latest.header.base_fee_per_gas().expect("Zone base fee"),
+        latest.header.gas_used(),
+    );
     for (method, expected) in [
-        ("eth_gasPrice", U256::from(base_fee)),
+        ("eth_gasPrice", U256::from(next_base_fee)),
         ("eth_maxPriorityFeePerGas", U256::ZERO),
     ] {
         for response in [
