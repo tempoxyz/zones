@@ -10,7 +10,7 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
-    storage::{ContractStorage, Handler, Mapping},
+    storage::{ContractStorage, Handler, Mapping, StorageCtx},
     tip20::{ITIP20, TIP20Error, TIP20Token},
 };
 use tempo_precompiles_macros::{Storable, contract};
@@ -189,9 +189,9 @@ impl ZoneOutbox {
                 .amount
                 .checked_add(fee)
                 .ok_or_else(TempoPrecompileError::under_overflow)?;
-            self.transfer_and_burn(&mut zone_token, caller, total)?;
+            self.debit_caller_and_burn(&mut zone_token, caller, total)?;
         } else {
-            self.transfer_and_burn(&mut zone_token, caller, call.amount)?;
+            self.debit_caller_and_burn(&mut zone_token, caller, call.amount)?;
             if fee != 0 {
                 self.transfer_and_burn(&mut zone_token, fee_payer, fee)?;
             }
@@ -208,6 +208,33 @@ impl ZoneOutbox {
             PendingWithdrawal::from_request(caller, current_tx_hash, fallback_nonce, call),
             fee,
         )
+    }
+
+    /// Debits the withdrawing caller. From T13 the caller is debited as `msg.sender`, so access-key
+    /// spending limits apply even when the root key approved the outbox; earlier forks consume the
+    /// caller's outbox allowance.
+    fn debit_caller_and_burn(
+        &self,
+        token: &mut TIP20Token,
+        caller: Address,
+        amount: u128,
+    ) -> ZoneResult<()> {
+        if !StorageCtx.spec().is_t13() {
+            return self.transfer_and_burn(token, caller, amount);
+        }
+
+        let amount = U256::from(amount);
+        if !token.transfer(
+            caller,
+            ITIP20::transferCall {
+                to: self.address,
+                amount,
+            },
+        )? {
+            return Err(ZoneOutboxError::transfer_failed().into());
+        }
+        token.burn(self.address, ITIP20::burnCall { amount })?;
+        Ok(())
     }
 
     fn transfer_and_burn(

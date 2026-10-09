@@ -4,7 +4,13 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address};
 use alloy_sol_types::{SolCall, SolInterface};
 use revm::precompile::{PrecompileHalt, PrecompileResult, PrecompileStatus};
+use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_contracts::precompiles::{
+    AccountKeychainError,
+    IAccountKeychain::{KeyRestrictions, SignatureType, TokenLimit},
+};
 use tempo_precompiles::{
+    account_keychain::AccountKeychain,
     storage::{StorageCtx, StorageKey},
     test_util::TIP20Setup,
     zone_factory::portal::{self, ZonePortalStorage},
@@ -16,7 +22,8 @@ use crate::{
     create_outbox_precompile,
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
     test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
+        MockL1Reader, TestContext, call_precompile, test_context_with_hardfork, test_env,
+        test_storage_provider,
     },
     tx_context,
 };
@@ -31,6 +38,7 @@ const BOB: Address = Address::with_last_byte(0xb2);
 const SEQUENCER: Address = Address::with_last_byte(0xc3);
 const FEE_PAYER: Address = Address::with_last_byte(0xd4);
 const GATEWAY: Address = Address::with_last_byte(0xe5);
+const ACCESS_KEY: Address = Address::with_last_byte(0xf6);
 
 struct Harness {
     ctx: TestContext,
@@ -41,7 +49,11 @@ struct Harness {
 
 impl Harness {
     fn new() -> eyre::Result<Self> {
-        let mut ctx = test_context();
+        Self::with_hardfork(TempoHardfork::T13)
+    }
+
+    fn with_hardfork(hardfork: TempoHardfork) -> eyre::Result<Self> {
+        let mut ctx = test_context_with_hardfork(hardfork);
         let token = tempo_precompiles::PATH_USD_ADDRESS;
         let l1 = MockL1Reader::default();
         l1.insert(
@@ -230,6 +242,52 @@ impl Harness {
             ANCHOR,
             U256::from(expiry) << 64,
         );
+    }
+
+    /// Makes the current transaction an ALICE access-key transaction with `limit` on the token.
+    fn use_access_key_with_limit(&mut self, limit: u64) -> eyre::Result<()> {
+        let token = self.token;
+        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            let mut keychain = AccountKeychain::new();
+            keychain.initialize()?;
+            keychain.set_transaction_key(Address::ZERO)?;
+            keychain.set_tx_origin(ALICE)?;
+            keychain.authorize_key(
+                ALICE,
+                ACCESS_KEY,
+                SignatureType::Secp256k1,
+                KeyRestrictions {
+                    expiry: u64::MAX,
+                    enforceLimits: true,
+                    limits: vec![TokenLimit {
+                        token,
+                        amount: U256::from(limit),
+                        period: 0,
+                    }],
+                    allowAnyCalls: true,
+                    allowedCalls: vec![],
+                },
+                None,
+            )?;
+            keychain.set_transaction_key(ACCESS_KEY)?;
+            Ok(())
+        })
+    }
+
+    fn set_allowance(&mut self, owner: Address, amount: U256) -> eyre::Result<()> {
+        let token = self.token;
+        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            TIP20Token::from_address(token)?.approve(
+                owner,
+                ITIP20::approveCall {
+                    spender: ZONE_OUTBOX_ADDRESS,
+                    amount,
+                },
+            )?;
+            Ok(())
+        })
     }
 
     fn balance_of(&mut self, account: Address) -> eyre::Result<U256> {
@@ -752,6 +810,54 @@ fn request_charges_withdrawal_fee_to_effective_fee_payer() -> eyre::Result<()> {
         harness.balance_of(FEE_PAYER)?,
         fee_payer_before - U256::from(fee)
     );
+    Ok(())
+}
+
+#[test]
+fn request_meters_access_key_spending_limit_despite_root_approval() -> eyre::Result<()> {
+    // ALICE's root key approved the outbox for U256::MAX in the harness.
+    let mut harness = Harness::new()?;
+    harness.use_access_key_with_limit(100)?;
+    let before = harness.balance_of(ALICE)?;
+
+    assert_revert(
+        harness.request(101, BOB, B256::ZERO),
+        AccountKeychainError::spending_limit_exceeded(),
+    );
+    assert!(harness.pending()?.is_empty());
+
+    harness.request(100, BOB, B256::ZERO)?;
+    assert_eq!(harness.balance_of(ALICE)?, before - U256::from(100));
+    assert_revert(
+        harness.request(1, BOB, B256::ZERO),
+        AccountKeychainError::spending_limit_exceeded(),
+    );
+    assert_eq!(harness.pending()?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn request_debits_caller_without_outbox_allowance() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_allowance(ALICE, U256::ZERO)?;
+    let before = harness.balance_of(ALICE)?;
+
+    harness.request(100, BOB, B256::ZERO)?;
+    assert_eq!(harness.balance_of(ALICE)?, before - U256::from(100));
+    Ok(())
+}
+
+#[test]
+fn pre_t13_request_consumes_outbox_allowance() -> eyre::Result<()> {
+    let mut harness = Harness::with_hardfork(TempoHardfork::T12)?;
+    harness.set_allowance(ALICE, U256::from(99))?;
+    let result = harness.request(100, BOB, B256::ZERO);
+    assert!(result.expect("precompile result").is_revert());
+    assert!(harness.pending()?.is_empty());
+
+    harness.set_allowance(ALICE, U256::from(100))?;
+    harness.request(100, BOB, B256::ZERO)?;
+    assert_eq!(harness.pending()?.len(), 1);
     Ok(())
 }
 
