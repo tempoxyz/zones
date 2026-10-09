@@ -210,9 +210,9 @@ impl ZoneOutbox {
         )
     }
 
-    /// Debits the withdrawing caller. From T13 the caller is debited as `msg.sender`, so access-key
-    /// spending limits apply even when the root key approved the outbox; earlier forks consume the
-    /// caller's outbox allowance.
+    /// Debits the withdrawing caller. From T13 the outbox is on the implicit approval list
+    /// (TIP-1144) and pulls via `system_transfer_from`, which meters access-key spending limits;
+    /// earlier forks consume the caller's outbox allowance.
     fn debit_caller_and_burn(
         &self,
         token: &mut TIP20Token,
@@ -224,13 +224,7 @@ impl ZoneOutbox {
         }
 
         let amount = U256::from(amount);
-        if !token.transfer(
-            caller,
-            ITIP20::transferCall {
-                to: self.address,
-                amount,
-            },
-        )? {
+        if !token.system_transfer_from(self.address, caller, amount)? {
             return Err(ZoneOutboxError::transfer_failed().into());
         }
         token.burn(self.address, ITIP20::burnCall { amount })?;

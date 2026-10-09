@@ -1238,7 +1238,7 @@ interface IZoneOutbox {
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo
-    /// @dev From T13 the caller is debited directly as msg.sender (access-key spending limits apply);
+    /// @dev From T13 the caller is debited via implicit approval (TIP-1144; spending limits apply);
     ///      a distinct fee payer must approve outbox to spend the fee. Before T13 the caller must
     ///      approve outbox to spend amount + fee of the specified token.
     ///      The token must be enabled on the portal. Withdrawals can never be disabled

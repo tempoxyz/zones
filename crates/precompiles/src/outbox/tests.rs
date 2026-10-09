@@ -814,6 +814,18 @@ fn request_charges_withdrawal_fee_to_effective_fee_payer() -> eyre::Result<()> {
 }
 
 #[test]
+fn outbox_address_matches_tempo_implicit_approval_entry() {
+    assert_eq!(
+        ZONE_OUTBOX_ADDRESS,
+        tempo_contracts::precompiles::ZONE_OUTBOX_ADDRESS
+    );
+    assert!(tempo_precompiles::address_registry::is_implicitly_approved(
+        ZONE_OUTBOX_ADDRESS,
+        TempoHardfork::T13
+    ));
+}
+
+#[test]
 fn request_meters_access_key_spending_limit_despite_root_approval() -> eyre::Result<()> {
     // ALICE's root key approved the outbox for U256::MAX in the harness.
     let mut harness = Harness::new()?;
