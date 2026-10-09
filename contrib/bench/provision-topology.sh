@@ -235,8 +235,12 @@ stop_stale_listener() {
 
     for pid in "${pids[@]}"; do
         [[ "$pid" =~ ^[0-9]+$ ]] || continue
-        process_matches "$pid" "$expected" ||
-            die "TCP port $port is owned by PID $pid, not a stale $label process; refusing to signal it"
+        if ! process_matches "$pid" "$expected"; then
+            # Report the executable, never argv: node arguments may contain keys.
+            local executable
+            executable="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+            die "TCP port $port is owned by PID $pid (${executable:-unknown executable}), not a stale $label process; refusing to signal it"
+        fi
         echo "stopping stale $label listener on TCP port $port (PID $pid)" >&2
         kill -INT "$pid" 2>/dev/null || true
     done
@@ -567,6 +571,11 @@ provision_up() {
     stop_stale_listener 8545 "$TEMPO_BIN" "Tempo validator A"
     stop_stale_listener 8645 "$TEMPO_BIN" "Tempo validator B"
     stop_stale_listener 8546 "$ZONE_BIN" "Zone"
+    # Metrics bind before RPC. A node interrupted during startup can keep only
+    # its metrics listener, so RPC-only cleanup misses it.
+    stop_stale_listener 9001 "$TEMPO_BIN" "Tempo validator A metrics"
+    stop_stale_listener 9101 "$TEMPO_BIN" "Tempo validator B metrics"
+    stop_stale_listener 9201 "$ZONE_BIN" "Zone metrics"
 
     local account_start="${ZONES_BENCH_ACCOUNT_START:-16}"
     local accounts="${ZONES_BENCH_ACCOUNTS:-100}"

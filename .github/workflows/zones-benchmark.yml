@@ -561,6 +561,11 @@ jobs:
           set -euo pipefail
           contrib/bench/provision-topology.sh cleanup "$ZONES_BENCH_PID_FILE"
 
+      - name: Inspect benchmark listeners
+        run: |
+          # Socket owners and executable names only; never log process argv.
+          ss -ltnp '( sport = :8545 or sport = :8645 or sport = :8546 or sport = :9001 or sport = :9101 or sport = :9201 )'
+
       - name: Configure ClickHouse scenario reporting
         env:
           CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
