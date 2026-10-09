@@ -1014,7 +1014,7 @@ The RPC server rejects authorization tokens where:
 - `expiresAt <= now`.
 - `issuedAt > now + 60`.
 - The signature is malformed or does not verify.
-- For Keychain signatures: the signing key is not authorized, revoked, or expired in the zone's `AccountKeychain`.
+- For Keychain signatures: the signature is a legacy Keychain V1 signature (prefix `0x03`), or the signing key is not authorized, revoked, or expired in the zone's `AccountKeychain`.
 
 Requests without an authorization token receive HTTP `401`. Requests with an invalid or expired token receive HTTP `403`.
 
@@ -1027,10 +1027,11 @@ Authorization token signatures follow the same format as Tempo transaction signa
 | secp256k1 | 65 bytes, no prefix | Standard `ecrecover` |
 | P256 | Prefix `0x01`, 130 bytes | Public key embedded in signature |
 | WebAuthn | Prefix `0x02`, variable length | P256 key via WebAuthn assertion |
-| Keychain V1 | Prefix `0x03` | Wraps inner sig + `user_address`, authenticates as root account |
-| Keychain V2 | Prefix `0x04` | Same as V1 but binds `user_address` into signing hash |
+| Keychain V2 | Prefix `0x04` | Wraps inner sig + `user_address`, binds `user_address` into the signing hash, authenticates as root account |
 
 Keychain keys allow session keys and scoped access keys to authenticate to the RPC with the same permissions as the root account. The zone has its own independent `AccountKeychain` instance, not mirrored from Tempo. Users must register keychain keys on the zone directly.
+
+Legacy Keychain V1 signatures (prefix `0x03`) are rejected. V1 does not bind `user_address` into the signing hash, so a token signed by a key for one account could be re-wrapped for any other account that has authorized the same key. Keychain authorization tokens must use V2.
 
 ### Method Access Control
 

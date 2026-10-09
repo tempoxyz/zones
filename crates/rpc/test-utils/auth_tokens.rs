@@ -80,6 +80,10 @@ pub(crate) fn sign_webauthn_signature(
     )))
 }
 
+/// Signs a keychain token digest with `version` `0x04` (V2, address-bound).
+///
+/// `0x03` builds a legacy V1 signature, which the RPC server rejects; use it only in rejection
+/// tests.
 pub(crate) fn sign_keychain_signature(
     digest: B256,
     signing_key: &P256SigningKey,
@@ -110,6 +114,23 @@ pub(crate) fn sign_keychain_signature(
     };
 
     Ok((signature, key_id))
+}
+
+/// Re-wraps a keychain signature for a different `user_address`, keeping the inner signature and
+/// version unchanged.
+pub(crate) fn rewrap_keychain_signature(
+    signature: &TempoSignature,
+    user_address: Address,
+) -> TempoSignature {
+    let TempoSignature::Keychain(keychain) = signature else {
+        panic!("keychain signature expected");
+    };
+    let inner = keychain.signature.clone();
+    TempoSignature::Keychain(if keychain.is_legacy() {
+        KeychainSignature::new_v1(user_address, inner)
+    } else {
+        KeychainSignature::new(user_address, inner)
+    })
 }
 
 fn p256_public_key(signing_key: &P256SigningKey) -> (B256, B256) {

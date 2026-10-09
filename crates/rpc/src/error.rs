@@ -34,6 +34,8 @@ pub enum AuthError {
     ExpiredKeychainKey,
     #[error("keychain signature type mismatch")]
     KeychainSignatureTypeMismatch,
+    #[error("legacy keychain signature (v1) not supported")]
+    LegacyKeychainSignature,
 }
 
 /// Authentication failures split into invalid caller credentials vs server-side failures.

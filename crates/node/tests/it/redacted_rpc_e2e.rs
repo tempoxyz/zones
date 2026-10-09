@@ -369,9 +369,10 @@ async fn test_invalid_non_secp_auth_tokens_are_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Authorized P256 keychain tokens authenticate as the root account in both V1 and V2 encodings.
+/// Authorized P256 keychain V2 tokens authenticate as the root account, while legacy V1 tokens
+/// and V2 tokens re-wrapped for another account that authorized the same key are rejected.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_keychain_auth_tokens_v1_and_v2() -> eyre::Result<()> {
+async fn test_keychain_auth_tokens_v2_only() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let mut ctx = start_zone_with_redacted_rpc().await?;
@@ -386,37 +387,79 @@ async fn test_keychain_auth_tokens_v1_and_v2() -> eyre::Result<()> {
     )
     .await?;
 
-    let (_, key_id) = ctx.keychain_p256_token(root_signer.address(), &access_signer, 0x04);
-    ctx.authorize_keychain_key(
-        &root_signer,
-        key_id,
-        KeyInfoSignatureType::P256,
-        now_secs() + 300,
+    let other_signer = PrivateKeySigner::random();
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000003333"),
+        other_signer.address(),
+        1_000_000,
     )
     .await?;
 
+    // Both accounts authorize the same access key.
+    let (v2_token, key_id) = ctx.keychain_p256_token(root_signer.address(), &access_signer, 0x04);
+    for signer in [&root_signer, &other_signer] {
+        ctx.authorize_keychain_key(signer, key_id, KeyInfoSignatureType::P256, now_secs() + 300)
+            .await?;
+    }
+
+    let eth_call_as = |account: Address| {
+        serde_json::json!([
+            {
+                "from": format!("{account:#x}"),
+                "to": format!("{account:#x}"),
+                "input": "0x"
+            },
+            "latest"
+        ])
+    };
+
+    let resp = ctx
+        .call("eth_call", eth_call_as(root_signer.address()), &v2_token)
+        .await?;
+    assert_eq!(
+        resp["result"].as_str().unwrap(),
+        "0x",
+        "keychain V2 auth should allow calls from the root account",
+    );
+
+    // Legacy V1 tokens are rejected, including when the key is authorized.
+    let (v1_token, _) = ctx.keychain_p256_token(root_signer.address(), &access_signer, 0x03);
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &v1_token)
+        .await?;
+    assert_eq!(status.as_u16(), 403, "V1 keychain token should return 403");
+
+    // A token signed for one account cannot be re-wrapped to authenticate as another account that
+    // authorized the same key, in either version.
     for version in [0x03, 0x04] {
-        let (token, _) = ctx.keychain_p256_token(root_signer.address(), &access_signer, version);
-        let resp = ctx
-            .call(
-                "eth_call",
-                serde_json::json!([
-                    {
-                        "from": format!("{:#x}", root_signer.address()),
-                        "to": format!("{:#x}", root_signer.address()),
-                        "input": "0x"
-                    },
-                    "latest"
-                ]),
-                &token,
-            )
+        let rewrapped = ctx.rewrapped_keychain_p256_token(
+            root_signer.address(),
+            other_signer.address(),
+            &access_signer,
+            version,
+        );
+        let (status, _) = ctx
+            .call_raw("eth_blockNumber", serde_json::json!([]), &rewrapped)
             .await?;
         assert_eq!(
-            resp["result"].as_str().unwrap(),
-            "0x",
-            "keychain auth should allow calls from the root account",
+            status.as_u16(),
+            403,
+            "re-wrapped keychain V{} token should return 403",
+            version - 2,
         );
     }
+
+    // The other account still authenticates with a token signed for itself.
+    let (other_token, _) = ctx.keychain_p256_token(other_signer.address(), &access_signer, 0x04);
+    let resp = ctx
+        .call(
+            "eth_call",
+            eth_call_as(other_signer.address()),
+            &other_token,
+        )
+        .await?;
+    assert_eq!(resp["result"].as_str().unwrap(), "0x");
 
     Ok(())
 }
