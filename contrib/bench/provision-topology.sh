@@ -361,9 +361,10 @@ verify_neobank_fixture_topology() {
     local expected_swap_mechanism="$5"
     local expected_private_asset="$6"
     local field address code vault engine earn_factory earn_vault earn_fees earn_router
-    local contribution_controller earn_share dlusd pathusd private_asset bridge_wallet zone_id
-    local swap_mechanism route_swapper route_override controller reserve_ledger
-    local observed observed_asset observed_owner observed_engine observed_vault transaction_limit
+    local contribution_controller earn_share pathusd private_asset bridge_wallet zone_id
+    local swap_mechanism route_swapper route_override par_pool customer_id pool_liquidity
+    local observed observed_asset observed_owner observed_engine observed_vault
+    local -a pool_status
     local observed_earn_vault observed_earn_share observed_earn_fees
     local earn_vault_implementation earn_fees_implementation
     local tip20_factory="0x20FC000000000000000000000000000000000000"
@@ -377,7 +378,6 @@ verify_neobank_fixture_topology() {
     contribution_controller="$(jq -er '.contributionController' "$metadata")"
     earn_share="$(jq -er '.earnShare' "$metadata")"
     bridge_wallet="$(jq -er '.bridgeWallet' "$metadata")"
-    dlusd="$(jq -er '.dlusd' "$metadata")"
     pathusd="$(jq -er '.pathusd' "$metadata")"
     private_asset="$(jq -er '.privateAsset' "$metadata")"
     zone_id="$(jq -er '.zoneId' "$metadata")"
@@ -480,44 +480,38 @@ verify_neobank_fixture_topology() {
 
     case "$swap_mechanism" in
         direct-swap)
-            controller="$(jq -er '.tokenAuthority' "$metadata")"
-            reserve_ledger="$(jq -er '.reserveLedger' "$metadata")"
-            for field in controller reserve_ledger; do
-                address="${!field}"
-                code="$(rpc "$l1_rpc" eth_getCode "[\"$address\",\"latest\"]")"
-                [[ "$code" != "0x" ]] || die "neobank $field fixture has no code at $address"
-            done
+            par_pool="$(jq -er '.parPool' "$metadata")"
+            customer_id="$(jq -er '.customerId' "$metadata")"
+            code="$(rpc "$l1_rpc" eth_getCode "[\"$par_pool\",\"latest\"]")"
+            [[ "$code" != "0x" ]] || die "neobank par pool fixture has no code at $par_pool"
             [[ "$route_override" == "true" ]] ||
                 die "current Earn requires its immutable single-Zone router route"
             [[ "${route_swapper,,}" == "${earn_router,,}" ]] ||
                 die "Earn router metadata addresses differ"
 
-            observed="$(cast call "$earn_router" 'tokenAuthority()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${controller,,}" ]] ||
-                die "single-Zone Earn router token authority does not match fixture metadata"
-            observed="$(cast call "$earn_router" 'reserveToken()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${reserve_ledger,,}" ]] ||
-                die "single-Zone Earn router reserve token does not match fixture metadata"
-            observed="$(cast call "$controller" 'RESERVE_LEDGER_TOKEN()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${reserve_ledger,,}" ]] ||
-                die "token authority reserve token does not match fixture metadata"
+            observed="$(cast call "$earn_router" 'pool()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${par_pool,,}" ]] ||
+                die "single-Zone Earn router pool does not match fixture metadata"
+            observed="$(cast call "$earn_router" 'customerId()(bytes32)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${customer_id,,}" ]] ||
+                die "single-Zone Earn router customer ID does not match fixture metadata"
+            observed="$(cast call "$par_pool" 'baseToken()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${private_asset,,}" ]] ||
+                die "par pool base token does not match the private asset"
+            observed="$(cast call "$par_pool" 'quoteToken()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${pathusd,,}" ]] ||
+                die "par pool quote token does not match pathUSD"
 
-            transaction_limit="$(jq -er '.liquidity' "$metadata")"
-            observed="$(cast call "$earn_router" 'transactionLimit()(uint256)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "$observed" == "$transaction_limit" ]] ||
-                die "single-Zone Earn router transaction limit does not match fixture liquidity"
-            for address in "$dlusd" "$pathusd"; do
-                observed="$(cast call "$controller" 'getStablecoinTxnMintLimit(address)(uint256)' \
-                    "$address" --rpc-url "$l1_rpc" | awk '{print $1}')"
-                [[ "$observed" == "$transaction_limit" ]] ||
-                    die "token authority transaction limit does not match fixture liquidity"
-                observed="$(cast call "$controller" 'getReserveStore(address)(address)' \
-                    "$address" --rpc-url "$l1_rpc" | awk '{print $1}')"
-                [[ "${observed,,}" != "0x0000000000000000000000000000000000000000" ]] ||
-                    die "token authority reserve store was not created"
-                code="$(rpc "$l1_rpc" eth_getCode "[\"$observed\",\"latest\"]")"
-                [[ "$code" != "0x" ]] || die "token authority reserve store has no code at $observed"
-            done
+            # paused, admitted, atPar, depositLiquidity, redeemLiquidity
+            mapfile -t pool_status < <(cast call "$earn_router" \
+                'liquidityStatus()(bool,bool,bool,uint256,uint256)' --rpc-url "$l1_rpc" | awk '{print $1}')
+            (( ${#pool_status[@]} == 5 )) || die "failed reading single-Zone Earn router liquidity status"
+            [[ "${pool_status[0]}" == "false" ]] || die "par pool is paused"
+            [[ "${pool_status[1]}" == "true" ]] || die "par pool does not admit the single-Zone Earn router"
+            [[ "${pool_status[2]}" == "true" ]] || die "par pool oracle is not at par"
+            pool_liquidity="$(jq -er '.liquidity' "$metadata")"
+            [[ "${pool_status[3]}" == "$pool_liquidity" && "${pool_status[4]}" == "$pool_liquidity" ]] ||
+                die "par pool inventory does not match fixture liquidity"
             ;;
         *)
             die "unsupported fixture swap mechanism in metadata: $swap_mechanism"
