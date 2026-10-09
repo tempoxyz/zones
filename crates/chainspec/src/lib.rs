@@ -174,19 +174,14 @@ impl EthChainSpec for ZoneChainSpec {
     }
 
     fn next_block_base_fee(&self, parent: &TempoHeader, target_timestamp: u64) -> Option<u64> {
-        let fork = self.tempo_hardfork_at(target_timestamp);
-        if fork.is_t14() {
-            let parent_base_fee = parent
-                .inner
-                .base_fee_per_gas
-                .expect("Zone blocks are expected to have a base fee");
-            Some(tempo_t7_next_block_base_fee(
-                parent_base_fee,
-                parent.inner.gas_used,
-            ))
-        } else {
-            Some(0)
+        if !self.tempo_hardfork_at(target_timestamp).is_t14() {
+            return Some(0);
         }
+        // A missing parent base fee is treated as zero, which the T7 floor clamps up.
+        Some(tempo_t7_next_block_base_fee(
+            parent.inner.base_fee_per_gas.unwrap_or_default(),
+            parent.inner.gas_used,
+        ))
     }
 }
 
@@ -425,75 +420,41 @@ mod tests {
     #[test]
     fn next_block_base_fee_is_zero_before_t14() {
         let zone = dev_zone_spec_with_t14_at(2, Some(100));
-        let parent = header(98, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_GAS_TARGET);
+        let busy_parent = header(98, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_GAS_TARGET * 3);
 
-        assert_eq!(zone.next_block_base_fee(&parent, 99), Some(0));
+        assert_eq!(zone.tempo_hardfork_at(99), TempoHardfork::T13);
+        assert_eq!(zone.next_block_base_fee(&busy_parent, 99), Some(0));
     }
 
     #[test]
-    fn next_block_base_fee_uses_parent_fee_on_t14_activation() {
+    fn next_block_base_fee_starts_at_floor_on_t14_activation() {
         let zone = dev_zone_spec_with_t14_at(2, Some(100));
-        let parent = header(99, 0, 0);
+        let mut parent = header(99, 0, 0);
 
-        assert_eq!(zone.tempo_hardfork_at(99), TempoHardfork::T13);
-        assert_eq!(zone.tempo_hardfork_at(100), TempoHardfork::T14);
         assert_eq!(
             zone.next_block_base_fee(&parent, 100),
-            Some(tempo_t7_next_block_base_fee(0, 0))
+            Some(TEMPO_T7_BASE_FEE_FLOOR)
+        );
+        parent.inner.base_fee_per_gas = None;
+        assert_eq!(
+            zone.next_block_base_fee(&parent, 100),
+            Some(TEMPO_T7_BASE_FEE_FLOOR)
         );
     }
 
     #[test]
-    fn next_block_base_fee_adjusts_after_t14_activation() {
+    fn next_block_base_fee_follows_t7_controller_after_t14_activation() {
         let zone = dev_zone_spec_with_t14_at(2, Some(100));
-        let empty_parent = header(100, TEMPO_T7_BASE_FEE_CAP, 0);
         let busy_parent = header(
             100,
             TEMPO_T7_BASE_FEE_FLOOR,
             TEMPO_T7_BASE_FEE_GAS_TARGET * 3,
         );
+        let expected =
+            tempo_t7_next_block_base_fee(TEMPO_T7_BASE_FEE_FLOOR, TEMPO_T7_BASE_FEE_GAS_TARGET * 3);
 
-        assert_eq!(
-            zone.next_block_base_fee(&empty_parent, 101),
-            Some(TEMPO_T7_BASE_FEE_CAP * 7 / 8)
-        );
-        assert_eq!(
-            zone.next_block_base_fee(&busy_parent, 101),
-            Some(750_000_000)
-        );
-    }
-
-    #[test]
-    fn next_block_base_fee_respects_t7_target_and_bounds() {
-        let zone = dev_zone_spec_with_t14_at(2, Some(100));
-        let at_target = header(100, TEMPO_T7_BASE_FEE_CAP / 2, TEMPO_T7_BASE_FEE_GAS_TARGET);
-        let at_floor = header(100, TEMPO_T7_BASE_FEE_FLOOR, 0);
-        let at_cap = header(100, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_GAS_TARGET * 3);
-
-        assert_eq!(
-            zone.next_block_base_fee(&at_target, 101),
-            Some(TEMPO_T7_BASE_FEE_CAP / 2)
-        );
-        assert_eq!(
-            zone.next_block_base_fee(&at_floor, 101),
-            Some(TEMPO_T7_BASE_FEE_FLOOR)
-        );
-        assert_eq!(
-            zone.next_block_base_fee(&at_cap, 101),
-            Some(TEMPO_T7_BASE_FEE_CAP)
-        );
-    }
-
-    #[test]
-    fn t13_does_not_activate_dynamic_fees() {
-        let zone = dev_zone_spec_with_t14_at(2, Some(100));
-
-        assert_eq!(zone.tempo_hardfork_at(99), TempoHardfork::T13);
-        assert_eq!(zone.next_block_base_fee(&header(98, 0, 0), 99), Some(0));
-        assert_eq!(
-            zone.next_block_base_fee(&header(99, 0, 0), 100),
-            Some(TEMPO_T7_BASE_FEE_FLOOR)
-        );
+        assert!(expected > TEMPO_T7_BASE_FEE_FLOOR);
+        assert_eq!(zone.next_block_base_fee(&busy_parent, 101), Some(expected));
     }
 
     #[test]

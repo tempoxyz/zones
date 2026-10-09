@@ -165,8 +165,8 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
 }
 
 /// From T14 every fee-paying transaction collects a fee, which requires the sequencer's fee
-/// recipient to be an authorized recipient of the fee token. The fee-recipient check reports the
-/// blocking token, and the transaction succeeds once the policy admits the sequencer.
+/// recipient to be an authorized recipient of the fee token. The transaction is rejected until the
+/// policy admits the sequencer.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_policy_gated_fee_token_requires_authorized_fee_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -207,25 +207,6 @@ async fn test_policy_gated_fee_token_requires_authorized_fee_recipient() -> eyre
         )],
     )?;
 
-    assert_eq!(
-        within(
-            "check unauthorized sequencer",
-            zone.unauthorized_fee_tokens(vec![PATH_USD_ADDRESS], sequencer),
-        )
-        .await??,
-        vec![PATH_USD_ADDRESS],
-        "the check must report a fee token that rejects the sequencer"
-    );
-    assert!(
-        within(
-            "check whitelisted recipient",
-            zone.unauthorized_fee_tokens(vec![PATH_USD_ADDRESS], alice),
-        )
-        .await??
-        .is_empty(),
-        "the check must accept a whitelisted recipient"
-    );
-
     let alice_provider = ProviderBuilder::new()
         .wallet(alice_signer)
         .connect_http(zone.http_url().clone());
@@ -245,7 +226,7 @@ async fn test_policy_gated_fee_token_requires_authorized_fee_recipient() -> eyre
         "unexpected pool rejection: {error}"
     );
 
-    // Admitting the sequencer at the next anchor clears the check and the transaction.
+    // Admitting the sequencer at the next anchor clears the transaction.
     let next_anchor = anchor + 1;
     seed_raw_tip403_token_policy(
         &mut zone.l1_state_cache().lock(),
@@ -266,15 +247,6 @@ async fn test_policy_gated_fee_token_requires_authorized_fee_recipient() -> eyre
     zone.wait_for_tempo_block_number(next_anchor, DEFAULT_TIMEOUT)
         .await?;
 
-    assert!(
-        within(
-            "check whitelisted sequencer",
-            zone.unauthorized_fee_tokens(vec![PATH_USD_ADDRESS], sequencer),
-        )
-        .await??
-        .is_empty(),
-        "the check must accept the sequencer once whitelisted"
-    );
     // Pin the nonce: the rejected send must not have consumed it.
     let nonce = alice_provider.get_transaction_count(alice).await?;
     let pending = within(

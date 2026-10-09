@@ -5,7 +5,6 @@
 
 use crate::{
     ZoneEngine,
-    fee_recipient::FeeRecipientCheck,
     follower::PeerTipRegistry,
     replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
@@ -979,10 +978,6 @@ where
                 sequencer,
                 peer_tips,
                 status: role_status,
-                fee_recipient_check: FeeRecipientCheck::new(
-                    handle.eth_handlers().api.clone(),
-                    self.enabled_tokens.clone(),
-                ),
             };
             task_executor
                 .spawn_critical_task("zone-role-controller", run_role_controller(context, sinks));
@@ -1019,11 +1014,6 @@ where
                 proof_collector.clone(),
             );
             task_executor.spawn_critical_task("zone-engine", engine.run());
-            FeeRecipientCheck::new(
-                handle.eth_handlers().api.clone(),
-                self.enabled_tokens.clone(),
-            )
-            .spawn(sequencer_addr);
 
             Self::launch_sequencer_tasks(
                 config,

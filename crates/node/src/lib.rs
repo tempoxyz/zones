@@ -10,7 +10,6 @@ use eyre as _;
 pub mod cli;
 pub mod dev;
 pub mod engine;
-pub mod fee_recipient;
 mod follower;
 pub mod genesis;
 pub mod node;
