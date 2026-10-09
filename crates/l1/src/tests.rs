@@ -817,6 +817,56 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
 }
 
 #[tokio::test]
+async fn test_follow_finalized_reconciles_finality_after_the_last_head_notification() {
+    let subscriber = test_subscriber(9);
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    // Both startup and the newHeads wakeup see the old finalized tag. Block 10
+    // must not be fetched until a later reconciliation observes it as finalized.
+    for _ in 0..4 {
+        asserter.push_success(&Some(header_response(make_test_header(9))));
+    }
+    let header_10 = make_test_header(10);
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    push_header_and_empty_receipts(&asserter, header_10.clone());
+    asserter.push_success(&Some(header_response(header_10)));
+
+    // Keep the notification stream open but send no further heads.
+    let heads = futures::stream::iter([()]).chain(futures::stream::pending());
+    let follow = subscriber.follow_finalized(&l1_provider, Box::pin(heads));
+    tokio::pin!(follow);
+    let ingested = async {
+        loop {
+            subscriber.deposit_queue.notified().await;
+            if subscriber
+                .block_tracker
+                .latest()
+                .is_some_and(|tip| tip.number == 10)
+            {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        result = &mut follow => panic!("open notification stream unexpectedly ended: {result:?}"),
+        result = tokio::time::timeout(Duration::from_secs(2), ingested) => {
+            result.expect("finalized block should be ingested without another head notification");
+        }
+    }
+
+    let blocks = subscriber.deposit_queue.drain();
+    assert_eq!(
+        blocks.len(),
+        1,
+        "reconciliation must not replay the persisted checkpoint"
+    );
+    assert_eq!(blocks[0].header.number(), 10);
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
 async fn test_subscribe_block_headers_falls_back_to_http_block_filter() {
     let subscriber = test_subscriber(10);
     let asserter = Asserter::new();

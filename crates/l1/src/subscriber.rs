@@ -549,6 +549,10 @@ impl L1BlockTracker {
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+// newHeads may arrive before the finalized tag advances, with no further notification
+// until the next block. Reconcile independently so finalization does not wait for it.
+const FINALIZED_RECONCILIATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
 type L1ProcessedEvents = (
     L1PortalEvents,
     HashSet<Address>,
@@ -849,7 +853,7 @@ where
         }
     }
 
-    /// Follow finalized L1 using transport-specific head notifications as wakeups.
+    /// Follow finalized L1 using head notifications and periodic reconciliation as wakeups.
     ///
     /// Header contents are intentionally ignored. Canonical block selection is
     /// always based on the `finalized` tag read by [`Self::sync_to_finalized`].
@@ -864,7 +868,21 @@ where
         // up remains queued in the stream.
         next_block = self.sync_to_finalized(l1_provider, next_block).await?;
 
-        while stream.next().await.is_some() {
+        let mut reconciliation = tokio::time::interval_at(
+            tokio::time::Instant::now() + FINALIZED_RECONCILIATION_INTERVAL,
+            FINALIZED_RECONCILIATION_INTERVAL,
+        );
+        reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                notification = stream.next() => {
+                    if notification.is_none() {
+                        break;
+                    }
+                }
+                _ = reconciliation.tick() => {}
+            }
             next_block = self.sync_to_finalized(l1_provider, next_block).await?;
         }
 
