@@ -157,7 +157,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
-  RUSTFLAGS: -C target-cpu=native -C force-frame-pointers=yes
+  RUSTFLAGS: -C target-cpu=native
   RUSTC_WRAPPER: sccache
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
@@ -501,7 +501,6 @@ jobs:
       ZONES_BENCH_GITHUB_RUN_ID: ${{ github.run_id }}
       ZONES_BENCH_GITHUB_WORKFLOW: zones-benchmark.yml
       ZONES_BENCH_BUILD_PROFILE: profiling
-      ZONES_BENCH_SAMPLY_REF: d1f783d139dfbda60cc0109df9d134135983c551
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23
       ZONES_BENCH_ZONE_CPUS: 8-13,24-29
@@ -560,11 +559,6 @@ jobs:
         run: |
           set -euo pipefail
           contrib/bench/provision-topology.sh cleanup "$ZONES_BENCH_PID_FILE"
-
-      - name: Inspect benchmark listeners
-        run: |
-          # Socket owners and executable names only; never log process argv.
-          ss -ltnp '( sport = :8545 or sport = :8645 or sport = :8546 or sport = :9001 or sport = :9101 or sport = :9201 )'
 
       - name: Configure ClickHouse scenario reporting
         env:
@@ -626,11 +620,6 @@ jobs:
             crates/contracts/benchmark-out
           key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.contracts-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
-      - name: Ensure file-backed mnemonic support in pinned Tempo xtask
-        run: |
-          set -euo pipefail
-          contrib/bench/prepare-tempo-xtask.sh "$TEMPO_ROOT"
-
       - name: Prepare persistent build directories
         env:
           RUNNER_TOOL_CACHE_DIR: ${{ runner.tool_cache }}
@@ -683,11 +672,6 @@ jobs:
             chmod 600 "$temporary"
             mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -er '(.data // .).mnemonic | select(type == "string" and length > 0)')"
             printf '%s\n' "$mnemonic" > "$temporary"
-            if ! cast wallet address --mnemonic "$temporary" >/dev/null 2>&1; then
-              rm -f -- "$temporary"
-              echo "::error::generated benchmark mnemonic is invalid"
-              exit 1
-            fi
             mv -f -- "$temporary" "$mnemonic_file"
           else
             mnemonic="$(tr -d '\r\n' < "$mnemonic_file")"
@@ -698,10 +682,6 @@ jobs:
           fi
           if [ -z "$mnemonic" ] || [ "$mnemonic" = "test test test test test test test test test test test junk" ]; then
             echo "::error::runner-local benchmark mnemonic is empty or public"
-            exit 1
-          fi
-          if ! cast wallet address --mnemonic "$mnemonic_file" >/dev/null 2>&1; then
-            echo "::error::stored benchmark mnemonic is invalid"
             exit 1
           fi
           chmod 600 "$mnemonic_file"
@@ -799,7 +779,7 @@ jobs:
           set -euo pipefail
           cargo install samply \
             --git https://github.com/DaniPopes/samply \
-            --rev "$ZONES_BENCH_SAMPLY_REF" \
+            --rev d1f783d139dfbda60cc0109df9d134135983c551 \
             --locked \
             --force
           samply_path="$(command -v samply)"

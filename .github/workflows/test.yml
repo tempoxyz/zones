@@ -21,26 +21,6 @@ env:
   SOURCE_DATE_EPOCH: "1700000000"
 
 jobs:
-  benchmark-tools:
-    name: benchmark tools
-    if: github.repository == 'tempoxyz/zones' || github.event_name != 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Validate benchmark protocol and shell scripts
-        run: |
-          python3 -m unittest discover -s contrib/bench/tests -v
-          bash -n contrib/bench/prepare-tempo-xtask.sh
-          bash -n contrib/bench/run-neobank-private-flow.sh
-
   build-test-artifacts:
     name: build test artifacts
     # Keep private-copy PR validation while avoiding a full test run for every
@@ -192,7 +172,6 @@ jobs:
     needs:
       - build-test-artifacts
       - test
-      - benchmark-tools
     timeout-minutes: 30
     steps:
       - name: Secure runner

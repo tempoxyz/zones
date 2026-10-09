@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -21,19 +20,17 @@ def validate_range(first, last, output, generate):
         while cursor <= last:
             witness.unlink(missing_ok=True)
             generate(cursor, witness)
-            raw = witness.read_bytes()
-            blocks = json.loads(raw)["zoneBlocks"]
+            blocks = json.loads(witness.read_text())["zoneBlocks"]
             numbers = [block["number"] for block in blocks]
             if (not numbers or any(type(n) is not int for n in numbers)
                     or numbers != list(range(numbers[0], numbers[-1] + 1))
                     or not numbers[0] <= cursor <= numbers[-1]
                     or (batches and numbers[0] != cursor)):
                 raise ValueError(f"validated batch does not cover the next block {cursor} contiguously")
-            batches.append({"from_block": numbers[0], "to_block": numbers[-1],
-                            "witness_sha256": hashlib.sha256(raw).hexdigest()})
+            batches.append({"from_block": numbers[0], "to_block": numbers[-1]})
             print(f"Validated submitted batch {numbers[0]}..{numbers[-1]}", flush=True)
             cursor = numbers[-1] + 1
-    result = {"version": 1, "status": "complete", "from_block": first, "to_block": last,
+    result = {"status": "complete", "from_block": first, "to_block": last,
               "batches": batches}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n")
