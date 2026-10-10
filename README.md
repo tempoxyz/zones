@@ -10,8 +10,9 @@
 # Zones
 
 > [!NOTE]
-> This repository is actively under development and subject to rapid iteration.
-> APIs, interfaces, and behavior may change without notice. Not recommended for production use yet.
+> Zones has moved to the [Tempo monorepo](https://github.com/tempoxyz/tempo).
+> This repository is archived and retained for historical reference. For current
+> source code, issues, and pull requests, use [tempoxyz/tempo](https://github.com/tempoxyz/tempo).
 
 Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo) *(currently available in testnet only),* with native support for confidential balances and transactions. Zones inherit compliance via TIP403 policies from Tempo and support interoperability with Tempo for moving assets in and out of Zones.
 
