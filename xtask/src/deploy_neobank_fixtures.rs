@@ -140,19 +140,6 @@ const ROUTER_CUSTOMER_ID: B256 = B256::with_last_byte(0xBE);
 // Tempo's transaction pool rejects AA transactions containing more than 32 calls.
 const MAX_PORTAL_ROLE_CALLS_PER_TX: usize = 32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum SwapMechanism {
-    #[default]
-    DirectSwap,
-}
-
-impl SwapMechanism {
-    fn as_str(self) -> &'static str {
-        "direct-swap"
-    }
-}
-
 #[derive(Debug, clap::Parser)]
 pub(crate) struct DeployNeobankFixtures {
     /// Tempo L1 HTTP RPC URL. This command never defaults to a public endpoint.
@@ -194,15 +181,6 @@ pub(crate) struct DeployNeobankFixtures {
     /// Untimed per-side inventory seeded into the router's par pool.
     #[arg(long, default_value_t = 10_000_000_000_u128)]
     liquidity: u128,
-
-    /// L1 swap implementation exercised by the EarnRouter.
-    #[arg(
-        long,
-        env = "ZONES_BENCH_SWAP_MECHANISM",
-        value_enum,
-        default_value_t = SwapMechanism::DirectSwap
-    )]
-    swap_mechanism: SwapMechanism,
 }
 
 #[derive(Serialize)]
@@ -216,7 +194,6 @@ struct FixtureMetadata {
     private_asset: String,
     earn_token: String,
     earn_share: String,
-    swap_mechanism: SwapMechanism,
     route_swapper: Option<String>,
     route_override: bool,
     par_pool: String,
@@ -521,7 +498,6 @@ impl DeployNeobankFixtures {
             private_asset: self.private_asset.to_string(),
             earn_token: earn_share.to_string(),
             earn_share: earn_share.to_string(),
-            swap_mechanism: self.swap_mechanism,
             route_swapper: Some(earn_router.to_string()),
             route_override: true,
             par_pool: par_pool.to_string(),
@@ -549,7 +525,6 @@ impl DeployNeobankFixtures {
         fs::write(&self.output, serde_json::to_string_pretty(&metadata)?)
             .wrap_err_with(|| format!("failed writing {}", self.output.display()))?;
         println!("Private-Zone benchmark fixtures deployed");
-        println!("  Swap mechanism: {}", self.swap_mechanism.as_str());
         println!("  Earn router:             {earn_router}");
         println!("  Par pool:                {par_pool}");
         println!("  Earn vault:              {earn_vault}");
