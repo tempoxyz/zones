@@ -2050,7 +2050,7 @@ mod tests {
             } else {
                 assert!(matches!(
                     result,
-                    Err(RpcError::ErrorResp(error)) if error.code == code && error.message == message
+                    Err(RpcError::ErrorResp(error)) if error.code == i64::from(code) && error.message == message
                 ));
             }
             for request in requests.lock().unwrap().iter() {
