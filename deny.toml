@@ -17,6 +17,9 @@ ignore = [
   # https://rustsec.org/advisories/RUSTSEC-2021-0127 serde_cbor is unmaintained
   # and is pulled in transitively by aws-nitro-enclaves-nsm-api with no safe upgrade available.
   "RUSTSEC-2021-0127",
+  # https://rustsec.org/advisories/RUSTSEC-2024-0449 unsafe-libyaml is unmaintained
+  # and is pulled in by serde_yaml, which only tempo-xtask uses to parse benchmark scenarios.
+  "RUSTSEC-2024-0449",
 ]
 
 # This section is considered when running `cargo deny check bans`.
