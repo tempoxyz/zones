@@ -179,7 +179,7 @@ fn from_zone_actions<'a>(actions: impl Iterator<Item = &'a L2BridgeAction>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, B256};
 
     fn zone_effects(transfers: &[TokenTransfer], actions: &[L2BridgeAction]) -> Vec<Effect> {
         let mut effects = from_transfers(transfers.iter().copied());
@@ -270,6 +270,7 @@ mod tests {
             .unwrap();
         let enqueued = L1PortalEvent::WithdrawalBounceBack { token, amount: 10 };
         let failed = L1PortalEvent::WithdrawalProcessed {
+            sender_tag: B256::ZERO,
             token,
             amount: 10,
             callback_success: false,
@@ -325,6 +326,7 @@ mod tests {
             .unwrap();
         let enqueued = L1PortalEvent::WithdrawalBounceBack { token, amount: 10 };
         let failed = L1PortalEvent::WithdrawalProcessed {
+            sender_tag: B256::ZERO,
             token,
             amount: 10,
             callback_success: false,

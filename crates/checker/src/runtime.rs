@@ -9,11 +9,12 @@ use alloy_rpc_client::{ConnectionConfig, RpcClient, WebSocketConfig};
 use futures::{StreamExt as _, TryStreamExt as _, future};
 use reth_chainspec::ChainSpecProvider;
 use reth_exex::{ExExContext, ExExHead, ExExNotification};
-use reth_node_api::{BlockBody as _, FullNodeComponents, NodePrimitives};
+use reth_node_api::{FullNodeComponents, NodePrimitives, NodeTypes};
 use reth_primitives_traits::RecoveredBlock;
 use reth_storage_api::{BlockHashReader as _, BlockNumReader, StateProviderFactory};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoHardforks;
+use tempo_primitives::{TempoPrimitives, TempoReceipt};
 
 use crate::{
     AttemptError, CheckerConfig,
@@ -21,6 +22,7 @@ use crate::{
     bootstrap,
     l1::{L1ReadError, classify_rpc_error, collect_l1_range_at, portal_balances},
     l2::{AccountingStateError, collect_l2_block_evidence, read_accounting_state},
+    latency::{self, LatencyTracker},
     persistence::{AppliedStatus, BlockRef, CandidateTransition, Finding, Snapshot, Status, Store},
     telemetry::{self, CheckerMetrics},
 };
@@ -34,27 +36,15 @@ const MAX_STATE_ATTEMPTS: u32 = 30;
 const MAX_L1_ATTEMPTS: u32 = 10;
 const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
-/// `NodePrimitives` whose transaction and receipt types the checker can process.
-pub(crate) trait CheckedPrimitives: NodePrimitives {}
-
-impl<N> CheckedPrimitives for N
-where
-    N: NodePrimitives,
-    N::SignedTx: alloy_consensus::transaction::TxHashRef,
-    N::Receipt: alloy_consensus::TxReceipt<Log = alloy_primitives::Log>,
-{
-}
-
 /// Bootstrap or open durable state, recover from its verified tip, and follow notifications.
 pub(crate) async fn run<Node>(
     config: CheckerConfig,
     ctx: &mut ExExContext<Node>,
 ) -> eyre::Result<()>
 where
-    Node: FullNodeComponents,
+    Node: FullNodeComponents<Types: NodeTypes<Primitives = TempoPrimitives>>,
     Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory,
     <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
-    <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
     let metrics = CheckerMetrics::default();
     metrics.disabled.set(0.0);
@@ -102,10 +92,9 @@ async fn run_inner<Node>(
     metrics: &CheckerMetrics,
 ) -> eyre::Result<()>
 where
-    Node: FullNodeComponents,
+    Node: FullNodeComponents<Types: NodeTypes<Primitives = TempoPrimitives>>,
     Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory,
     <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
-    <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
     tracing::info!(target: "zone::checker", "checker started");
     let persisted_identity = config
@@ -148,6 +137,11 @@ where
     ctx.catch_up_notifications_with_head(ExExHead::new(snapshot.metadata.verified_zone.into()))?;
     ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
 
+    let mut context = VerificationContext {
+        config: &config,
+        metrics,
+        latency: LatencyTracker::default(),
+    };
     while let Some(notification) = ctx.notifications.try_next().await? {
         if !matches!(&notification, ExExNotification::ChainCommitted { .. }) {
             snapshot = store.reset(&checkpoint)?;
@@ -175,8 +169,7 @@ where
             &l1,
             &store,
             snapshot,
-            &config,
-            metrics,
+            &mut context,
         )
         .await
         {
@@ -289,9 +282,11 @@ enum BlockError {
     Disable(eyre::Report),
 }
 
+/// Verification inputs and state shared by every block of one checker run.
 struct VerificationContext<'a> {
     config: &'a CheckerConfig,
     metrics: &'a CheckerMetrics,
+    latency: LatencyTracker,
 }
 
 fn record_retry_attempt(
@@ -336,17 +331,15 @@ impl Backoff {
 }
 
 /// Verify one append-only notification's blocks.
-async fn process_notification<N, P>(
-    notification: &ExExNotification<N>,
+async fn process_notification<P>(
+    notification: &ExExNotification<TempoPrimitives>,
     provider: &P,
     l1: &DynProvider<TempoNetwork>,
     store: &Store,
     snapshot: Snapshot,
-    config: &CheckerConfig,
-    metrics: &CheckerMetrics,
+    context: &mut VerificationContext<'_>,
 ) -> Result<Box<Snapshot>, BlockError>
 where
-    N: CheckedPrimitives,
     P: BlockNumReader + ChainSpecProvider + StateProviderFactory,
     P::ChainSpec: TempoHardforks,
 {
@@ -359,13 +352,11 @@ where
             )));
         }
     };
-    let context = VerificationContext { config, metrics };
     for (block, receipts) in new.blocks_and_receipts() {
         if already_applied(&current, block.header().number(), block.hash())? {
             continue;
         }
-        current =
-            verify_block::<N, _>(provider, l1, store, current, &context, block, receipts).await?;
+        current = verify_block(provider, l1, store, current, context, block, receipts).await?;
     }
     Ok(Box::new(current))
 }
@@ -389,24 +380,23 @@ fn already_applied(
 
 /// Verify one Zone block's bridge accounting against Tempo history and Portal
 /// collateral, persisting the result on success.
-async fn verify_block<N, P>(
+async fn verify_block<P>(
     provider: &P,
     l1: &DynProvider<TempoNetwork>,
     store: &Store,
     prior: Snapshot,
-    context: &VerificationContext<'_>,
-    block: &RecoveredBlock<N::Block>,
-    receipts: &[N::Receipt],
+    context: &mut VerificationContext<'_>,
+    block: &RecoveredBlock<tempo_primitives::Block>,
+    receipts: &[TempoReceipt],
 ) -> Result<Snapshot, BlockError>
 where
-    N: CheckedPrimitives,
     P: BlockNumReader + ChainSpecProvider + StateProviderFactory,
     P::ChainSpec: TempoHardforks,
 {
-    let VerificationContext { config, metrics } = context;
+    let (config, metrics) = (context.config, context.metrics);
     let zone = BlockRef::from(block.num_hash());
     let fail = |error| BlockError::Finding { zone, error };
-    let l2 = collect_l2_block_evidence(block.body().transactions(), receipts, zone.into())
+    let l2 = collect_l2_block_evidence(&block.body().transactions, receipts, zone.into())
         .map_err(fail)?;
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
     let mut l1_backoff = Backoff::new();
@@ -510,6 +500,15 @@ where
         .apply(candidate)
         .map_err(|error| BlockError::Disable(error.into()))?;
     telemetry::log_verified_activity(&tempo_block, &l2, zone);
+    let zone_timestamp_millis = block.header().timestamp_millis();
+    let samples = context.latency.observe(
+        tempo_block.blocks(),
+        l2.bridge_actions(),
+        zone_timestamp_millis,
+    );
+    if latency::is_recent(zone_timestamp_millis) {
+        metrics.record_latencies(&samples);
+    }
     Ok(next)
 }
 
@@ -529,7 +528,9 @@ async fn collect_l1_range_with_retry(
     context: &VerificationContext<'_>,
     backoff: &mut Backoff,
 ) -> Result<crate::l1::L1BlockEvidence, BlockError> {
-    let VerificationContext { config, metrics } = context;
+    let VerificationContext {
+        config, metrics, ..
+    } = context;
     loop {
         match collect_l1_range_at(
             l1,

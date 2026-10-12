@@ -51,6 +51,8 @@ pub struct AuthenticatedPortalLogs {
     pub block: NumHash,
     /// Parent hash from the authenticated Tempo header.
     pub parent_hash: B256,
+    /// Timestamp in milliseconds from the authenticated Tempo header.
+    pub timestamp_millis: u64,
     /// Portal logs in canonical receipt and log order.
     pub logs: Vec<alloy_primitives::Log>,
 }
@@ -447,12 +449,14 @@ impl L1BlockTracker {
         &self,
         block: NumHash,
         parent_hash: B256,
+        timestamp_millis: u64,
         portal_events: L1PortalEvents,
         logs: Vec<alloy_primitives::Log>,
     ) -> eyre::Result<()> {
         let evidence = AuthenticatedPortalLogs {
             block,
             parent_hash,
+            timestamp_millis,
             logs,
         };
         self.record_observation(block, portal_events, Some(evidence))
@@ -895,7 +899,8 @@ where
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let anchor = sealed.num_hash();
-            let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
+            let portal_evidence =
+                portal_logs.map(|logs| (sealed.parent_hash(), sealed.timestamp_millis(), logs));
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.leadership_sink {
@@ -944,10 +949,11 @@ where
                 .wrap_err_with(|| {
                     format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
-            if let Some((parent_hash, logs)) = portal_evidence {
+            if let Some((parent_hash, timestamp_millis, logs)) = portal_evidence {
                 self.block_tracker.record_with_portal_evidence(
                     anchor,
                     parent_hash,
+                    timestamp_millis,
                     events.clone(),
                     logs,
                 )?;
