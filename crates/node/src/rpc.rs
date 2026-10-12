@@ -23,6 +23,7 @@ use alloy_rpc_types_eth::{
     state::{EvmOverrides, StateOverride},
 };
 use alloy_sol_types::SolCall;
+use alloy_transport::{RpcError, TransportError};
 use eyre::{OptionExt as _, WrapErr};
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
@@ -394,12 +395,7 @@ async fn collect_tempo_witness(
         .into_iter()
         .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
         .collect::<Vec<_>>();
-    let proofs = provider
-        .client()
-        .request::<_, Vec<EIP1186AccountProofResponse>>(
-            "eth_getMultiProof",
-            (targets, BlockId::number(tempo_block_number)),
-        )
+    let proofs = request_tempo_proofs(provider, &targets, tempo_block_number)
         .await
         .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {tempo_block_number}"))?;
 
@@ -672,6 +668,8 @@ where
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 const FILTER_OWNER_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
+const TEMPO_PROOF_MAX_ATTEMPTS: u32 = 5;
+const TEMPO_PROOF_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 fn filter_not_found_error() -> JsonRpcError {
     JsonRpcError::invalid_params("filter not found")
@@ -1604,9 +1602,48 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
         )
 }
 
+/// Retry throttled L1 proof reads without repeating Zone execution or changing the checkpoint.
+async fn request_tempo_proofs(
+    provider: &DynProvider<TempoNetwork>,
+    targets: &[(Address, Vec<B256>)],
+    tempo_block_number: u64,
+) -> Result<Vec<EIP1186AccountProofResponse>, TransportError> {
+    for attempt in 1..=TEMPO_PROOF_MAX_ATTEMPTS {
+        let result = provider
+            .client()
+            .request(
+                "eth_getMultiProof",
+                (targets, BlockId::number(tempo_block_number)),
+            )
+            .await;
+        if let Err(RpcError::ErrorResp(error)) = &result
+            && error.code == -32005
+            && error.message.contains("rate limited")
+            && attempt < TEMPO_PROOF_MAX_ATTEMPTS
+        {
+            let delay = TEMPO_PROOF_RETRY_DELAY * 2_u32.pow(attempt - 1);
+            tracing::warn!(
+                tempo_block_number,
+                attempt,
+                delay_ms = delay.as_millis(),
+                "Tempo proof request rate limited; retrying"
+            );
+            tokio::time::sleep(delay).await;
+        } else {
+            return result;
+        }
+    }
+    unreachable!("the final proof attempt returns its result")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Instant,
+    };
+
     use alloy_provider::ProviderBuilder;
 
     #[test]
@@ -1968,5 +2005,59 @@ mod tests {
         let stale_ids = stale_filter_owner_ids(Vec::new(), &HashSet::new());
 
         assert!(stale_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tempo_proof_requests_retry_only_throttling_with_a_bounded_budget() -> eyre::Result<()>
+    {
+        for (failures, code, message, expected_attempts) in [
+            (0, -32005, "rate limited, try again in 0ms", 1),
+            (2, -32005, "rate limited, try again in 39ms", 3),
+            (usize::MAX, -32005, "rate limited, try again in 0ms", 5),
+            (usize::MAX, -32000, "proof unavailable", 1),
+            (usize::MAX, -32000, "rate limited", 1),
+            (usize::MAX, -32005, "proof request exceeds size limit", 1),
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+            let mut module = RpcModule::new((attempts.clone(), requests.clone()));
+            module.register_method("eth_getMultiProof", move |params, ctx, _| {
+                ctx.1.lock().unwrap().push(params.parse()?);
+                if ctx.0.fetch_add(1, Ordering::Relaxed) < failures {
+                    return Err(ErrorObjectOwned::owned(code, message, None::<()>));
+                }
+                Ok::<_, ErrorObjectOwned>(Vec::<EIP1186AccountProofResponse>::new())
+            })?;
+            let server = jsonrpsee::server::ServerBuilder::default()
+                .build("127.0.0.1:0")
+                .await?;
+            let address = server.local_addr()?;
+            let handle = server.start(module);
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_http(format!("http://{address}").parse()?)
+                .erased();
+            let account = Address::repeat_byte(0xaa);
+            let slot = B256::repeat_byte(0xbb);
+            let started = Instant::now();
+            let result = request_tempo_proofs(&provider, &[(account, vec![slot])], 42).await;
+            assert_eq!(attempts.load(Ordering::Relaxed), expected_attempts);
+            let minimum_delay = (0..expected_attempts - 1)
+                .map(|retry| TEMPO_PROOF_RETRY_DELAY * 2_u32.pow(retry as u32))
+                .sum::<Duration>();
+            assert!(started.elapsed() >= minimum_delay);
+            if failures < expected_attempts {
+                assert!(result?.is_empty());
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(RpcError::ErrorResp(error)) if error.code == code && error.message == message
+                ));
+            }
+            for request in requests.lock().unwrap().iter() {
+                assert_eq!(*request, serde_json::json!([[[account, [slot]]], "0x2a"]));
+            }
+            handle.stop()?;
+        }
+        Ok(())
     }
 }
