@@ -8,22 +8,23 @@
 //! Both a synchronous ([`L1StateProvider::get_storage`]) and an asynchronous
 //! ([`L1StateProvider::get_storage_async`]) entry point are provided. The synchronous variant is
 //! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
-//! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
+//! call indefinitely with transport backoff to avoid bricking the chain on transient outages.
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
-use eyre::{Result, WrapErr as _};
+use alloy_transport::{
+    RpcError,
+    layers::{OrRetryPolicyFn, RateLimitRetryPolicy, RetryBackoffLayer},
+};
+use eyre::Result;
 use std::num::NonZeroU32;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
 use zone_precompiles::{L1StateError, L1StorageReader};
 
 use super::cache::L1StateCache;
-use crate::{
-    retry::{L1ReadRetryConfig, is_retryable_l1_error, retry_l1_read},
-    rpc::rpc_connection_config,
-};
+use crate::{retry::is_retryable_rpc_error, rpc::rpc_connection_config};
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
@@ -34,10 +35,11 @@ pub struct L1StateProviderConfig {
     pub l1_rpc_url: String,
     /// Zone portal address on Tempo L1, used for sequencer lookups.
     pub portal_address: Address,
-    /// Maximum number of retries per failed L1 read using the shared acquisition policy.
+    /// Maximum number of transport-level retries for failed/rate-limited RPC requests.
     /// Defaults to 10.
     pub max_retries: u32,
-    /// Initial backoff in milliseconds for each L1 read.
+    /// Base backoff in milliseconds for the transport-level retry layer.
+    /// Server-provided retry hints take precedence.
     /// Defaults to 20ms.
     pub initial_backoff_ms: u64,
     /// Interval between WebSocket reconnection attempts.
@@ -84,15 +86,13 @@ pub struct L1StateProvider {
     /// In-memory cache of L1 contract storage slots, checked before any RPC call.
     cache: L1StateCache,
     /// HTTP provider pointed at **Tempo L1**, used as a fallback when the cache misses.
-    /// Read requests use the shared L1 retry policy with bounded exponential backoff.
+    /// Wraps a [`RetryBackoffLayer`] that retains fixed backoff and server retry hints.
     provider: DynProvider<TempoNetwork>,
     /// Handle to the tokio runtime, used by [`get_storage`](Self::get_storage) to
     /// dispatch async RPC calls from a blocking (non-async) context.
     runtime_handle: tokio::runtime::Handle,
     /// Optional finite attempt limit for synchronous cache-miss fallback.
     max_sync_attempts: Option<NonZeroU32>,
-    /// Per-read retry budget, kept separate from synchronous cache-miss attempts.
-    retry_config: L1ReadRetryConfig,
 }
 
 impl L1StateProvider {
@@ -100,12 +100,7 @@ impl L1StateProvider {
     pub async fn chain_id(&self) -> Result<u64> {
         match self.chain_id {
             Some(chain_id) => Ok(chain_id),
-            None => {
-                retry_l1_read(self.retry_config, "L1 chain ID", || async {
-                    Ok(self.provider.get_chain_id().await?)
-                })
-                .await
-            }
+            None => Ok(self.provider.get_chain_id().await?),
         }
     }
 
@@ -120,9 +115,12 @@ impl L1StateProvider {
         cache: L1StateCache,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<Self> {
+        let retry_layer = storage_retry_layer(&config);
+
         let conn_config = rpc_connection_config(config.retry_connection_interval);
 
         let client = RpcClient::builder()
+            .layer(retry_layer)
             .connect_with_config(&config.l1_rpc_url, conn_config)
             .await
             .map_err(|e| {
@@ -142,11 +140,6 @@ impl L1StateProvider {
             provider,
             runtime_handle,
             max_sync_attempts: config.max_sync_attempts,
-            retry_config: L1ReadRetryConfig {
-                max_attempts: config.max_retries.saturating_add(1),
-                initial_delay: std::time::Duration::from_millis(config.initial_backoff_ms),
-                ..Default::default()
-            },
         })
     }
 
@@ -166,11 +159,6 @@ impl L1StateProvider {
             provider,
             runtime_handle,
             max_sync_attempts: config.max_sync_attempts,
-            retry_config: L1ReadRetryConfig {
-                max_attempts: config.max_retries.saturating_add(1),
-                initial_delay: std::time::Duration::from_millis(config.initial_backoff_ms),
-                ..Default::default()
-            },
         }
     }
 
@@ -178,7 +166,7 @@ impl L1StateProvider {
     ///
     /// This method is designed for use inside EVM precompiles that run on a **blocking thread**.
     /// On cache miss it retries the RPC call indefinitely until the value is fetched. The
-    /// shared read helper handles backoff internally, so retries here
+    /// transport layer handles backoff internally via [`RetryBackoffLayer`], so retries here
     /// are immediate. This ensures a transient L1 RPC outage stalls block production rather
     /// than bricking the chain with a hard precompile error.
     ///
@@ -217,9 +205,6 @@ impl L1StateProvider {
                     return Ok(value);
                 }
                 Err(rpc_err) => {
-                    if !is_retryable_l1_error(&rpc_err) {
-                        return Err(rpc_err);
-                    }
                     if self
                         .max_sync_attempts
                         .is_some_and(|max_attempts| attempt >= max_attempts.get())
@@ -237,7 +222,7 @@ impl L1StateProvider {
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// Same semantics as [`get_storage`](Self::get_storage) but natively async. The
-    /// shared L1 read helper handles retries with bounded exponential backoff.
+    /// transport-level [`RetryBackoffLayer`] handles the configured retries and backoff.
     pub async fn get_storage_async(
         &self,
         address: Address,
@@ -265,18 +250,9 @@ impl L1StateProvider {
 
     /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
     async fn fetch_slot(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
-        let value = retry_l1_read(self.retry_config, "eth_getStorageAt", || async {
-            Ok(self
-                .provider
-                .get_storage_at(address, U256::from_be_bytes(slot.0))
-                .number(block_number)
-                .await?)
-        })
-        .await
-        .wrap_err_with(|| {
-            format!(
-                "eth_getStorageAt failed for address={address} slot={slot} block={block_number}"
-            )
+        let value: U256 = self.provider.get_storage_at(address, slot.into()).number(block_number).await.map_err(|e| {
+            warn!(%address, %slot, block_number, %e, "eth_getStorageAt RPC call failed");
+            eyre::eyre!("eth_getStorageAt failed for address={address} slot={slot} block={block_number}: {e}")
         })?;
 
         let result = B256::from(value);
@@ -302,16 +278,29 @@ impl L1StorageReader for L1StateProvider {
     }
 }
 
+/// Extend only RPC response classification while preserving Alloy's transport retry policy.
+fn storage_retry_layer(config: &L1StateProviderConfig) -> RetryBackoffLayer<OrRetryPolicyFn> {
+    let policy = RateLimitRetryPolicy::default()
+        .or(|error| matches!(error, RpcError::ErrorResp(_)) && is_retryable_rpc_error(error));
+    RetryBackoffLayer::new_with_policy(
+        config.max_retries,
+        config.initial_backoff_ms,
+        u64::MAX,
+        policy,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_provider::mock::Asserter;
+    use std::time::Duration;
+
+    use alloy_transport::mock::{Asserter, MockTransport};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn finite_sync_attempt_limit_returns_diagnostic_error() {
         let config = L1StateProviderConfig {
             max_sync_attempts: Some(NonZeroU32::MIN),
-            max_retries: 0,
             ..Default::default()
         };
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -336,32 +325,40 @@ mod tests {
         assert!(message.contains("block=7"), "{message}");
     }
 
-    #[tokio::test]
-    async fn retries_storage_acquisition_and_caches_the_result() {
-        let asserter = Asserter::new();
-        asserter.push_failure(
-            serde_json::from_value(serde_json::json!({"code": -32001, "message": ""})).unwrap(),
-        );
-        asserter.push_success(&U256::from(9));
+    fn layered_reader(config: L1StateProviderConfig, asserter: Asserter) -> L1StateProvider {
+        let client = RpcClient::builder()
+            .layer(storage_retry_layer(&config))
+            .transport(MockTransport::new(asserter), true);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter)
+            .connect_client(client)
             .erased();
-        let reader = L1StateProvider::new_raw(
-            L1StateProviderConfig {
-                initial_backoff_ms: 0,
-                ..Default::default()
-            },
+        L1StateProvider::new_raw(
+            config,
             L1StateCache::default(),
             provider,
             tokio::runtime::Handle::current(),
-        );
+        )
+    }
 
+    #[tokio::test(start_paused = true)]
+    async fn storage_retries_added_codes_with_fixed_delay_and_caches_result() {
+        let asserter = Asserter::new();
+        for code in [-32001, -32002, -32603] {
+            asserter.push_failure(
+                serde_json::from_value(serde_json::json!({"code": code, "message": ""})).unwrap(),
+            );
+        }
+        asserter.push_success(&U256::from(9));
+        let reader = layered_reader(L1StateProviderConfig::default(), asserter);
+        let start = tokio::time::Instant::now();
         let value = reader
             .get_storage_async(Address::ZERO, B256::ZERO, 7)
             .await
             .unwrap();
+
         assert_eq!(value, B256::from(U256::from(9)));
-        // The mock has no responses left: this second read must hit the cache.
+        assert_eq!(start.elapsed(), Duration::from_millis(60));
+        // The response queue is empty: the next read must be served by the cache.
         assert_eq!(
             reader
                 .get_storage_async(Address::ZERO, B256::ZERO, 7)
@@ -371,8 +368,63 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn storage_retries_keep_server_backoff_hints() {
+        let asserter = Asserter::new();
+        for code in [-32005, -32001] {
+            asserter.push_failure(
+                serde_json::from_value(serde_json::json!({
+                    "code": code,
+                    "message": "",
+                    "data": {"rate": {"backoff_seconds": 2}}
+                }))
+                .unwrap(),
+            );
+        }
+        asserter.push_success(&U256::from(9));
+        let reader = layered_reader(L1StateProviderConfig::default(), asserter);
+        let start = tokio::time::Instant::now();
+
+        assert_eq!(
+            reader
+                .get_storage_async(Address::ZERO, B256::ZERO, 7)
+                .await
+                .unwrap(),
+            B256::from(U256::from(9))
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(4));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn storage_retry_budget_counts_retries_after_the_initial_request() {
+        let asserter = Asserter::new();
+        for _ in 0..3 {
+            asserter.push_failure(
+                serde_json::from_value(serde_json::json!({"code": -32002, "message": ""})).unwrap(),
+            );
+        }
+        asserter.push_success(&U256::from(9));
+        let reader = layered_reader(
+            L1StateProviderConfig {
+                max_retries: 2,
+                ..Default::default()
+            },
+            asserter.clone(),
+        );
+        let start = tokio::time::Instant::now();
+
+        assert!(
+            reader
+                .get_storage_async(Address::ZERO, B256::ZERO, 7)
+                .await
+                .is_err()
+        );
+        assert_eq!(start.elapsed(), Duration::from_millis(40));
+        assert_eq!(asserter.read_q().len(), 1);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn sync_storage_returns_terminal_errors_without_retrying() {
+    async fn sync_storage_keeps_outer_retries_for_terminal_rpc_errors() {
         let asserter = Asserter::new();
         asserter.push_failure(
             serde_json::from_value(
@@ -380,24 +432,14 @@ mod tests {
             )
             .unwrap(),
         );
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter)
-            .erased();
-        let reader = L1StateProvider::new_raw(
-            L1StateProviderConfig::default(),
-            L1StateCache::default(),
-            provider,
-            tokio::runtime::Handle::current(),
-        );
+        asserter.push_success(&U256::from(9));
+        let reader = layered_reader(L1StateProviderConfig::default(), asserter);
 
-        let error =
+        let value =
             tokio::task::spawn_blocking(move || reader.get_storage(Address::ZERO, B256::ZERO, 7))
                 .await
                 .unwrap()
-                .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<alloy_transport::TransportError>(),
-            Some(alloy_transport::RpcError::ErrorResp(error)) if error.code == -32602
-        ));
+                .unwrap();
+        assert_eq!(value, B256::from(U256::from(9)));
     }
 }
