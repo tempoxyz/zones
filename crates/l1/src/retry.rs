@@ -5,7 +5,10 @@
 
 use std::{future::Future, time::Duration};
 
-use alloy_transport::{RpcError, TransportError, TransportErrorKind};
+use alloy_transport::{
+    RpcError, TransportError, TransportErrorKind,
+    layers::{RateLimitRetryPolicy, RetryPolicy as _},
+};
 use eyre::Result;
 
 /// Retry budget and delays for one L1 read or acquisition operation.
@@ -47,15 +50,20 @@ impl L1ReadBackoff {
         }
     }
 
+    /// Charge one failed attempt, returning whether the budget is exhausted.
+    pub fn exhausted(&mut self) -> bool {
+        self.attempts = self.attempts.saturating_add(1);
+        self.attempts >= self.config.max_attempts
+    }
+
     /// Record a failure, returning an error when the shared acquisition budget is exhausted.
     pub fn record(&mut self, error: &eyre::Report, operation: &str) -> Result<()> {
-        self.attempts = self.attempts.saturating_add(1);
-        eyre::ensure!(
-            self.attempts < self.config.max_attempts,
-            "{operation} retry budget exhausted after {} failed attempts: {error:#}",
-            self.attempts
-        );
-        Ok(())
+        record_retry_attempt(
+            &mut self.attempts,
+            self.config.max_attempts,
+            error,
+            operation,
+        )
     }
 
     /// Number of failed attempts charged to this budget.
@@ -70,17 +78,47 @@ impl L1ReadBackoff {
 
     /// Wait before retrying and increase the next delay up to the configured cap.
     pub async fn wait(&mut self) {
-        tokio::time::sleep(self.delay).await;
+        self.wait_with_hint(None).await;
+    }
+
+    /// Like [`Self::wait`], but wait at least as long as a server-provided retry hint.
+    pub async fn wait_with_hint(&mut self, hint: Option<Duration>) {
+        tokio::time::sleep(hint.unwrap_or_default().max(self.delay)).await;
         self.delay = self.delay.saturating_mul(2).min(self.config.max_delay);
     }
 }
 
+/// Charge one failed attempt against `max_attempts`, returning an error once it is exhausted.
+pub fn record_retry_attempt(
+    attempts: &mut u32,
+    max_attempts: u32,
+    error: &eyre::Report,
+    operation: &str,
+) -> Result<()> {
+    *attempts = attempts.saturating_add(1);
+    eyre::ensure!(
+        *attempts < max_attempts,
+        "{operation} retry budget exhausted after {attempts} failed attempts: {error:#}"
+    );
+    Ok(())
+}
+
 /// Classify retryable L1 acquisition errors without relying on provider-specific messages.
+///
+/// Internal errors (`-32603`) are retried because checker acquisition and storage reads can hit
+/// backend resets during rollouts. [`retry_l1_read`] does not retry them.
 pub fn is_retryable_rpc_error(error: &TransportError) -> bool {
+    is_retryable_read_error(error)
+        || matches!(error, RpcError::ErrorResp(error) if error.code == -32603)
+}
+
+/// Classify errors that [`retry_l1_read`] replays.
+///
+/// Excludes internal errors (`-32603`), which are often deterministic for witness and proof reads
+/// (for example pruned state) and would otherwise exhaust the full budget before surfacing.
+fn is_retryable_read_error(error: &TransportError) -> bool {
     match error {
-        RpcError::ErrorResp(error) => {
-            error.is_retry_err() || matches!(error.code, -32001 | -32002 | -32603)
-        }
+        RpcError::ErrorResp(error) => error.is_retry_err() || matches!(error.code, -32001 | -32002),
         RpcError::UnsupportedFeature(_)
         | RpcError::LocalUsageError(_)
         | RpcError::SerError(_)
@@ -90,16 +128,17 @@ pub fn is_retryable_rpc_error(error: &TransportError) -> bool {
     }
 }
 
-/// Find a retryable structured transport error through an acquisition error's context.
-pub fn is_retryable_l1_error(error: &eyre::Report) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<TransportError>()
-            .is_some_and(is_retryable_rpc_error)
-    })
+/// Find a retryable structured transport error through a read error's context.
+fn retryable_read_error(error: &eyre::Report) -> Option<&TransportError> {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<TransportError>())
+        .find(|error| is_retryable_read_error(error))
 }
 
 /// Retry a replay-safe L1 read, preserving the original error on terminal failure or exhaustion.
+///
+/// Waits honor server-provided retry hints when they exceed the current backoff delay.
 pub async fn retry_l1_read<T, F, Fut>(
     config: L1ReadRetryConfig,
     operation: &str,
@@ -111,31 +150,34 @@ where
 {
     let mut backoff = L1ReadBackoff::new(config);
     loop {
-        match read().await {
+        let error = match read().await {
             Ok(value) => return Ok(value),
-            Err(error) if is_retryable_l1_error(&error) => {
-                if backoff.record(&error, operation).is_err() {
-                    tracing::warn!(
-                        target: "zone::l1::retry",
-                        %error,
-                        operation,
-                        attempts = backoff.attempts(),
-                        "L1 read retry budget exhausted"
-                    );
-                    return Err(error);
-                }
-                tracing::warn!(
-                    target: "zone::l1::retry",
-                    %error,
-                    operation,
-                    attempt = backoff.attempts(),
-                    max_attempts = config.max_attempts,
-                    "L1 read failed; retrying"
-                );
-                backoff.wait().await;
-            }
-            Err(error) => return Err(error),
+            Err(error) => error,
+        };
+        let Some(hint) = retryable_read_error(&error)
+            .map(|error| RateLimitRetryPolicy::default().backoff_hint(error))
+        else {
+            return Err(error);
+        };
+        if backoff.exhausted() {
+            tracing::warn!(
+                target: "zone::l1::retry",
+                %error,
+                operation,
+                attempts = backoff.attempts(),
+                "L1 read retry budget exhausted"
+            );
+            return Err(error);
         }
+        tracing::warn!(
+            target: "zone::l1::retry",
+            %error,
+            operation,
+            attempt = backoff.attempts(),
+            max_attempts = backoff.max_attempts(),
+            "L1 read failed; retrying"
+        );
+        backoff.wait_with_hint(hint).await;
     }
 }
 
@@ -171,8 +213,12 @@ mod tests {
     async fn retries_the_same_rpc_read_after_rate_limiting() {
         let asserter = Asserter::new();
         asserter.push_failure(
-            serde_json::from_value(serde_json::json!({"code": -32005, "message": "opaque"}))
-                .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "code": -32005,
+                "message": "opaque",
+                "data": {"rate": {"backoff_seconds": 3}},
+            }))
+            .unwrap(),
         );
         asserter.push_success(&42_u64);
         let provider = ProviderBuilder::new().connect_mocked_client(asserter);
@@ -192,7 +238,8 @@ mod tests {
 
         assert_eq!(value, 42);
         assert_eq!(attempts.get(), 2);
-        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        // The server hint outlasts the 1s initial backoff.
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
     }
 
     #[tokio::test(start_paused = true)]
@@ -223,6 +270,8 @@ mod tests {
     async fn terminal_rpc_and_validation_errors_are_not_replayed() {
         for error in [
             eyre::Report::new(rpc_error(-32602, "invalid params")),
+            // Often deterministic for proofs, e.g. pruned state.
+            eyre::Report::new(rpc_error(-32603, "state at block is pruned")),
             eyre::eyre!("proof mismatch"),
         ] {
             let attempts = Cell::new(0);
@@ -243,9 +292,22 @@ mod tests {
 
     #[test]
     fn preserves_retry_classification_through_context() {
-        let error =
-            eyre::Report::new(rpc_error(-32603, "internal error")).wrap_err("witness acquisition");
-        assert!(is_retryable_l1_error(&error));
-        assert!(!is_retryable_l1_error(&eyre::eyre!("rate limited")));
+        let error = eyre::Report::new(rpc_error(-32002, "upstream unavailable"))
+            .wrap_err("witness acquisition");
+        assert!(retryable_read_error(&error).is_some());
+        assert!(retryable_read_error(&eyre::eyre!("rate limited")).is_none());
+    }
+
+    #[test]
+    fn acquisition_retries_are_bounded() {
+        let mut attempts = 0;
+        let error = eyre::eyre!("state unavailable");
+        for _ in 1..3 {
+            record_retry_attempt(&mut attempts, 3, &error, "local state acquisition").unwrap();
+        }
+        let error = record_retry_attempt(&mut attempts, 3, &error, "local state acquisition")
+            .expect_err("the final attempt must exhaust the budget");
+        assert_eq!(attempts, 3);
+        assert!(error.to_string().contains("retry budget exhausted"));
     }
 }

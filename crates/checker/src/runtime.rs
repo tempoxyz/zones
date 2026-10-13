@@ -15,7 +15,7 @@ use reth_storage_api::{BlockHashReader as _, BlockNumReader, StateProviderFactor
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoHardforks;
 use tempo_primitives::{TempoPrimitives, TempoReceipt};
-use zone_l1::retry::{L1ReadBackoff as Backoff, L1ReadRetryConfig};
+use zone_l1::retry::{L1ReadBackoff, L1ReadRetryConfig, record_retry_attempt};
 
 use crate::{
     AttemptError, CheckerConfig,
@@ -28,7 +28,7 @@ use crate::{
     telemetry::{self, CheckerMetrics},
 };
 
-const RETRY_DELAY: Duration = Duration::from_secs(1);
+const STATE_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Retry bound for unavailable local Zone state.
 const MAX_STATE_ATTEMPTS: u32 = 30;
 const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
@@ -233,7 +233,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, AttemptError>>,
 {
-    let mut backoff = Backoff::new(L1ReadRetryConfig::default());
+    let mut backoff = L1ReadBackoff::new(L1ReadRetryConfig::default());
     loop {
         match attempt().await {
             Ok(value) => return Ok(value),
@@ -284,21 +284,6 @@ struct VerificationContext<'a> {
     config: &'a CheckerConfig,
     metrics: &'a CheckerMetrics,
     latency: LatencyTracker,
-}
-
-fn record_retry_attempt(
-    attempts: &mut u32,
-    max_attempts: u32,
-    error: &eyre::Report,
-    operation: &str,
-) -> eyre::Result<()> {
-    *attempts = attempts.saturating_add(1);
-    if *attempts >= max_attempts {
-        return Err(eyre::eyre!(
-            "{operation} retry budget exhausted after {attempts} failed attempts: {error:#}"
-        ));
-    }
-    Ok(())
 }
 
 /// Verify one append-only notification's blocks.
@@ -370,7 +355,7 @@ where
     let l2 = collect_l2_block_evidence(&block.body().transactions, receipts, zone.into())
         .map_err(fail)?;
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
-    let mut l1_backoff = Backoff::new(L1ReadRetryConfig::default());
+    let mut l1_backoff = L1ReadBackoff::new(L1ReadRetryConfig::default());
     let (tempo, tempo_block) = if let Some(anchor) = l2.l1_anchor() {
         let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
         validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
@@ -426,7 +411,7 @@ where
                     max_attempts = MAX_STATE_ATTEMPTS,
                     "checker local state unavailable; retrying"
                 );
-                tokio::time::sleep(RETRY_DELAY).await;
+                tokio::time::sleep(STATE_RETRY_DELAY).await;
             }
             Err(AccountingStateError::Disable(error)) => {
                 return Err(BlockError::Disable(error));
@@ -497,7 +482,7 @@ async fn collect_l1_range_with_retry(
     expected: BlockNumHash,
     zone: BlockRef,
     context: &VerificationContext<'_>,
-    backoff: &mut Backoff,
+    backoff: &mut L1ReadBackoff,
 ) -> Result<crate::l1::L1BlockEvidence, BlockError> {
     let VerificationContext {
         config, metrics, ..
@@ -524,7 +509,7 @@ async fn collect_l1_range_with_retry(
 
 fn record_l1_retry(
     metrics: &CheckerMetrics,
-    backoff: &mut Backoff,
+    backoff: &mut L1ReadBackoff,
     error: &eyre::Report,
     operation: &str,
 ) -> Result<(), BlockError> {
@@ -616,29 +601,5 @@ mod tests {
             ),
             Err(BlockError::Disable(_))
         ));
-    }
-
-    #[test]
-    fn acquisition_retries_are_bounded() {
-        let mut attempts = 0;
-        let error = eyre::eyre!("state unavailable");
-        for _ in 1..MAX_STATE_ATTEMPTS {
-            record_retry_attempt(
-                &mut attempts,
-                MAX_STATE_ATTEMPTS,
-                &error,
-                "local state acquisition",
-            )
-            .unwrap();
-        }
-        let error = record_retry_attempt(
-            &mut attempts,
-            MAX_STATE_ATTEMPTS,
-            &error,
-            "local state acquisition",
-        )
-        .expect_err("the final attempt must disable the checker");
-        assert_eq!(attempts, MAX_STATE_ATTEMPTS);
-        assert!(error.to_string().contains("retry budget exhausted"));
     }
 }

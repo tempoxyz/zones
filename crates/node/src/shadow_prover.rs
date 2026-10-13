@@ -21,7 +21,7 @@ use zone_l1::{
 use zone_sequencer::{BatchData, ShadowProofAnchor, ShadowProver, ZoneSequencerProvider};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_CONNECTION_ATTEMPTS: u32 = 5;
+const MAX_L1_READ_ATTEMPTS: u32 = 5;
 
 /// Feeds finalized RPC-follower submissions and their exact settlement inputs to the detached
 /// shadow prover.
@@ -53,28 +53,16 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     /// accepted certificate.
     pub(crate) async fn run(self, mut submissions: Receiver<FinalizedBatchSubmission>) {
         while let Some(submission) = submissions.recv().await {
-            self.process_submission_with_retry(&submission).await;
-        }
-    }
-
-    async fn process_submission_with_retry(&self, submission: &FinalizedBatchSubmission) {
-        let config = L1ReadRetryConfig {
-            max_attempts: MAX_CONNECTION_ATTEMPTS,
-            ..Default::default()
-        };
-        if let Err(err) = retry_l1_read(config, "finalized batch submission acquisition", || {
-            self.process_submission(submission)
-        })
-        .await
-        {
-            error!(
-                target: "zone::node::shadow_prover",
-                l1_block_hash = %submission.block.hash,
-                transaction_index = submission.transaction_index,
-                log_index = submission.log_index,
-                error = ?err,
-                "Failed to process finalized batch submission"
-            );
+            if let Err(err) = self.process_submission(&submission).await {
+                error!(
+                    target: "zone::node::shadow_prover",
+                    l1_block_hash = %submission.block.hash,
+                    transaction_index = submission.transaction_index,
+                    log_index = submission.log_index,
+                    error = ?err,
+                    "Failed to process finalized batch submission"
+                );
+            }
         }
     }
 
@@ -105,12 +93,15 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
         &self,
         submission: &FinalizedBatchSubmission,
     ) -> Result<Vec<submitBatchCall>> {
-        let block = self
-            .l1_provider
-            .get_block_by_hash(submission.block.hash)
-            .full()
-            .await?
-            .ok_or_eyre(format!("L1 block {} was not found", submission.block.hash))?;
+        let block = retry_l1_read(l1_read_retry_config(), "finalized L1 block", || async {
+            Ok(self
+                .l1_provider
+                .get_block_by_hash(submission.block.hash)
+                .full()
+                .await?)
+        })
+        .await?
+        .ok_or_eyre(format!("L1 block {} was not found", submission.block.hash))?;
         ensure!(
             block.header.number() == submission.block.number,
             "L1 block {} has number {}, expected {}",
@@ -205,14 +196,21 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
             anchor_number <= submission_block_number,
             "submitted anchor {anchor_number} is above submission block {submission_block_number}"
         );
-        let anchor_hash = self
-            .l1_provider
-            .get_header_by_number(anchor_number.into())
-            .await?
-            .ok_or_eyre(format!(
-                "submitted Tempo anchor {anchor_number} is unavailable"
-            ))?
-            .hash_slow();
+        let anchor_hash = retry_l1_read(
+            l1_read_retry_config(),
+            "submitted anchor header",
+            || async {
+                Ok(self
+                    .l1_provider
+                    .get_header_by_number(anchor_number.into())
+                    .await?)
+            },
+        )
+        .await?
+        .ok_or_eyre(format!(
+            "submitted Tempo anchor {anchor_number} is unavailable"
+        ))?
+        .hash_slow();
 
         Ok((
             to,
@@ -292,6 +290,13 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
         }
 
         Ok(from)
+    }
+}
+
+fn l1_read_retry_config() -> L1ReadRetryConfig {
+    L1ReadRetryConfig {
+        max_attempts: MAX_L1_READ_ATTEMPTS,
+        ..Default::default()
     }
 }
 

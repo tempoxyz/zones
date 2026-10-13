@@ -413,7 +413,7 @@ async fn collect_tempo_witness(
                 .client()
                 .request::<_, Vec<EIP1186AccountProofResponse>>(
                     "eth_getMultiProof",
-                    (targets.clone(), BlockId::number(tempo_block_number)),
+                    (&targets, BlockId::number(tempo_block_number)),
                 )
                 .await?)
         },
