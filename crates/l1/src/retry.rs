@@ -243,10 +243,8 @@ mod tests {
 
     #[test]
     fn preserves_retry_classification_through_context() {
-        let error = Err::<(), _>(rpc_error(-32603, "internal error"))
-            .map_err(eyre::Report::new)
-            .unwrap_err()
-            .wrap_err("witness acquisition");
+        let error =
+            eyre::Report::new(rpc_error(-32603, "internal error")).wrap_err("witness acquisition");
         assert!(is_retryable_l1_error(&error));
         assert!(!is_retryable_l1_error(&eyre::eyre!("rate limited")));
     }
