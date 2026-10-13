@@ -54,7 +54,11 @@ use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
 };
-use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
+use zone_l1::{
+    TempoStateExt as _,
+    retry::{L1ReadRetryConfig, retry_l1_read},
+    state::EnabledTokenRegistry,
+};
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
@@ -361,13 +365,20 @@ async fn collect_tempo_witness(
     first_tx_input: Option<&[u8]>,
     reads: &HashSet<zone_evm::TempoStorageRead>,
 ) -> eyre::Result<(TempoHeader, Vec<Bytes>)> {
-    let initial_header = provider
-        .get_block_by_number(initial_tempo.number.into())
-        .await?
-        .ok_or_eyre("initial Tempo checkpoint not found")?
-        .header
-        .as_ref()
-        .clone();
+    let initial_header = retry_l1_read(
+        L1ReadRetryConfig::default(),
+        "witness Tempo checkpoint header",
+        || async {
+            Ok(provider
+                .get_block_by_number(initial_tempo.number.into())
+                .await?)
+        },
+    )
+    .await?
+    .ok_or_eyre("initial Tempo checkpoint not found")?
+    .header
+    .as_ref()
+    .clone();
     eyre::ensure!(
         initial_header.hash_slow() == initial_tempo.hash,
         "initial Tempo checkpoint hash mismatch at block {}",
@@ -394,14 +405,21 @@ async fn collect_tempo_witness(
         .into_iter()
         .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
         .collect::<Vec<_>>();
-    let proofs = provider
-        .client()
-        .request::<_, Vec<EIP1186AccountProofResponse>>(
-            "eth_getMultiProof",
-            (targets, BlockId::number(tempo_block_number)),
-        )
-        .await
-        .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {tempo_block_number}"))?;
+    let proofs = retry_l1_read(
+        L1ReadRetryConfig::default(),
+        "witness eth_getMultiProof",
+        || async {
+            Ok(provider
+                .client()
+                .request::<_, Vec<EIP1186AccountProofResponse>>(
+                    "eth_getMultiProof",
+                    (targets.clone(), BlockId::number(tempo_block_number)),
+                )
+                .await?)
+        },
+    )
+    .await
+    .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {tempo_block_number}"))?;
 
     let mut nodes = BTreeMap::new();
     for proof in proofs {
@@ -1607,6 +1625,8 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use alloy_provider::ProviderBuilder;
 
     #[test]
@@ -1632,9 +1652,6 @@ mod tests {
 
     #[tokio::test]
     async fn tempo_witness_collects_checkpoint_proofs_and_propagates_errors() -> eyre::Result<()> {
-        use alloy_provider::ProviderBuilder;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         let header = TempoHeader::default();
         let initial = alloy_eips::NumHash {
             number: 0,
@@ -1642,7 +1659,8 @@ mod tests {
         };
         let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let fail = Arc::new(AtomicBool::new(false));
-        let mut module = RpcModule::new((requests.clone(), fail.clone()));
+        let rate_limit = Arc::new(AtomicBool::new(true));
+        let mut module = RpcModule::new((requests.clone(), fail.clone(), rate_limit));
         let mut block = serde_json::to_value(TempoHeaderResponse {
             inner: alloy_rpc_types_eth::Header::new(header.clone()),
             timestamp_millis: 0,
@@ -1653,6 +1671,9 @@ mod tests {
         module.register_method("eth_getMultiProof", |params, ctx, _| {
             let params: serde_json::Value = params.parse()?;
             ctx.0.lock().unwrap().push(params.clone());
+            if ctx.2.swap(false, Ordering::Relaxed) {
+                return Err(ErrorObjectOwned::owned(-32005, "opaque", None::<()>));
+            }
             if ctx.1.load(Ordering::Relaxed) {
                 return Err(ErrorObjectOwned::owned(
                     -32000,
@@ -1701,7 +1722,8 @@ mod tests {
         );
         {
             let requests = requests.lock().unwrap();
-            assert_eq!(requests.len(), 1);
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0], requests[1]);
             assert_eq!(requests[0][1], serde_json::json!("0xa"));
             assert_eq!(requests[0][0], serde_json::json!([[account, [slot]]]));
         }
@@ -1716,11 +1738,12 @@ mod tests {
             collect_tempo_witness(&provider, initial, Some(&checkpoint_input), &HashSet::new())
                 .await?;
         assert!(nodes.is_empty());
-        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(requests.lock().unwrap().len(), 2);
         let error = collect_tempo_witness(&provider, initial, Some(&first_tx_input), &reads)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("proof unavailable"));
+        assert_eq!(requests.lock().unwrap().len(), 3);
         let error = collect_tempo_witness(
             &provider,
             alloy_eips::NumHash {

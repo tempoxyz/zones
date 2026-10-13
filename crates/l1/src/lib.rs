@@ -40,6 +40,7 @@ pub mod abi {
 
 pub mod ext;
 mod metrics;
+pub mod retry;
 pub mod state;
 
 pub(crate) mod precompiles {

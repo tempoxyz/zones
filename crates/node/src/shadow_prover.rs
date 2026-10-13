@@ -6,7 +6,6 @@ use alloy_consensus::{BlockHeader as _, Sealable as _, proofs::calculate_transac
 use alloy_primitives::{Address, TxKind};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_sol_types::SolCall as _;
-use alloy_transport::{RpcError, TransportError, TransportErrorKind};
 use eyre::{OptionExt as _, Result, WrapErr as _, ensure};
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoTxEnvelope;
@@ -14,8 +13,11 @@ use tempo_zone_contracts::{
     BatchSubmitted, TokenEnablementTransition, legacySubmitBatchCall, submitBatchCall,
 };
 use tokio::sync::mpsc::Receiver;
-use tracing::{error, info, warn};
-use zone_l1::FinalizedBatchSubmission;
+use tracing::{error, info};
+use zone_l1::{
+    FinalizedBatchSubmission,
+    retry::{L1ReadRetryConfig, retry_l1_read},
+};
 use zone_sequencer::{BatchData, ShadowProofAnchor, ShadowProver, ZoneSequencerProvider};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -56,48 +58,23 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     }
 
     async fn process_submission_with_retry(&self, submission: &FinalizedBatchSubmission) {
-        for attempt in 1..=MAX_CONNECTION_ATTEMPTS {
-            match self.process_submission(submission).await {
-                Ok(()) => return,
-                Err(err) if is_retryable_connection_error(&err) => {
-                    if attempt == MAX_CONNECTION_ATTEMPTS {
-                        error!(
-                            target: "zone::node::shadow_prover",
-                            l1_block_hash = %submission.block.hash,
-                            transaction_index = submission.transaction_index,
-                            log_index = submission.log_index,
-                            error = ?err,
-                            attempts = attempt,
-                            "Failed to process finalized batch submission; retry budget exhausted"
-                        );
-                        return;
-                    }
-                    let retry_delay = POLL_INTERVAL * 2_u32.pow(attempt - 1);
-                    warn!(
-                        target: "zone::node::shadow_prover",
-                        l1_block_hash = %submission.block.hash,
-                        transaction_index = submission.transaction_index,
-                        log_index = submission.log_index,
-                        error = ?err,
-                        attempt,
-                        max_attempts = MAX_CONNECTION_ATTEMPTS,
-                        retry_delay_secs = retry_delay.as_secs(),
-                        "Connection error processing finalized batch submission; retrying"
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                }
-                Err(err) => {
-                    error!(
-                        target: "zone::node::shadow_prover",
-                        l1_block_hash = %submission.block.hash,
-                        transaction_index = submission.transaction_index,
-                        log_index = submission.log_index,
-                        error = ?err,
-                        "Rejected finalized batch submission"
-                    );
-                    return;
-                }
-            }
+        let config = L1ReadRetryConfig {
+            max_attempts: MAX_CONNECTION_ATTEMPTS,
+            ..Default::default()
+        };
+        if let Err(err) = retry_l1_read(config, "finalized batch submission acquisition", || {
+            self.process_submission(submission)
+        })
+        .await
+        {
+            error!(
+                target: "zone::node::shadow_prover",
+                l1_block_hash = %submission.block.hash,
+                transaction_index = submission.transaction_index,
+                log_index = submission.log_index,
+                error = ?err,
+                "Failed to process finalized batch submission"
+            );
         }
     }
 
@@ -318,59 +295,6 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     }
 }
 
-fn is_retryable_connection_error(error: &eyre::Report) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<TransportError>()
-            .is_some_and(is_retryable_rpc_error)
-    })
-}
-
-fn is_retryable_rpc_error(error: &TransportError) -> bool {
-    match error {
-        RpcError::ErrorResp(error) => error.is_retry_err(),
-        RpcError::UnsupportedFeature(_)
-        | RpcError::LocalUsageError(_)
-        | RpcError::SerError(_)
-        | RpcError::DeserError { .. }
-        | RpcError::Transport(TransportErrorKind::NonRetryable(_)) => false,
-        _ => true,
-    }
-}
-
-fn verify_transactions_root(
-    transactions: &[TempoTxEnvelope],
-    expected: alloy_primitives::B256,
-    block_hash: alloy_primitives::B256,
-) -> Result<()> {
-    let computed = calculate_transaction_root(transactions);
-    ensure!(
-        computed == expected,
-        "transaction root mismatch for L1 block {block_hash}: expected {expected}, got {computed}"
-    );
-    Ok(())
-}
-
-fn call_matches_event(call: &submitBatchCall, event: &BatchSubmitted) -> bool {
-    event.nextBlockHash == call.blockTransition.nextBlockHash
-        && event.nextProcessedDepositQueueHash == call.depositQueueTransition.nextProcessedHash
-        && event.lastProcessedDepositNumber == call.depositQueueTransition.nextDepositNumber
-        && event.withdrawalQueueHash == call.withdrawalQueueHash
-        && event.lastProcessedEnabledTokenCount
-            == call.tokenEnablementTransition.nextProcessedTokenCount
-}
-
-fn submitted_anchor_number(tempo_block_number: u64, recent_tempo_block_number: u64) -> Result<u64> {
-    if recent_tempo_block_number == 0 {
-        return Ok(tempo_block_number);
-    }
-    ensure!(
-        recent_tempo_block_number > tempo_block_number,
-        "submitted ancestry anchor does not follow its Tempo checkpoint"
-    );
-    Ok(recent_tempo_block_number)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,19 +371,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn retries_only_retryable_transport_errors() {
-        let retryable = Err::<(), _>(TransportErrorKind::backend_gone())
-            .wrap_err("fetch finalized block")
-            .unwrap_err();
-        assert!(is_retryable_connection_error(&retryable));
-
-        let terminal = eyre::Report::new(TransportErrorKind::non_retryable_str("invalid request"));
-        assert!(!is_retryable_connection_error(&terminal));
-        assert!(!is_retryable_connection_error(&eyre::eyre!(
-            "invalid settlement"
-        )));
     }
 }

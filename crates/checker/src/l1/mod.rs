@@ -7,14 +7,14 @@ use alloy_eips::{BlockId, BlockNumHash};
 use alloy_network::{BlockResponse as _, primitives::HeaderResponse as _};
 use alloy_primitives::{Address, B256, Bloom, Sealable as _, U256};
 use alloy_provider::{DynProvider, Provider};
-use alloy_transport::{RpcError, TransportError, TransportErrorKind};
+use alloy_transport::TransportError;
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoHeaderResponse, TempoTransactionReceipt},
 };
 use tempo_contracts::precompiles::ITIP20;
-use zone_l1::L1BlockTracker;
+use zone_l1::{L1BlockTracker, retry::is_retryable_rpc_error};
 
 use crate::AttemptError;
 
@@ -301,22 +301,7 @@ fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
 
 /// Classify one provider RPC failure using its structured code and message.
 pub(crate) fn classify_rpc_error(error: TransportError) -> AttemptError {
-    let retryable = match &error {
-        RpcError::ErrorResp(error) => {
-            // Missing/unavailable resources and internal errors can result from
-            // backend import lag or upstream resets during a rollout. Retry these
-            // L1 reads without depending on provider-specific message text. The
-            // runtime bounds retries; exact hash/canonicality checks are unchanged.
-            error.is_retry_err() || matches!(error.code, -32001 | -32002 | -32603)
-        }
-        RpcError::UnsupportedFeature(_)
-        | RpcError::LocalUsageError(_)
-        | RpcError::SerError(_)
-        | RpcError::DeserError { .. }
-        | RpcError::Transport(TransportErrorKind::NonRetryable(_)) => false,
-        _ => true,
-    };
-    if retryable {
+    if is_retryable_rpc_error(&error) {
         AttemptError::retry(error)
     } else {
         AttemptError::disable(error)
@@ -343,6 +328,7 @@ mod tests {
     use alloy_primitives::{B256, Log};
     use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_sol_types::SolEvent;
+    use alloy_transport::RpcError;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::TempoHeader;
     use tempo_zone_contracts::ZonePortal;

@@ -15,6 +15,7 @@ use reth_storage_api::{BlockHashReader as _, BlockNumReader, StateProviderFactor
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoHardforks;
 use tempo_primitives::{TempoPrimitives, TempoReceipt};
+use zone_l1::retry::{L1ReadBackoff as Backoff, L1ReadRetryConfig};
 
 use crate::{
     AttemptError, CheckerConfig,
@@ -28,12 +29,8 @@ use crate::{
 };
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
-/// Maximum delay between Tempo acquisition attempts.
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// Retry bound for unavailable local Zone state.
 const MAX_STATE_ATTEMPTS: u32 = 30;
-/// Retry bound for Tempo acquisition.
-const MAX_L1_ATTEMPTS: u32 = 10;
 const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
 /// Bootstrap or open durable state, recover from its verified tip, and follow notifications.
@@ -236,7 +233,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, AttemptError>>,
 {
-    let mut backoff = Backoff::new();
+    let mut backoff = Backoff::new(L1ReadRetryConfig::default());
     loop {
         match attempt().await {
             Ok(value) => return Ok(value),
@@ -246,8 +243,8 @@ where
                     target: "zone::checker",
                     %error,
                     operation,
-                    attempt = backoff.attempts,
-                    max_attempts = MAX_L1_ATTEMPTS,
+                    attempt = backoff.attempts(),
+                    max_attempts = backoff.max_attempts(),
                     "checker acquisition failed; retrying"
                 );
                 backoff.wait().await;
@@ -302,32 +299,6 @@ fn record_retry_attempt(
         ));
     }
     Ok(())
-}
-
-/// Bounded backoff for Tempo acquisition.
-struct Backoff {
-    attempts: u32,
-    delay: Duration,
-}
-
-impl Backoff {
-    const fn new() -> Self {
-        Self {
-            attempts: 0,
-            delay: RETRY_DELAY,
-        }
-    }
-
-    /// Record one failed attempt.
-    fn record(&mut self, error: &eyre::Report, operation: &str) -> eyre::Result<()> {
-        record_retry_attempt(&mut self.attempts, MAX_L1_ATTEMPTS, error, operation)
-    }
-
-    /// Wait and increase the next delay.
-    async fn wait(&mut self) {
-        tokio::time::sleep(self.delay).await;
-        self.delay = self.delay.saturating_mul(2).min(MAX_RETRY_DELAY);
-    }
 }
 
 /// Verify one append-only notification's blocks.
@@ -399,7 +370,7 @@ where
     let l2 = collect_l2_block_evidence(&block.body().transactions, receipts, zone.into())
         .map_err(fail)?;
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
-    let mut l1_backoff = Backoff::new();
+    let mut l1_backoff = Backoff::new(L1ReadRetryConfig::default());
     let (tempo, tempo_block) = if let Some(anchor) = l2.l1_anchor() {
         let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
         validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
@@ -565,8 +536,8 @@ fn record_l1_retry(
         target: "zone::checker",
         %error,
         operation,
-        attempt = backoff.attempts,
-        max_attempts = MAX_L1_ATTEMPTS,
+        attempt = backoff.attempts(),
+        max_attempts = backoff.max_attempts(),
         "checker L1 acquisition failed; retrying"
     );
     Ok(())

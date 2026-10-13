@@ -58,3 +58,4 @@ alloy-rlp.workspace = true
 const-hex.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
