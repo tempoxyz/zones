@@ -251,14 +251,8 @@ fn validate(
         signer.address(),
         view.portal.admin
     );
-    ensure!(
-        command.old_member != Address::ZERO,
-        "--old-member cannot be zero"
-    );
-    ensure!(
-        command.new_member != Address::ZERO,
-        "--new-member cannot be zero"
-    );
+    ensure!(!command.old_member.is_zero(), "--old-member cannot be zero");
+    ensure!(!command.new_member.is_zero(), "--new-member cannot be zero");
     ensure!(
         command.old_member != command.new_member,
         "old and new members must be distinct"

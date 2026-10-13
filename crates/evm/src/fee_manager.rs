@@ -124,7 +124,7 @@ mod tests {
     use alloy_primitives::{Bytes, U256, address};
     use revm::{
         context::JournalTr,
-        database::{CacheDB, EmptyDB},
+        database::InMemoryDB,
         state::{AccountInfo, Bytecode},
     };
     use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, zone_fee_manager};
@@ -133,7 +133,7 @@ mod tests {
     fn resolves_explicit_token_or_zone_default() {
         let default_token = address!("0x20c00000000000000000000000000000000000d1");
         let explicit_token = address!("0x20c00000000000000000000000000000000000e1");
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
         db.insert_account_storage(
             ZONE_FEE_MANAGER_ADDRESS,
             zone_fee_manager::slots::DEFAULT_FEE_TOKEN,
@@ -170,7 +170,7 @@ mod tests {
     fn accepts_any_initialized_zone_tip20_as_a_fee_token() {
         let initialized_token = address!("0x20c00000000000000000000000000000000000e1");
         let missing_token = address!("0x20c00000000000000000000000000000000000e2");
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
         db.insert_account_info(
             initialized_token,
             AccountInfo::from_bytecode(Bytecode::new_raw(Bytes::from_static(&[0xef]))),

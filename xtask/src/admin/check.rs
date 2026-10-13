@@ -253,7 +253,7 @@ fn render_node_table(report: &CheckReport) {
                 .map(|progress| progress.zone_height.to::<u64>());
             let initially_reachable = node.error.is_none();
             let reachable =
-                initially_reachable && follow_up.map(|later| later.error.is_none()).unwrap_or(true);
+                initially_reachable && follow_up.is_none_or(|later| later.error.is_none());
             let status = |passed: Option<bool>| {
                 if !initially_reachable {
                     TableStatus::NotAvailable

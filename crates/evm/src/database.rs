@@ -180,15 +180,11 @@ impl<E: DBErrorMarker> ZoneDbError<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm::{
-        database::{CacheDB, EmptyDB},
-        database_interface::DatabaseCommit,
-        state::EvmStorageSlot,
-    };
+    use revm::{database::InMemoryDB, database_interface::DatabaseCommit, state::EvmStorageSlot};
     use zone_precompiles::test_utils::MockL1Reader as TestL1;
 
-    fn test_db(anchor: u64) -> CacheDB<EmptyDB> {
-        let mut db = CacheDB::new(EmptyDB::default());
+    fn test_db(anchor: u64) -> InMemoryDB {
+        let mut db = InMemoryDB::default();
         db.insert_account_storage(
             TEMPO_STATE_ADDRESS,
             TEMPO_BLOCK_NUMBER_SLOT,
@@ -297,7 +293,7 @@ mod tests {
         let mut db = L1OverlayDB::new(inner, TestL1::default(), Address::ZERO);
 
         assert_eq!(db.storage(address, slot).unwrap(), value);
-        let mut inner: CacheDB<EmptyDB> = db.into_inner();
+        let mut inner: InMemoryDB = db.into_inner();
         assert_eq!(inner.storage(address, slot).unwrap(), value);
     }
 }

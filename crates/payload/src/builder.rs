@@ -184,7 +184,7 @@ where
         };
         validate_l1_continuity(state_provider.as_ref(), imported_headers)?;
         let final_imported = imported_headers.last().expect("validated nonempty import");
-        let checkpoint_only = matches!(tempo_import, TempoImport::CheckpointOnly(_));
+        let checkpoint_only = tempo_import.is_checkpoint_only();
         let follows_checkpoint_blocks = tempo_import.follows_checkpoint_blocks();
         let total_deposits = tempo_import.total_deposits();
         let enabled_tokens = tempo_import.enabled_tokens();
@@ -385,7 +385,6 @@ where
 
         let payload = TempoBuiltPayload::new(
             eth_payload,
-            None,
             Some(executed_block),
             std::time::Duration::ZERO,
             std::time::Duration::ZERO,
@@ -955,7 +954,7 @@ mod tests {
 
     impl BestTransactions for MockBestTransactions {
         fn mark_invalid(&mut self, _tx: &Self::Item, kind: InvalidPoolTransactionError) {
-            if matches!(kind, InvalidPoolTransactionError::OversizedData { .. }) {
+            if kind.is_oversized() {
                 self.oversized_marked += 1;
             }
         }

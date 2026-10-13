@@ -68,7 +68,7 @@ struct DeployedBytecode {
 impl InstallReferenceZoneFactory {
     pub(crate) fn run(self) -> eyre::Result<()> {
         ensure!(
-            self.owner != Address::ZERO,
+            !self.owner.is_zero(),
             "--owner must not be the zero address"
         );
         ensure!(
@@ -191,7 +191,7 @@ fn install_native_zone_factory(
     owner: Address,
     artifacts: NativeArtifacts,
 ) -> eyre::Result<()> {
-    ensure!(owner != Address::ZERO, "ZoneFactory owner must not be zero");
+    ensure!(!owner.is_zero(), "ZoneFactory owner must not be zero");
     let canonical_factory = native_factory_account(INITIAL_FACTORY_OWNER);
     let benchmark_factory = native_factory_account(owner);
     match genesis.alloc.get(&ZONE_FACTORY_ADDRESS) {

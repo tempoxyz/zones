@@ -696,7 +696,7 @@ async fn ensure_sequencer_encryption_key<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed to read portal encryption key count")?;
 
-    let needs_registration = if key_count == U256::ZERO {
+    let needs_registration = if key_count.is_zero() {
         println!("  Registering the sequencer encryption key on the portal");
         true
     } else {

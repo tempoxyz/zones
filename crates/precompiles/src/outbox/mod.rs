@@ -57,7 +57,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
     ) -> ZoneResult<()> {
-        if caller != Address::ZERO && !l1.has_portal_role(caller, Role::Sequencer)? {
+        if !caller.is_zero() && !l1.has_portal_role(caller, Role::Sequencer)? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())
@@ -279,7 +279,7 @@ impl ZoneOutbox {
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
-        if caller != Address::ZERO {
+        if !caller.is_zero() {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         if call.blockNumber != self.storage.block_number() {

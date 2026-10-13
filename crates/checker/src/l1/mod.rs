@@ -56,7 +56,15 @@ impl From<L1ReadError> for AttemptError {
 /// Recognized Portal events for an authenticated L1 block or contiguous range, in chain order.
 #[derive(Debug, Default)]
 pub(crate) struct L1BlockEvidence {
-    events: Vec<L1PortalEvent>,
+    blocks: Vec<L1BlockEvents>,
+}
+
+/// Recognized Portal events from one authenticated L1 block, in receipt order.
+#[derive(Debug)]
+pub(crate) struct L1BlockEvents {
+    /// Timestamp in milliseconds from the authenticated Tempo header.
+    pub(crate) timestamp_millis: u64,
+    pub(crate) events: Vec<L1PortalEvent>,
 }
 
 /// Header fields bound to the hash reported by the Tempo RPC.
@@ -65,6 +73,7 @@ pub(crate) struct ValidatedRpcHeader {
     pub(crate) parent_hash: B256,
     pub(crate) receipts_root: B256,
     pub(crate) logs_bloom: Bloom,
+    pub(crate) timestamp_millis: u64,
 }
 
 /// Authenticate the RPC-reported hash against the decoded Tempo header.
@@ -84,13 +93,19 @@ pub(crate) fn validate_rpc_header(
         parent_hash: header.parent_hash(),
         receipts_root: header.receipts_root(),
         logs_bloom: header.logs_bloom(),
+        timestamp_millis: header.as_ref().timestamp_millis(),
     })
 }
 
 impl L1BlockEvidence {
     /// Return authenticated Portal events in receipt order.
     pub(crate) fn portal_events(&self) -> impl Iterator<Item = &L1PortalEvent> {
-        self.events.iter()
+        self.blocks.iter().flat_map(|block| block.events.iter())
+    }
+
+    /// Return authenticated Portal events grouped by their L1 block, in chain order.
+    pub(crate) fn blocks(&self) -> &[L1BlockEvents] {
+        &self.blocks
     }
 }
 
@@ -130,10 +145,10 @@ pub(crate) async fn collect_l1_range_at(
         )));
     }
     Ok(L1BlockEvidence {
-        events: blocks
+        blocks: blocks
             .into_iter()
             .rev()
-            .flat_map(|block| block.events)
+            .flat_map(|block| block.blocks)
             .collect(),
     })
 }
@@ -162,7 +177,10 @@ fn collect_tracked_l1_block_evidence(
             .map_err(finding)?;
     }
     Ok(L1BlockEvidence {
-        events: collector.finish(),
+        blocks: vec![L1BlockEvents {
+            timestamp_millis: evidence.timestamp_millis,
+            events: collector.finish(),
+        }],
     })
 }
 
@@ -210,7 +228,7 @@ async fn fetch_l1_block_at(
     .map_err(disable)?;
     Ok((
         BlockNumHash::new(number - 1, header.parent_hash),
-        collect_l1_block_evidence(portal, coordinate, &receipts)?,
+        collect_l1_block_evidence(portal, coordinate, header.timestamp_millis, &receipts)?,
     ))
 }
 
@@ -250,6 +268,7 @@ pub(crate) async fn portal_balances(
 fn collect_l1_block_evidence(
     portal: Address,
     block: BlockNumHash,
+    timestamp_millis: u64,
     receipts: &[TempoTransactionReceipt],
 ) -> Result<L1BlockEvidence, L1ReadError> {
     let number = block.number;
@@ -259,8 +278,12 @@ fn collect_l1_block_evidence(
             .extract_receipt(receipt, number)
             .map_err(finding)?;
     }
-    let events = event_collector.finish();
-    Ok(L1BlockEvidence { events })
+    Ok(L1BlockEvidence {
+        blocks: vec![L1BlockEvents {
+            timestamp_millis,
+            events: event_collector.finish(),
+        }],
+    })
 }
 
 fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
@@ -369,6 +392,7 @@ mod tests {
                 .record_with_portal_evidence(
                     BlockNumHash::new(number, B256::with_last_byte(number as u8)),
                     B256::with_last_byte((number - 1) as u8),
+                    number * 1_000,
                     Default::default(),
                     vec![Log {
                         address: portal,
@@ -379,11 +403,25 @@ mod tests {
         }
         let tip = BlockNumHash::new(103, B256::with_last_byte(103));
         tracker
-            .record_with_portal_evidence(tip, B256::with_last_byte(102), Default::default(), vec![])
+            .record_with_portal_evidence(
+                tip,
+                B256::with_last_byte(102),
+                103_000,
+                Default::default(),
+                vec![],
+            )
             .unwrap();
         let evidence = collect_l1_range_at(&provider, &tracker, portal, parent, tip)
             .await
             .unwrap();
+        assert_eq!(
+            evidence
+                .blocks()
+                .iter()
+                .map(|block| block.timestamp_millis)
+                .collect::<Vec<_>>(),
+            vec![101_000, 102_000, 103_000]
+        );
         let mut state = State::default();
         // Applying a deposit before its deferred enablement would fail with UnknownToken.
         state.apply(&effects::from_tempo(&evidence)).unwrap();
@@ -527,6 +565,7 @@ mod tests {
         let tracked = zone_l1::AuthenticatedPortalLogs {
             block: NumHash::new(BLOCK, HASH),
             parent_hash: parent.hash,
+            timestamp_millis: 0,
             logs: vec![log],
         };
 
@@ -542,6 +581,7 @@ mod tests {
         let tracked = zone_l1::AuthenticatedPortalLogs {
             block: NumHash::new(BLOCK, HASH),
             parent_hash: B256::repeat_byte(0xff),
+            timestamp_millis: 0,
             logs: vec![],
         };
         let result = collect_tracked_l1_block_evidence(

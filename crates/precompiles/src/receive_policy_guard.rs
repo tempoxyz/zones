@@ -48,7 +48,7 @@ impl CallRules for ReceivePolicyGuardRules {
         };
 
         if caller == receipt.originator
-            || (receipt.recoveryAuthority != Address::ZERO && caller == receipt.recoveryAuthority)
+            || (!receipt.recoveryAuthority.is_zero() && caller == receipt.recoveryAuthority)
         {
             return CallCheck::Continue;
         }

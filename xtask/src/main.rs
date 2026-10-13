@@ -13,7 +13,7 @@ use crate::{
     generate_p2p_key::GenerateP2pKey,
     generate_zone_genesis::GenerateZoneGenesis,
     install_reference_zone_factory::InstallReferenceZoneFactory,
-    portal_access::{SetAccessMode, SetAllowedAccount, SetGateway, SetGatewayMode},
+    portal_access::{EnableToken, SetAccessMode, SetAllowedAccount, SetGateway, SetGatewayMode},
     portal_pause::PausePortal,
     set_encryption_key::SetEncryptionKey,
     spam_deposits::SpamDeposits,
@@ -36,9 +36,11 @@ mod deploy_router;
 mod deposit;
 mod generate_p2p_key;
 mod generate_zone_genesis;
+mod genesis_forks;
 mod install_reference_zone_factory;
 mod portal_access;
 mod portal_pause;
+mod safe;
 mod set_encryption_key;
 mod spam_deposits;
 mod verify_closed_loop;
@@ -73,6 +75,7 @@ async fn main() -> eyre::Result<()> {
             .wrap_err("failed to deploy private-Zone benchmark fixtures"),
         Action::DeployRouter(args) => args.run().await.wrap_err("failed to deploy router"),
         Action::Deposit(args) => args.run().await.wrap_err("failed to send deposit"),
+        Action::EnableToken(args) => args.run().await.wrap_err("failed to enable token"),
         Action::GenerateZoneGenesis(args) => {
             args.run().await.wrap_err("failed to generate zone genesis")
         }
@@ -122,6 +125,7 @@ enum Action {
     DeployNeobankFixtures(DeployNeobankFixtures),
     DeployRouter(DeployRouter),
     Deposit(Deposit),
+    EnableToken(EnableToken),
     GenerateP2pKey(GenerateP2pKey),
     GenerateZoneGenesis(GenerateZoneGenesis),
     InstallReferenceZoneFactory(InstallReferenceZoneFactory),
