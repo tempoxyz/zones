@@ -295,6 +295,39 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     }
 }
 
+fn verify_transactions_root(
+    transactions: &[TempoTxEnvelope],
+    expected: alloy_primitives::B256,
+    block_hash: alloy_primitives::B256,
+) -> Result<()> {
+    let computed = calculate_transaction_root(transactions);
+    ensure!(
+        computed == expected,
+        "transaction root mismatch for L1 block {block_hash}: expected {expected}, got {computed}"
+    );
+    Ok(())
+}
+
+fn call_matches_event(call: &submitBatchCall, event: &BatchSubmitted) -> bool {
+    event.nextBlockHash == call.blockTransition.nextBlockHash
+        && event.nextProcessedDepositQueueHash == call.depositQueueTransition.nextProcessedHash
+        && event.lastProcessedDepositNumber == call.depositQueueTransition.nextDepositNumber
+        && event.withdrawalQueueHash == call.withdrawalQueueHash
+        && event.lastProcessedEnabledTokenCount
+            == call.tokenEnablementTransition.nextProcessedTokenCount
+}
+
+fn submitted_anchor_number(tempo_block_number: u64, recent_tempo_block_number: u64) -> Result<u64> {
+    if recent_tempo_block_number == 0 {
+        return Ok(tempo_block_number);
+    }
+    ensure!(
+        recent_tempo_block_number > tempo_block_number,
+        "submitted ancestry anchor does not follow its Tempo checkpoint"
+    );
+    Ok(recent_tempo_block_number)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
