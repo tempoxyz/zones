@@ -49,7 +49,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tempoxyz/earn
-          ref: main
+          # The Earn fixtures use the TokenAuthority router ABI. Newer Earn
+          # revisions replace it with PropAMM and remove DemoTokenAuthority.
+          ref: 87478b4ffe41a3590bca0c340ecd79e65aeeffe2
           path: earn
           token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
