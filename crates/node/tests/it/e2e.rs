@@ -14,6 +14,7 @@ use alloy_network::{ReceiptResponse, TransactionBuilder as _};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
+use reth_tasks::Runtime;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
@@ -429,11 +430,31 @@ async fn test_p2p_listener_failure_stops_node() -> eyre::Result<()> {
     let occupied_listener = TcpListener::bind("127.0.0.1:0")?;
     let p2p_config = leader_p2p_config(occupied_listener.local_addr()?)?;
     let l1_rpc_url = start_chain_id_rpc(1337).await?;
-    let mut zone = ZoneTestNode::start_local_with_p2p(l1_rpc_url.to_string(), p2p_config).await?;
+    let tasks = Runtime::test();
+    let task_manager = tasks
+        .take_task_manager_handle()
+        .expect("task manager handle");
 
-    let _exit = tokio::time::timeout(DEFAULT_TIMEOUT, zone.wait_for_node_exit())
-        .await
-        .expect("node did not exit after its P2P listener failed");
+    let failure = tokio::time::timeout(P2P_RECOVERY_TIMEOUT, async {
+        // The expected fatal task can stop startup before it returns a node handle.
+        let zone =
+            ZoneTestNode::start_local_with_p2p(l1_rpc_url.to_string(), p2p_config, tasks).await;
+        let failure = task_manager
+            .await?
+            .expect_err("P2P listener failure must stop the task manager");
+        if let Ok(mut zone) = zone {
+            zone.wait_for_node_exit().await?;
+        }
+        Ok::<_, eyre::Report>(failure)
+    })
+    .await
+    .expect("node did not stop after its P2P listener failed")?;
+    assert_eq!(
+        failure.to_string().lines().next(),
+        Some(
+            "Critical task `zone-p2p` panicked: `P2P runtime failed: Commonware network stopped unexpectedly"
+        )
+    );
     Ok(())
 }
 
