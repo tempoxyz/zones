@@ -874,7 +874,7 @@ Closed access mode requires source queue advancement but cannot prove that the c
 
 Zone transactions specify which enabled TIP-20 token to use for gas fees via a `feeToken` field. The sequencer accepts all enabled tokens as gas. Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit.
 
-Transaction-pool admission requires the recovered sender to hold a nonzero balance of at least one token currently enabled for the zone. This is an admission policy, not a consensus validity rule.
+Transaction-pool admission requires the recovered sender to hold a nonzero balance or pending inbox refund of at least one token currently enabled for the zone. Pending refunds qualify even when all token balances are zero, allowing their owner to submit `ZoneInbox.claimRefund(token)` without first making another deposit. Admission checks token balances first and reads refunds only when every enabled-token balance is zero. This is an admission policy, not a consensus validity rule; transaction fees and refund execution checks still apply.
 
 ### Block Structure
 

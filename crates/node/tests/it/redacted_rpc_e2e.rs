@@ -262,7 +262,7 @@ async fn test_auth_rejection() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Pool admission requires the transaction sender to hold an enabled zone token.
+/// Without a pending refund, pool admission requires an enabled-token balance.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_raw_transaction_requires_enabled_token_balance() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -288,7 +288,7 @@ async fn test_send_raw_transaction_requires_enabled_token_balance() -> eyre::Res
         );
         assert_eq!(
             response["error"]["message"].as_str(),
-            Some("sender must hold a nonzero balance of an enabled zone token"),
+            Some("sender must hold a nonzero balance or pending refund of an enabled zone token"),
             "{method} should explain why the transaction was rejected: {response}",
         );
     }
