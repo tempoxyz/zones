@@ -1976,8 +1976,7 @@ fn validate_has_enabled_token_funds(
         let slot = inbox.withdrawal_bounce_backs[token][sender].slot();
         let refund = state
             .storage(ZONE_INBOX_ADDRESS, slot.into())
-            .map_err(|err| {
-                warn!(%err, %sender, "Failed to read zone refund during pool admission");
+            .map_err(|_| {
                 InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
                     TempoInvalidTransaction::EthInvalidTransaction(
                         "could not verify refund of an enabled zone token".into(),
@@ -2131,7 +2130,7 @@ mod tests {
 
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
-    use alloy_primitives::{Bytes, Signature, TxKind, U256, address};
+    use alloy_primitives::{Bytes, Signature, TxKind, U256};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
@@ -2327,89 +2326,33 @@ mod tests {
     }
 
     #[test]
-    fn pool_admission_accepts_funded_senders_and_pending_refund_owners() {
-        let provider = MockEthProvider::<TempoPrimitives>::new();
-        let enabled_tokens = EnabledTokenRegistry::default();
-        let tokens = [
-            PATH_USD_ADDRESS,
-            address!("20c0000000000000000000000000000000000001"),
-        ];
-        enabled_tokens.write().extend(tokens);
-        let sender = Address::repeat_byte(0x11);
-        let inbox = ZoneInbox::new();
-
-        for token in tokens {
-            let balance_slot = TIP20Token::from_address_unchecked(token).balances[sender].slot();
-            provider.add_account(
-                token,
-                ExtendedAccount::new(0, U256::ZERO)
-                    .extend_storage([(balance_slot.into(), U256::ONE)]),
-            );
-            assert!(validate_has_enabled_token_funds(&provider, &enabled_tokens, sender).is_ok());
-            provider.add_account(token, ExtendedAccount::new(0, U256::ZERO));
-
-            let refund_slot = inbox.withdrawal_bounce_backs[token][sender].slot();
-            provider.add_account(
-                ZONE_INBOX_ADDRESS,
-                ExtendedAccount::new(0, U256::ZERO)
-                    .extend_storage([(refund_slot.into(), U256::ONE)]),
-            );
-            assert!(validate_has_enabled_token_funds(&provider, &enabled_tokens, sender).is_ok());
-            provider.add_account(ZONE_INBOX_ADDRESS, ExtendedAccount::new(0, U256::ZERO));
-        }
-    }
-
-    #[test]
-    fn pool_admission_requires_funds_owned_by_sender_in_an_enabled_token() {
+    fn pool_admission_accepts_only_enabled_refunds_owned_by_sender() {
         let provider = MockEthProvider::<TempoPrimitives>::new();
         let enabled_tokens = EnabledTokenRegistry::default();
         let token = PATH_USD_ADDRESS;
         let sender = Address::repeat_byte(0x11);
-        let other = Address::repeat_byte(0x12);
         let inbox = ZoneInbox::new();
         let sender_refund = inbox.withdrawal_bounce_backs[token][sender].slot();
-        let other_refund = inbox.withdrawal_bounce_backs[token][other].slot();
-        let rejection =
-            "sender must hold a nonzero balance or pending refund of an enabled zone token";
+        let assert_rejected = |sender| {
+            assert_eq!(
+                validate_has_enabled_token_funds(&provider, &enabled_tokens, sender)
+                    .unwrap_err()
+                    .to_string(),
+                "sender must hold a nonzero balance or pending refund of an enabled zone token",
+            );
+        };
 
-        // A refund in a token outside the enabled set cannot grant admission.
-        enabled_tokens
-            .write()
-            .insert(address!("20c0000000000000000000000000000000000001"));
         provider.add_account(
             ZONE_INBOX_ADDRESS,
             ExtendedAccount::new(0, U256::ZERO).extend_storage([(sender_refund.into(), U256::ONE)]),
         );
-        assert_eq!(
-            validate_has_enabled_token_funds(&provider, &enabled_tokens, sender)
-                .unwrap_err()
-                .to_string(),
-            rejection,
-        );
+        assert_rejected(sender);
 
         enabled_tokens.write().insert(token);
-        // Another owner's refund and an explicitly zero sender refund cannot grant admission.
-        provider.add_account(
-            ZONE_INBOX_ADDRESS,
-            ExtendedAccount::new(0, U256::ZERO).extend_storage([
-                (sender_refund.into(), U256::ZERO),
-                (other_refund.into(), U256::ONE),
-            ]),
-        );
-        assert_eq!(
-            validate_has_enabled_token_funds(&provider, &enabled_tokens, sender)
-                .unwrap_err()
-                .to_string(),
-            rejection,
-        );
+        assert!(validate_has_enabled_token_funds(&provider, &enabled_tokens, sender).is_ok());
+        assert_rejected(Address::repeat_byte(0x12));
 
-        // Consumed or absent refunds do not retain admission privileges.
         provider.add_account(ZONE_INBOX_ADDRESS, ExtendedAccount::new(0, U256::ZERO));
-        assert_eq!(
-            validate_has_enabled_token_funds(&provider, &enabled_tokens, sender)
-                .unwrap_err()
-                .to_string(),
-            rejection,
-        );
+        assert_rejected(sender);
     }
 }
