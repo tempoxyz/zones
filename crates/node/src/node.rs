@@ -2131,11 +2131,12 @@ mod tests {
 
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
-    use alloy_primitives::{Bytes, Signature, TxKind, U256};
+    use alloy_primitives::{Bytes, Signature, TxKind, U256, address};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+    use tempo_precompiles::PATH_USD_ADDRESS;
     use tempo_primitives::transaction::{Call, TempoTransaction};
     use zone_chainspec::tempo_chain_spec_for_l1;
 
@@ -2329,7 +2330,10 @@ mod tests {
     fn pool_admission_accepts_funded_senders_and_pending_refund_owners() {
         let provider = MockEthProvider::<TempoPrimitives>::new();
         let enabled_tokens = EnabledTokenRegistry::default();
-        let tokens = [Address::repeat_byte(0x20), Address::repeat_byte(0x21)];
+        let tokens = [
+            PATH_USD_ADDRESS,
+            address!("20c0000000000000000000000000000000000001"),
+        ];
         enabled_tokens.write().extend(tokens);
         let sender = Address::repeat_byte(0x11);
         let inbox = ZoneInbox::new();
@@ -2359,7 +2363,7 @@ mod tests {
     fn pool_admission_requires_funds_owned_by_sender_in_an_enabled_token() {
         let provider = MockEthProvider::<TempoPrimitives>::new();
         let enabled_tokens = EnabledTokenRegistry::default();
-        let token = Address::repeat_byte(0x20);
+        let token = PATH_USD_ADDRESS;
         let sender = Address::repeat_byte(0x11);
         let other = Address::repeat_byte(0x12);
         let inbox = ZoneInbox::new();
@@ -2369,7 +2373,9 @@ mod tests {
             "sender must hold a nonzero balance or pending refund of an enabled zone token";
 
         // A refund in a token outside the enabled set cannot grant admission.
-        enabled_tokens.write().insert(Address::repeat_byte(0x21));
+        enabled_tokens
+            .write()
+            .insert(address!("20c0000000000000000000000000000000000001"));
         provider.add_account(
             ZONE_INBOX_ADDRESS,
             ExtendedAccount::new(0, U256::ZERO).extend_storage([(sender_refund.into(), U256::ONE)]),
