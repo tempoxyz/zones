@@ -1974,16 +1974,9 @@ fn validate_has_enabled_token_funds(
     let inbox = ZoneInbox::new();
     for token in enabled_tokens.iter().copied() {
         let slot = inbox.withdrawal_bounce_backs[token][sender].slot();
-        let refund = state
-            .storage(ZONE_INBOX_ADDRESS, slot.into())
-            .map_err(|_| {
-                InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
-                    TempoInvalidTransaction::EthInvalidTransaction(
-                        "could not verify refund of an enabled zone token".into(),
-                    ),
-                ))
-            })?;
-        if refund.is_some_and(|refund| !refund.is_zero()) {
+        if let Ok(Some(refund)) = state.storage(ZONE_INBOX_ADDRESS, slot.into())
+            && !refund.is_zero()
+        {
             return Ok(());
         }
     }
