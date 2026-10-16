@@ -103,6 +103,7 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
+use zone_precompiles::ZoneInbox;
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
@@ -1938,7 +1939,7 @@ impl ZonePoolBuilder {
     }
 }
 
-fn validate_has_enabled_token_balance(
+fn validate_has_enabled_token_funds(
     provider: &impl StateProviderFactory,
     enabled_tokens: &EnabledTokenRegistry,
     sender: Address,
@@ -1952,7 +1953,8 @@ fn validate_has_enabled_token_balance(
         ))
     })?;
 
-    for token in enabled_tokens.read().iter().copied() {
+    let enabled_tokens = enabled_tokens.read();
+    for token in enabled_tokens.iter().copied() {
         let slot = TIP20Token::from_address_unchecked(token).balances[sender].slot();
         let balance = state.storage(token, slot.into()).map_err(|err| {
             warn!(%err, %sender, "Failed to read zone token balance during pool admission");
@@ -1967,9 +1969,21 @@ fn validate_has_enabled_token_balance(
         }
     }
 
+    // Funded senders return above without reading the inbox. Only zero-balance senders need
+    // the refund fallback, using the same state snapshot and enabled-token set.
+    let inbox = ZoneInbox::new();
+    for token in enabled_tokens.iter().copied() {
+        let slot = inbox.withdrawal_bounce_backs[token][sender].slot();
+        if let Ok(Some(refund)) = state.storage(ZONE_INBOX_ADDRESS, slot.into())
+            && !refund.is_zero()
+        {
+            return Ok(());
+        }
+    }
+
     Err(InvalidPoolTransactionError::other(
         TempoPoolTransactionError::Evm(TempoInvalidTransaction::EthInvalidTransaction(
-            "sender must hold a nonzero balance of an enabled zone token".into(),
+            "sender must hold a nonzero balance or pending refund of an enabled zone token".into(),
         )),
     ))
 }
@@ -2009,7 +2023,7 @@ where
         let provider = ctx.provider().clone();
         let enabled_tokens = self.enabled_tokens;
         validator.set_additional_stateful_validation(move |_origin, tx, _account_state| {
-            validate_has_enabled_token_balance(&provider, &enabled_tokens, *tx.sender_ref())
+            validate_has_enabled_token_funds(&provider, &enabled_tokens, *tx.sender_ref())
         });
 
         let validator =
@@ -2113,6 +2127,8 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
+    use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+    use tempo_precompiles::PATH_USD_ADDRESS;
     use tempo_primitives::transaction::{Call, TempoTransaction};
     use zone_chainspec::tempo_chain_spec_for_l1;
 
@@ -2300,5 +2316,36 @@ mod tests {
         );
 
         assert!(zone_evm::validate_transaction(transaction.tx_env(), &[]).is_err());
+    }
+
+    #[test]
+    fn pool_admission_accepts_only_enabled_refunds_owned_by_sender() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let enabled_tokens = EnabledTokenRegistry::default();
+        let token = PATH_USD_ADDRESS;
+        let sender = Address::repeat_byte(0x11);
+        let inbox = ZoneInbox::new();
+        let sender_refund = inbox.withdrawal_bounce_backs[token][sender].slot();
+        let assert_rejected = |sender| {
+            assert_eq!(
+                validate_has_enabled_token_funds(&provider, &enabled_tokens, sender)
+                    .unwrap_err()
+                    .to_string(),
+                "sender must hold a nonzero balance or pending refund of an enabled zone token",
+            );
+        };
+
+        provider.add_account(
+            ZONE_INBOX_ADDRESS,
+            ExtendedAccount::new(0, U256::ZERO).extend_storage([(sender_refund.into(), U256::ONE)]),
+        );
+        assert_rejected(sender);
+
+        enabled_tokens.write().insert(token);
+        assert!(validate_has_enabled_token_funds(&provider, &enabled_tokens, sender).is_ok());
+        assert_rejected(Address::repeat_byte(0x12));
+
+        provider.add_account(ZONE_INBOX_ADDRESS, ExtendedAccount::new(0, U256::ZERO));
+        assert_rejected(sender);
     }
 }
