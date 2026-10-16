@@ -21,6 +21,7 @@ tempo-precompiles.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 keccak-const.workspace = true
+libloading = "0.8.9"
 
 futures.workspace = true
 minicbor.workspace = true

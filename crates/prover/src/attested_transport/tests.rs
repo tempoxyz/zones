@@ -294,3 +294,105 @@ fn rejects_incomplete_zero_and_malformed_measurement_policies() {
         assert_eq!(result.is_ok(), expected, "policy: {json}: {result:?}");
     }
 }
+
+#[test]
+fn tdx_policy_is_explicit_and_cannot_fall_back_to_nitro() {
+    let measurement = format!("0x{}", "11".repeat(48));
+    let value = serde_json::json!({
+        "backend": "tdx",
+        "measurements": [{
+            "mr_td": measurement,
+            "mr_config_id": measurement,
+            "mr_owner": measurement,
+            "mr_owner_config": measurement,
+            "rtmrs": [measurement, measurement, measurement, measurement],
+            "td_attributes": 0,
+            "xfam": 3
+        }]
+    });
+    let parse = |value: &serde_json::Value| {
+        RemoteProverConfig::from_policy_json(
+            "localhost:5000".into(),
+            &serde_json::to_vec(value).unwrap(),
+        )
+    };
+    assert!(matches!(
+        parse(&value).unwrap().policy,
+        VerificationPolicy::Tdx(_)
+    ));
+    let mut bad = value.clone();
+    bad["backend"] = "unknown".into();
+    assert!(parse(&bad).is_err());
+    bad = value.clone();
+    bad["measurements"][0]["td_attributes"] = 1.into();
+    assert!(parse(&bad).is_err());
+    bad = value.clone();
+    bad["pcrs"] = serde_json::json!({});
+    assert!(parse(&bad).is_err());
+    bad = value;
+    bad["measurements"] = serde_json::json!([]);
+    assert!(parse(&bad).is_err());
+}
+
+#[tokio::test]
+async fn tdx_bootstrap_binds_challenge_and_certificate_before_tls() {
+    // Mock evidence exercises framing/TLS only; DCAP quote cryptography needs hardware testing.
+    let server = AttestedServer::with_profile(
+        |nonce, binding| Ok(crate::tdx::transport_report_data(binding, nonce)?.to_vec()),
+        TDX_MAGIC,
+        crate::tdx::MAX_QUOTE_BYTES,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let serve = async {
+            let mut tls = server.accept(server_io).await.unwrap();
+            let mut private = [0; 1];
+            tls.read_exact(&mut private).await.unwrap();
+            assert_eq!(private, [42]);
+        };
+        let request = async {
+            let mut tls = connect_stream_verified(
+                client_io,
+                TDX_MAGIC,
+                crate::tdx::MAX_QUOTE_BYTES,
+                |evidence, cert, nonce| async move {
+                    require(
+                        evidence
+                            == crate::tdx::transport_report_data(
+                                &certificate_binding(&cert),
+                                &nonce,
+                            )?,
+                        "mock TDX binding mismatch",
+                    )
+                },
+            )
+            .await
+            .unwrap();
+            tls.write_all(&[42]).await.unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(serve, request);
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn nitro_bootstrap_cannot_connect_to_tdx_server() {
+    let server = AttestedServer::with_profile(
+        |_, _| panic!("must reject before attesting"),
+        TDX_MAGIC,
+        crate::tdx::MAX_QUOTE_BYTES,
+    )
+    .unwrap();
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let nitro_policy = policy();
+    let (server_result, client_result) = tokio::join!(
+        server.accept(server_io),
+        connect_stream(client_io, &nitro_policy, AWS_NITRO_ROOT_DER)
+    );
+    assert!(server_result.is_err());
+    assert!(client_result.is_err());
+}
