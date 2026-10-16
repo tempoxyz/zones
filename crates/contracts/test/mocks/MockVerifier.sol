@@ -12,6 +12,8 @@ import {
 /// @notice Mock verifier for testing that always accepts proofs (configurable)
 contract MockVerifier is IVerifier {
 
+    event Verified();
+
     bool public shouldAccept = true;
 
     function setShouldAccept(bool _shouldAccept) external {
@@ -33,9 +35,9 @@ contract MockVerifier is IVerifier {
         bytes calldata // proof
     )
         external
-        view
         returns (bool)
     {
+        if (shouldAccept) emit Verified();
         return shouldAccept;
     }
 
