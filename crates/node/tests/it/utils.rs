@@ -1091,6 +1091,7 @@ impl ZoneTestNode {
             true,
             additional_decryption_keys,
             None,
+            Runtime::test(),
         )
         .await
     }
@@ -1193,10 +1194,11 @@ impl ZoneTestNode {
     pub(crate) async fn start_local_with_p2p(
         l1_rpc_url: String,
         p2p_config: P2pConfig,
+        tasks: Runtime,
     ) -> eyre::Result<Self> {
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32])?;
         let signer = alloy_signer_local::PrivateKeySigner::from(throwaway_key);
-        Self::launch_with_genesis_and_withdrawal_batch_interval(
+        Self::launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
             l1_rpc_url,
             Address::ZERO,
             next_unique_chain_id(),
@@ -1205,6 +1207,9 @@ impl ZoneTestNode {
             8,
             Some(p2p_config),
             true,
+            Vec::new(),
+            None,
+            tasks,
         )
         .await
     }
@@ -1272,6 +1277,7 @@ impl ZoneTestNode {
             spawn_engine,
             Vec::new(),
             None,
+            Runtime::test(),
         )
         .await
     }
@@ -1288,8 +1294,8 @@ impl ZoneTestNode {
         spawn_engine: bool,
         additional_decryption_keys: Vec<SecretKey>,
         prover_config: Option<ZoneProverConfig>,
+        tasks: Runtime,
     ) -> eyre::Result<Self> {
-        let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
         let l1_ws_url = if is_local_dummy_l1 {
             spawn_test_l1_rpc(1337).await?
@@ -4116,6 +4122,7 @@ async fn start_real_p2p_cluster_inner(
                 false,
                 additional_decryption_keys,
                 prover_config.clone(),
+                Runtime::test(),
             )
             .await?,
         );
