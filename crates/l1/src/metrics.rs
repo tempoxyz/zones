@@ -42,3 +42,36 @@ pub(crate) struct L1SubscriberMetrics {
     /// Number of reconnect attempts after the subscriber exits or errors.
     pub reconnects: Counter,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use metrics_util::layers::{Layer, PrefixLayer};
+
+    /// Metric names referenced by production alerts. Renaming any of these silently breaks
+    /// alerting, so the exported Prometheus names are pinned here.
+    ///
+    /// Zone nodes export metrics through reth's recorder, which prefixes every name with `reth`.
+    #[test]
+    fn alerted_metric_names() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&PrefixLayer::new("reth").layer(recorder), || {
+            L1SubscriberMetrics::default();
+        });
+        let rendered = handle.render();
+
+        for name in [
+            "reth_tempo_zone_l1_subscriber_current_l1_lag_blocks",
+            "reth_tempo_zone_l1_subscriber_latest_l1_block_seen",
+        ] {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line.split([' ', '{']).next() == Some(name)),
+                "missing `{name}` in:\n{rendered}"
+            );
+        }
+    }
+}

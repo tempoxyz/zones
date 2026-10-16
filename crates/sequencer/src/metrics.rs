@@ -196,3 +196,49 @@ pub(crate) struct ZoneMonitorMetrics {
     /// Head-page refills requested by the withdrawal processor.
     pub withdrawal_store_refill_total: Counter,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use metrics_util::layers::{Layer, PrefixLayer};
+
+    /// Metric names referenced by production alerts. Renaming any of these silently breaks
+    /// alerting, so the exported Prometheus names are pinned here.
+    ///
+    /// Zone nodes export metrics through reth's recorder, which prefixes every name with `reth`.
+    #[test]
+    fn alerted_metric_names() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&PrefixLayer::new("reth").layer(recorder), || {
+            SequencerMetrics::default();
+            ProverMetrics::default();
+            WithdrawalProcessorMetrics::default();
+            ZoneMonitorMetrics::default();
+        });
+        let rendered = handle.render();
+
+        for name in [
+            "reth_tempo_zone_sequencer_pathusd_balance",
+            "reth_tempo_zone_prover_failure_total",
+            "reth_tempo_zone_withdrawal_processor_portal_queue_head",
+            "reth_tempo_zone_withdrawal_processor_store_batch_count",
+            "reth_tempo_zone_withdrawal_processor_withdrawals_confirmed_total",
+            "reth_tempo_zone_withdrawal_processor_withdrawals_failed_total",
+            "reth_tempo_zone_withdrawal_processor_withdrawals_processed_total",
+            "reth_tempo_zone_monitor_batch_submit_failure_total",
+            "reth_tempo_zone_monitor_batch_submit_success_total",
+            "reth_tempo_zone_monitor_latest_zone_block_observed",
+            "reth_tempo_zone_monitor_latest_zone_block_submitted_to_l1",
+            "reth_tempo_zone_monitor_zone_to_l1_submission_lag_blocks",
+        ] {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line.split([' ', '{']).next() == Some(name)),
+                "missing `{name}` in:\n{rendered}"
+            );
+        }
+    }
+}

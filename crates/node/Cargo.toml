@@ -118,6 +118,8 @@ base64.workspace = true
 const-hex.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
+metrics-exporter-prometheus.workspace = true
+metrics-util.workspace = true
 p256.workspace = true
 rand.workspace = true
 reth-ethereum = { workspace = true, features = ["node", "test-utils"] }

@@ -56,5 +56,7 @@ url = "2"
 [dev-dependencies]
 alloy-rlp.workspace = true
 const-hex.workspace = true
+metrics-exporter-prometheus.workspace = true
+metrics-util.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
