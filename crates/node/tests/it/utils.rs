@@ -4593,6 +4593,31 @@ impl RedactedRpcTestCtx {
         )
     }
 
+    /// Build a Keychain auth token signed for `signed_for` and re-wrapped with `wrapped_as` as its
+    /// `user_address`, keeping the inner signature.
+    pub(crate) fn rewrapped_keychain_p256_token(
+        &self,
+        signed_for: Address,
+        wrapped_as: Address,
+        signing_key: &P256SigningKey,
+        version: u8,
+    ) -> String {
+        let now = now_secs();
+        let (fields, digest) = zone_node::rpc::auth::build_token_fields(
+            self.config.zone_id,
+            self.config.chain_id,
+            now,
+            now + 600,
+        );
+        let (signature, _) = sign_keychain_signature(digest, signing_key, signed_for, version)
+            .expect("keychain signing failed");
+
+        auth_tokens::build_token_with_signature(
+            auth_tokens::rewrap_keychain_signature(&signature, wrapped_as),
+            &fields,
+        )
+    }
+
     /// Send an authenticated JSON-RPC call to the redacted RPC server.
     pub(crate) async fn call(
         &self,
