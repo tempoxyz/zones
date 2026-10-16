@@ -6,7 +6,7 @@ use alloy_primitives::B256;
 use alloy_rlp::Decodable as _;
 use alloy_rpc_types_engine::ForkchoiceState;
 use alloy_sol_types::SolCall as _;
-use eyre::{OptionExt as _, WrapErr as _};
+use eyre::{OptionExt as _, WrapErr as _, ensure};
 use reth_node_api::{ConsensusEngineHandle, PayloadTypes as _};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use reth_provider::HeaderProvider;
@@ -546,11 +546,10 @@ where
         }
 
         let expected_number = best_block.saturating_add(1);
-        if block_number != expected_number {
-            eyre::bail!(
-                "peer block gap: local head is {best_block}, received height {block_number}, expected {expected_number}"
-            );
-        }
+        ensure!(
+            block_number == expected_number,
+            "peer block gap: local head is {best_block}, received height {block_number}, expected {expected_number}"
+        );
 
         // 2. Block's parent hash is correct
         let parent = self
@@ -558,13 +557,12 @@ where
             .provider
             .sealed_header(best_block)?
             .ok_or_else(|| eyre::eyre!("missing local canonical head at height {best_block}"))?;
-        if block.parent_hash() != parent.hash() {
-            eyre::bail!(
-                "peer block parent mismatch at height {block_number}: local={}, received={}",
-                parent.hash(),
-                block.parent_hash()
-            );
-        }
+        ensure!(
+            block.parent_hash() == parent.hash(),
+            "peer block parent mismatch at height {block_number}: local={}, received={}",
+            parent.hash(),
+            block.parent_hash()
+        );
 
         // 3. Require the block to import a non-empty contiguous L1 header range
         // beginning immediately after the local Tempo checkpoint.
@@ -647,9 +645,10 @@ where
         validate_block_timestamp(block.header().timestamp_millis(), SystemTime::now())?;
         let payload = ZonePayloadTypes::block_to_payload(block, None);
         let status = self.context.engine.new_payload(payload).await?;
-        if !status.is_valid() {
-            eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
-        }
+        ensure!(
+            status.is_valid(),
+            "execution engine rejected peer block {block_number} ({hash}): {status:?}"
+        );
 
         // Peers without a stored witness still send plain blocks. Preserve local collection
         // for them; supplied witnesses are persisted directly. Both paths precede canonicalization.
@@ -665,7 +664,7 @@ where
                     }
                 })
                 .await
-                .ok_or_else(|| eyre::eyre!("follower stopped while persisting peer witness"))?
+                .ok_or_eyre("follower stopped while persisting peer witness")?
                 .wrap_err_with(|| {
                     format!("persist witness before importing Zone block {block_number}")
                 })?;
@@ -678,11 +677,10 @@ where
             .engine
             .fork_choice_updated(forkchoice, None)
             .await?;
-        if !result.is_valid() {
-            eyre::bail!(
-                "execution engine rejected forkchoice for block {block_number} ({hash}): {result:?}"
-            );
-        }
+        ensure!(
+            result.is_valid(),
+            "execution engine rejected forkchoice for block {block_number} ({hash}): {result:?}"
+        );
 
         // Mirror the leader engine only after the block is canonical locally. The block cannot be
         // un-imported at this point, so the observation must be released unconditionally — leaving it
@@ -767,10 +765,10 @@ fn validate_full_portal_inputs(
     for block in work {
         let next_deposit_offset = deposit_offset
             .checked_add(block.events.deposits.len())
-            .ok_or_else(|| eyre::eyre!("advanceTempo deposit count overflow"))?;
+            .ok_or_eyre("advanceTempo deposit count overflow")?;
         let next_token_offset = token_offset
             .checked_add(block.events.enabled_tokens.len())
-            .ok_or_else(|| eyre::eyre!("advanceTempo token count overflow"))?;
+            .ok_or_eyre("advanceTempo token count overflow")?;
         eyre::ensure!(
             next_deposit_offset <= deposits.len() && next_token_offset <= enabled_tokens.len(),
             "advanceTempo calldata is shorter than the deferred portal event range"
@@ -879,28 +877,24 @@ fn validate_l1_checkpoint_range(
     local_hash: B256,
     zone_block_number: u64,
 ) -> eyre::Result<()> {
-    if headers.is_empty() {
-        eyre::bail!("peer block imports no Tempo headers");
-    }
+    ensure!(!headers.is_empty(), "peer block imports no Tempo headers");
     let mut previous_number = local_number;
     let mut previous_hash = local_hash;
     for l1_header in headers {
-        if l1_header.number() != previous_number.saturating_add(1) {
-            eyre::bail!(
-                "peer block {zone_block_number} advances Tempo to L1 block {}, but local checkpoint is {}; expected {}",
-                l1_header.number(),
-                previous_number,
-                previous_number.saturating_add(1)
-            );
-        }
-        if l1_header.parent_hash() != previous_hash {
-            eyre::bail!(
-                "advanceTempo L1 header {} does not extend the local Tempo checkpoint: embedded parent {}, local hash {}",
-                l1_header.number(),
-                l1_header.parent_hash(),
-                previous_hash
-            );
-        }
+        ensure!(
+            l1_header.number() == previous_number.saturating_add(1),
+            "peer block {zone_block_number} advances Tempo to L1 block {}, but local checkpoint is {}; expected {}",
+            l1_header.number(),
+            previous_number,
+            previous_number.saturating_add(1)
+        );
+        ensure!(
+            l1_header.parent_hash() == previous_hash,
+            "advanceTempo L1 header {} does not extend the local Tempo checkpoint: embedded parent {}, local hash {}",
+            l1_header.number(),
+            l1_header.parent_hash(),
+            previous_hash
+        );
         previous_number = l1_header.number();
         previous_hash = l1_header.hash();
     }
@@ -965,9 +959,11 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
     // Do some basic checks
 
     // 1. `advanceTempo` is the first tx
-    let first_tx = block.body().transactions().next().ok_or_else(|| {
-        eyre::eyre!("peer block has no transactions; expected an advanceTempo system tx")
-    })?;
+    let first_tx = block
+        .body()
+        .transactions()
+        .next()
+        .ok_or_eyre("peer block has no transactions; expected an advanceTempo system tx")?;
     let TempoTxEnvelope::Legacy(signed) = first_tx else {
         eyre::bail!("first transaction in peer block is not a legacy system transaction");
     };
@@ -999,9 +995,10 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
         for encoded in call.headers {
             let mut input = encoded.as_ref();
             let header = TempoHeader::decode(&mut input)?;
-            if !input.is_empty() {
-                eyre::bail!("advanceTempoHeaders header has trailing bytes");
-            }
+            ensure!(
+                input.is_empty(),
+                "advanceTempoHeaders header has trailing bytes"
+            );
             headers.push(SealedHeader::seal_slow(header));
         }
         return Ok(DecodedTempoImport::CheckpointOnly { headers });

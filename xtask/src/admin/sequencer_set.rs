@@ -8,7 +8,7 @@ use alloy::{
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
 };
-use eyre::{Context as _, ensure, eyre};
+use eyre::{Context as _, OptionExt, ensure, eyre};
 use serde::Serialize;
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::ZonePortal;
@@ -103,7 +103,7 @@ impl Replace {
         let resulting_version = self
             .expected_version
             .checked_add(1)
-            .ok_or_else(|| eyre!("expected sequencer-set version cannot be incremented"))?;
+            .ok_or_eyre("expected sequencer-set version cannot be incremented")?;
         let next_manifest = ZoneManifest::read_from_file(&self.next_manifest)
             .wrap_err("failed to load next Zone manifest")?;
         let signer = read_private_key_file(&self.transaction_key_file)?;

@@ -3,6 +3,7 @@
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::B256;
 use alloy_rlp::Decodable as _;
+use eyre::OptionExt;
 use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_primitives_traits::SealedBlock;
@@ -259,16 +260,16 @@ where
     .await?;
 
     while *last_broadcast < canonical {
-        let persisted_tip = persisted.next().await.ok_or_else(|| {
-            eyre::eyre!("persisted zone block stream closed before the canonical tail persisted")
-        })?;
-        if persisted_tip.number < *last_broadcast {
-            eyre::bail!(
-                "persisted zone head moved backwards while draining after the leader engine stopped: persisted={}, last_broadcast={}",
-                persisted_tip.number,
-                *last_broadcast,
-            );
-        }
+        let persisted_tip = persisted
+            .next()
+            .await
+            .ok_or_eyre("persisted zone block stream closed before the canonical tail persisted")?;
+        eyre::ensure!(
+            persisted_tip.number >= *last_broadcast,
+            "persisted zone head moved backwards while draining after the leader engine stopped: persisted={}, last_broadcast={}",
+            persisted_tip.number,
+            *last_broadcast,
+        );
         broadcast_persisted_range(
             provider,
             commands,

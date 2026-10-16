@@ -3,7 +3,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
 };
-use eyre::{WrapErr as _, eyre};
+use eyre::{OptionExt, WrapErr as _, eyre};
 use std::{path::PathBuf, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
@@ -163,15 +163,15 @@ impl DemoSwapAndDeposit {
         let dex_liquidity = self
             .amount
             .checked_mul(DEX_LIQUIDITY_MULTIPLIER)
-            .ok_or_else(|| eyre!("dex liquidity amount overflow"))?;
+            .ok_or_eyre("dex liquidity amount overflow")?;
         let alpha_gross_deposit = self
             .amount
             .checked_add(withdrawal_fee)
             .and_then(|value| value.checked_add(deposit_fee))
-            .ok_or_else(|| eyre!("alpha deposit amount overflow"))?;
+            .ok_or_eyre("alpha deposit amount overflow")?;
         let pathusd_gross_deposit = DEMO_PATHUSD_GAS_NET
             .checked_add(deposit_fee)
-            .ok_or_else(|| eyre!("pathUSD deposit amount overflow"))?;
+            .ok_or_eyre("pathUSD deposit amount overflow")?;
 
         println!("╔══════════════════════════════════════════════════════════════╗");
         println!("║       Same-Zone Router Swap + Deposit Demo                  ║");
@@ -196,7 +196,7 @@ impl DemoSwapAndDeposit {
         let required_pathusd = dex_liquidity
             .checked_add(pathusd_gross_deposit)
             .and_then(|value| value.checked_add(PATHUSD_HEADROOM))
-            .ok_or_else(|| eyre!("required pathUSD amount overflow"))?;
+            .ok_or_eyre("required pathUSD amount overflow")?;
         let l1_balance = wait_for_balance(
             &l1,
             PATH_USD_ADDRESS,
@@ -221,7 +221,7 @@ impl DemoSwapAndDeposit {
         println!("Step 3: Configure and mint the demo tokens");
         let mint_amount = dex_liquidity
             .checked_add(self.amount)
-            .ok_or_else(|| eyre!("mint amount overflow"))?;
+            .ok_or_eyre("mint amount overflow")?;
         configure_and_mint_demo_token(&l1, operator, alpha, mint_amount).await?;
         configure_and_mint_demo_token(&l1, operator, beta, mint_amount).await?;
         println!("  Minted {mint_amount} units of each token to the operator");
@@ -616,7 +616,7 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
         portal_address,
         key_index,
     )
-    .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
+    .ok_or_eyre("ECIES encryption failed — invalid sequencer public key?")?;
     let receipt = portal
         .deposit(
             token,
@@ -662,7 +662,7 @@ async fn build_router_callback<P: Provider<TempoNetwork>>(
         request.target_portal,
         key_index,
     )
-    .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
+    .ok_or_eyre("ECIES encryption failed — invalid sequencer public key?")?;
 
     let callback = SwapAndDepositRouterCallback {
         token_out: request.token_out,

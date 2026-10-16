@@ -6,7 +6,7 @@ use alloy::{
     primitives::Address,
     providers::{Provider, ProviderBuilder},
 };
-use eyre::{Context as _, ensure, eyre};
+use eyre::{Context as _, OptionExt, ensure, eyre};
 use serde::Serialize;
 use tempo_alloy::TempoNetwork;
 use zone_p2p::ZoneManifest;
@@ -128,11 +128,9 @@ impl LeaderSet {
             .as_ref()
             .ok_or_else(|| eyre!("target {} has no sequencer status", target_node.name))?;
         if self.rolling_membership {
-            let manifest = view.manifest.as_ref().ok_or_else(|| {
-                eyre!(
-                    "--rolling-membership requires --zone-manifest with the finalized next manifest"
-                )
-            })?;
+            let manifest = view.manifest.as_ref().ok_or_eyre(
+                "--rolling-membership requires --zone-manifest with the finalized next manifest",
+            )?;
             let manifest_members = manifest
                 .quorum_nodes()
                 .map(|(_, address)| address)

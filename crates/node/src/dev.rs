@@ -11,6 +11,7 @@ use alloy_network::{EthereumWallet, ReceiptResponse as _};
 use alloy_primitives::{Address, B256};
 use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
+use eyre::OptionExt;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
@@ -133,7 +134,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
 
     let zone_created = receipt
         .decoded_log::<ZoneFactory::ZoneCreated>()
-        .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
+        .ok_or_eyre("ZoneCreated event not found")?;
     let zone_id = zone_created.zoneId;
     let portal = zone_created.portal;
     let parent_chain_id = provider.get_chain_id().await?;
@@ -237,6 +238,7 @@ mod command {
 
     use alloy_primitives::Address;
     use alloy_signer_local::PrivateKeySigner;
+    use eyre::OptionExt;
 
     use super::{ProvisionConfig, provision_zone};
     use crate::cli::ZoneCli;
@@ -335,11 +337,11 @@ mod command {
             let ws_port = self
                 .http_port
                 .checked_add(1)
-                .ok_or_else(|| eyre::eyre!("--http.port too large for the WS port"))?;
+                .ok_or_eyre("--http.port too large for the WS port")?;
             let p2p_port = self
                 .http_port
                 .checked_add(2)
-                .ok_or_else(|| eyre::eyre!("--http.port too large for the P2P port"))?;
+                .ok_or_eyre("--http.port too large for the P2P port")?;
 
             prepare_datadir(&self.datadir)?;
 

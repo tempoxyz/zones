@@ -13,7 +13,7 @@ use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
 use alloy_sol_types::{SolCall as _, SolInterface as _};
 use clap::{Parser, Subcommand};
-use eyre::{Context, OptionExt, Result, bail, eyre};
+use eyre::{Context, OptionExt, Result, bail, ensure, eyre};
 use futures::{StreamExt, TryStreamExt, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
@@ -233,12 +233,14 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         target = ?args.target,
         "generating SPF input"
     );
-    if args.zone_block_count == Some(0) {
-        bail!("--zone-block-count must be greater than zero");
-    }
-    if args.block == Some(0.into()) {
-        bail!("Zone genesis block 0 does not belong to a submitted batch");
-    }
+    ensure!(
+        args.zone_block_count != Some(0),
+        "--zone-block-count must be greater than zero"
+    );
+    ensure!(
+        args.block != Some(0.into()),
+        "Zone genesis block 0 does not belong to a submitted batch"
+    );
     let chain = load_chain(&args.chain).await?;
 
     let started = start_phase("discovery");
@@ -267,11 +269,11 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
             find_submitted_batch(&tempo_provider, &zone_provider, &discovery, block).await?;
         let (parent, parent_number, extracted) =
             discover_batch(&zone_provider, &discovery, Some(batch.from), Some(batch.to)).await?;
-        if parent.hash_slow() != batch.parent_hash
-            || extracted.last().expect("non-empty batch").block_hash != batch.block_hash
-        {
-            bail!("selected Zone range does not match the submitted batch hashes");
-        }
+        ensure!(
+            parent.hash_slow() == batch.parent_hash
+                && extracted.last().expect("non-empty batch").block_hash == batch.block_hash,
+            "selected Zone range does not match the submitted batch hashes"
+        );
         let target = extracted
             .iter()
             .find(|extracted| extracted.input.number == block)
@@ -309,18 +311,16 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let parent_withdrawal_batch_index = withdrawal_batch_index_at(&zone_provider, parent_number)
         .await
         .context("read withdrawal batch index from parent Zone state")?;
-    if args.from_block.is_none()
-        && args.block.is_none()
-        && parent_withdrawal_batch_index != discovery.portal_withdrawal_batch_index
-    {
-        bail!(
-            "parent Zone state has withdrawal batch index {parent_withdrawal_batch_index}, but the Tempo portal reports {}",
-            discovery.portal_withdrawal_batch_index,
-        );
-    }
+    ensure!(
+        args.from_block.is_some()
+            || args.block.is_some()
+            || parent_withdrawal_batch_index == discovery.portal_withdrawal_batch_index,
+        "parent Zone state has withdrawal batch index {parent_withdrawal_batch_index}, but the Tempo portal reports {}",
+        discovery.portal_withdrawal_batch_index,
+    );
     let expected_withdrawal_batch_index = parent_withdrawal_batch_index
         .checked_add(u64::try_from(finalization_count).expect("block count fits u64"))
-        .ok_or_else(|| eyre!("withdrawal batch index overflow"))?;
+        .ok_or_eyre("withdrawal batch index overflow")?;
     let (zone_head, tempo_head) = tokio::try_join!(
         zone_provider.get_block_number(),
         tempo_provider.get_block_number()
@@ -383,12 +383,11 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let started = start_phase("SPF validation");
     let output = prove_zone_batch(&spf_config, witness.clone())
         .context("generated witness failed SPF validation")?;
-    if output.block_transition.nextBlockHash != next_block_hash {
-        bail!(
-            "SPF replay produced {}, but Zone block {to_block} has hash {next_block_hash}",
-            output.block_transition.nextBlockHash
-        );
-    }
+    ensure!(
+        output.block_transition.nextBlockHash == next_block_hash,
+        "SPF replay produced {}, but Zone block {to_block} has hash {next_block_hash}",
+        output.block_transition.nextBlockHash
+    );
     timings.record("SPF validation", started, ());
 
     let request_id = format!(
@@ -492,18 +491,22 @@ fn validate_proof_response<'a>(
             output,
             ..
         } => {
-            if *version != PROTOCOL_VERSION {
-                bail!("target prover response version {version}; expected {PROTOCOL_VERSION}");
-            }
-            if response_id != request_id {
-                bail!("target prover response ID {response_id} does not match {request_id}");
-            }
-            if proof_bundle.verifier_config.is_empty() {
-                bail!("target prover returned empty proofBundle.verifierConfig");
-            }
-            if proof_bundle.proof.is_empty() {
-                bail!("target prover returned empty proofBundle.proof");
-            }
+            ensure!(
+                *version == PROTOCOL_VERSION,
+                "target prover response version {version}; expected {PROTOCOL_VERSION}"
+            );
+            ensure!(
+                response_id == request_id,
+                "target prover response ID {response_id} does not match {request_id}"
+            );
+            ensure!(
+                !proof_bundle.verifier_config.is_empty(),
+                "target prover returned empty proofBundle.verifierConfig"
+            );
+            ensure!(
+                !proof_bundle.proof.is_empty(),
+                "target prover returned empty proofBundle.proof"
+            );
             Ok((output, proof_bundle))
         }
         VerifyResponse::Error {
@@ -512,9 +515,10 @@ fn validate_proof_response<'a>(
             code,
             message,
         } => {
-            if *version != PROTOCOL_VERSION {
-                bail!("target prover response version {version}; expected {PROTOCOL_VERSION}");
-            }
+            ensure!(
+                *version == PROTOCOL_VERSION,
+                "target prover response version {version}; expected {PROTOCOL_VERSION}"
+            );
             if let Some(response_id) = response_id
                 && response_id != request_id
             {
@@ -547,7 +551,7 @@ async fn exchange_with_prover(
         .receive()
         .await
         .wrap_err_with(|| format!("read response from target prover at {target}"))?
-        .ok_or_else(|| eyre!("target prover closed the connection without a response"))?;
+        .ok_or_eyre("target prover closed the connection without a response")?;
     info!(
         elapsed_ms = started.elapsed().as_millis(),
         "received prover response"
@@ -577,9 +581,10 @@ async fn send_to_prover(
     let VerifyResponse::Ok { output, .. } = response else {
         unreachable!("successful validation requires an ok response")
     };
-    if *output != *expected_output {
-        bail!("target prover output does not match local SPF output");
-    }
+    ensure!(
+        *output == *expected_output,
+        "target prover output does not match local SPF output"
+    );
     Ok(request_bytes)
 }
 
@@ -625,15 +630,15 @@ async fn find_submitted_batch(
     discovery: &Discovery,
     target: u64,
 ) -> Result<SubmittedBatch> {
-    if target == 0 {
-        bail!("Zone genesis block 0 does not belong to a submitted batch");
-    }
+    ensure!(
+        target != 0,
+        "Zone genesis block 0 does not belong to a submitted batch"
+    );
     let committed = portal_parent_number(zone, discovery).await?;
-    if target > committed {
-        bail!(
-            "batch containing Zone block {target} has not been submitted yet (last submitted block: {committed})"
-        );
-    }
+    ensure!(
+        target <= committed,
+        "batch containing Zone block {target} has not been submitted yet (last submitted block: {committed})"
+    );
 
     let portal = ZonePortal::new(discovery.portal, tempo.clone());
     let mut hi = tempo.get_block_number().await?;
@@ -676,9 +681,10 @@ async fn find_submitted_batch(
                 });
             }
         }
-        if lo == 0 {
-            bail!("could not find complete submitted batch boundaries for Zone block {target}");
-        }
+        ensure!(
+            lo != 0,
+            "could not find complete submitted batch boundaries for Zone block {target}"
+        );
         hi = lo - 1;
     }
 }
@@ -703,9 +709,10 @@ async fn discover(
                 .context("read Tempo portal from unrestricted Zone RPC")
         }
     )?;
-    if portal_address.is_zero() {
-        bail!("ZoneInbox reports a zero Tempo portal address");
-    }
+    ensure!(
+        !portal_address.is_zero(),
+        "ZoneInbox reports a zero Tempo portal address"
+    );
     let (zone_id, portal) = tokio::try_join!(
         async {
             ZonePortal::new(portal_address, tempo.clone())
@@ -717,11 +724,10 @@ async fn discover(
         read_portal_snapshot(tempo, portal_address),
     )?;
     let expected_chain_id = zone_chain_id(tempo_chain_id, zone_id)?;
-    if actual_zone_chain_id != expected_chain_id {
-        bail!(
-            "Zone portal reports Zone ID {zone_id}, which requires chain ID {expected_chain_id}, but the unrestricted Zone RPC reports {actual_zone_chain_id}"
-        );
-    }
+    ensure!(
+        actual_zone_chain_id == expected_chain_id,
+        "Zone portal reports Zone ID {zone_id}, which requires chain ID {expected_chain_id}, but the unrestricted Zone RPC reports {actual_zone_chain_id}"
+    );
 
     Ok(Discovery {
         zone_id,
@@ -776,7 +782,7 @@ async fn discover_counted_batch(
             None => portal_parent_number(zone, &discovery)
                 .await?
                 .checked_add(1)
-                .ok_or_else(|| eyre!("Zone block number overflow after the portal commitment"))?,
+                .ok_or_eyre("Zone block number overflow after the portal commitment")?,
         };
         let (_, to) = counted_range(from, block_count)?;
         info!(
@@ -836,12 +842,11 @@ async fn discover_counted_batch(
             let sleep_for = match wait_timeout {
                 Some(timeout) => {
                     let elapsed = wait_started.elapsed();
-                    if elapsed >= timeout {
-                        bail!(
-                            "timed out after {:.3}s waiting for Zone block {to}; current head is {zone_head}",
-                            elapsed.as_secs_f64()
-                        );
-                    }
+                    ensure!(
+                        elapsed < timeout,
+                        "timed out after {:.3}s waiting for Zone block {to}; current head is {zone_head}",
+                        elapsed.as_secs_f64()
+                    );
                     ZONE_HEAD_POLL_INTERVAL.min(timeout - elapsed)
                 }
                 None => ZONE_HEAD_POLL_INTERVAL,
@@ -885,15 +890,14 @@ async fn discover_counted_batch(
 }
 
 fn counted_range(from: u64, block_count: u64) -> Result<(u64, u64)> {
-    if from == 0 {
-        bail!("a batch cannot start at Zone genesis block 0");
-    }
-    if block_count == 0 {
-        bail!("--zone-block-count must be greater than zero");
-    }
+    ensure!(from != 0, "a batch cannot start at Zone genesis block 0");
+    ensure!(
+        block_count != 0,
+        "--zone-block-count must be greater than zero"
+    );
     let to = from
         .checked_add(block_count - 1)
-        .ok_or_else(|| eyre!("Zone block range overflow"))?;
+        .ok_or_eyre("Zone block range overflow")?;
     Ok((from, to))
 }
 
@@ -964,25 +968,24 @@ async fn discover_batch(
         None => portal_parent_number(zone, discovery)
             .await?
             .checked_add(1)
-            .ok_or_else(|| eyre!("Zone block number overflow"))?,
+            .ok_or_eyre("Zone block number overflow")?,
     };
-    if from == 0 {
-        bail!("a batch cannot start at Zone genesis block 0");
-    }
+    ensure!(from != 0, "a batch cannot start at Zone genesis block 0");
     let parent_number = from - 1;
     let parent_header = zone_header(zone, parent_number).await?;
-    if from_override.is_none()
-        && !discovery.portal_block_hash.is_zero()
-        && parent_header.hash_slow() != discovery.portal_block_hash
-    {
-        bail!("resolved parent header does not match the portal block hash");
-    }
+    ensure!(
+        from_override.is_some()
+            || discovery.portal_block_hash.is_zero()
+            || parent_header.hash_slow() == discovery.portal_block_hash,
+        "resolved parent header does not match the portal block hash"
+    );
 
     let tip = zone.get_block_number().await?;
     let limit = to_override.unwrap_or(tip);
-    if from > limit {
-        bail!("no Zone blocks available in requested range {from}..={limit}");
-    }
+    ensure!(
+        from <= limit,
+        "no Zone blocks available in requested range {from}..={limit}"
+    );
 
     let mut blocks = Vec::new();
     for number in from..=limit {
@@ -1046,12 +1049,11 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
 
         match envelope.to() {
             Some(to) if to == ZONE_INBOX_ADDRESS => {
-                if tempo_import.is_some() {
-                    bail!(
-                        "Zone block {} contains multiple advanceTempo calls",
-                        header.number()
-                    );
-                }
+                ensure!(
+                    tempo_import.is_none(),
+                    "Zone block {} contains multiple advanceTempo calls",
+                    header.number()
+                );
                 let call = ZoneInbox::IZoneInboxCalls::abi_decode(envelope.input()).wrap_err_with(
                     || format!("decode ZoneInbox call in Zone block {}", header.number()),
                 )?;
@@ -1087,12 +1089,11 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                 }
             }
             Some(to) if to == ZONE_OUTBOX_ADDRESS => {
-                if finalize_count.is_some() {
-                    bail!(
-                        "Zone block {} contains multiple finalizeWithdrawalBatch calls",
-                        header.number()
-                    );
-                }
+                ensure!(
+                    finalize_count.is_none(),
+                    "Zone block {} contains multiple finalizeWithdrawalBatch calls",
+                    header.number()
+                );
                 let call = ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(envelope.input())
                     .wrap_err_with(|| {
                         format!(
@@ -1100,13 +1101,12 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                             header.number()
                         )
                     })?;
-                if call.blockNumber != header.number() {
-                    bail!(
-                        "finalization in Zone block {} declares block {}",
-                        header.number(),
-                        call.blockNumber
-                    );
-                }
+                ensure!(
+                    call.blockNumber == header.number(),
+                    "finalization in Zone block {} declares block {}",
+                    header.number(),
+                    call.blockNumber
+                );
                 finalize_count = Some(call.count);
                 finalize_encrypted_senders = call.encryptedSenders;
             }
@@ -1237,9 +1237,10 @@ async fn tempo_anchor(
 ) -> Result<(u64, B256, Vec<Bytes>, &'static str)> {
     let checkpoint_number = checkpoint.number();
     let tip = tempo.get_block_number().await?;
-    if checkpoint_number > tip {
-        bail!("Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}");
-    }
+    ensure!(
+        checkpoint_number <= tip,
+        "Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}"
+    );
     let gap = tip - checkpoint_number;
     if gap < HISTORY_SERVE_WINDOW as u64 - EIP2935_SAFETY_MARGIN {
         return Ok((
@@ -1263,7 +1264,7 @@ async fn tempo_anchor(
     let anchor_hash = headers
         .last()
         .map(|(_, header)| header.hash_slow())
-        .ok_or_else(|| eyre!("empty Tempo ancestry"))?;
+        .ok_or_eyre("empty Tempo ancestry")?;
     Ok((
         anchor,
         anchor_hash,

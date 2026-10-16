@@ -5,7 +5,7 @@ use alloy::{
     rpc::types::TransactionRequest,
     sol_types::SolValue,
 };
-use eyre::{WrapErr as _, eyre};
+use eyre::{OptionExt, WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 
@@ -84,7 +84,7 @@ impl DeployRouter {
 
         let router = receipt
             .contract_address
-            .ok_or_else(|| eyre!("router deployment receipt missing contract address"))?;
+            .ok_or_eyre("router deployment receipt missing contract address")?;
 
         zone_metadata.set_address("zoneFactory", zone_factory);
         zone_metadata.set_address("swapAndDepositRouter", router);

@@ -5,7 +5,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     rpc::types::BlockId,
 };
-use eyre::{WrapErr as _, ensure};
+use eyre::{OptionExt, WrapErr as _, ensure};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
 use tempo_zone_contracts::{
@@ -191,7 +191,7 @@ impl VerifyPortalBacking {
             .and_then(|total| total.checked_add(inbox_refunds))
             .and_then(|total| total.checked_add(pending_deposits))
             .and_then(|total| total.checked_add(pending_withdrawals))
-            .ok_or_else(|| eyre::eyre!("required backing overflow"))?;
+            .ok_or_eyre("required backing overflow")?;
 
         println!("Portal backing audit");
         println!("  L1 snapshot block:       {l1_snapshot}");
@@ -261,7 +261,7 @@ async fn pending_deposit_liability<P: Provider<TempoNetwork>>(
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.netAmount))
-                .ok_or_else(|| eyre::eyre!("pending deposit total overflow"))
+                .ok_or_eyre("pending deposit total overflow")
         })
 }
 
@@ -333,7 +333,7 @@ async fn withdrawal_liability<P: Provider<TempoNetwork>>(
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("requested withdrawal total overflow"))
+                .ok_or_eyre("requested withdrawal total overflow")
         })?;
     let paid = paid
         .into_iter()
@@ -341,7 +341,7 @@ async fn withdrawal_liability<P: Provider<TempoNetwork>>(
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("paid withdrawal total overflow"))
+                .ok_or_eyre("paid withdrawal total overflow")
         })?;
     let deposit_bounce_backs = deposit_bounce_backs
         .into_iter()
@@ -352,18 +352,18 @@ async fn withdrawal_liability<P: Provider<TempoNetwork>>(
                     event.amount,
                     event.bouncebackFee,
                 ))
-                .ok_or_else(|| eyre::eyre!("paid deposit bounce-back total overflow"))
+                .ok_or_eyre("paid deposit bounce-back total overflow")
         })?;
     let paid = paid
         .checked_add(deposit_bounce_backs)
-        .ok_or_else(|| eyre::eyre!("paid withdrawal total overflow"))?;
+        .ok_or_eyre("paid withdrawal total overflow")?;
     let reminted = reminted
         .into_iter()
         .filter(|(event, _)| event.token == token)
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("re-minted withdrawal bounce-back total overflow"))
+                .ok_or_eyre("re-minted withdrawal bounce-back total overflow")
         })?;
     let portal_refunds = portal_refunds
         .into_iter()
@@ -374,7 +374,7 @@ async fn withdrawal_liability<P: Provider<TempoNetwork>>(
                     event.amount,
                     event.bouncebackFee,
                 ))
-                .ok_or_else(|| eyre::eyre!("Portal refund transition total overflow"))
+                .ok_or_eyre("Portal refund transition total overflow")
         })?;
     let refunded = refunded
         .into_iter()
@@ -382,10 +382,10 @@ async fn withdrawal_liability<P: Provider<TempoNetwork>>(
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("refunded withdrawal bounce-back total overflow"))
+                .ok_or_eyre("refunded withdrawal bounce-back total overflow")
         })?
         .checked_add(portal_refunds)
-        .ok_or_else(|| eyre::eyre!("refunded withdrawal total overflow"))?;
+        .ok_or_eyre("refunded withdrawal total overflow")?;
 
     outstanding_withdrawals(requested, paid, reminted, refunded)
 }
@@ -445,7 +445,7 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Portal pending refund total overflow"))
+                .ok_or_eyre("Portal pending refund total overflow")
         })?;
     let claimed_total = claimed
         .into_iter()
@@ -453,7 +453,7 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Portal claimed refund total overflow"))
+                .ok_or_eyre("Portal claimed refund total overflow")
         })?;
 
     outstanding_refunds("Portal", pending_total, claimed_total)
@@ -491,7 +491,7 @@ async fn inbox_refund_liability<P: Provider<TempoNetwork>>(
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Inbox pending refund total overflow"))
+                .ok_or_eyre("Inbox pending refund total overflow")
         })?;
     let claimed_total = claimed
         .into_iter()
@@ -499,7 +499,7 @@ async fn inbox_refund_liability<P: Provider<TempoNetwork>>(
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
                 .checked_add(U256::from(event.amount))
-                .ok_or_else(|| eyre::eyre!("Inbox claimed refund total overflow"))
+                .ok_or_eyre("Inbox claimed refund total overflow")
         })?;
 
     outstanding_refunds("Inbox", pending_total, claimed_total)

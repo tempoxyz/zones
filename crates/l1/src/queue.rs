@@ -1,4 +1,5 @@
 use super::*;
+use eyre::OptionExt;
 use std::collections::VecDeque;
 
 /// Bounded portal work crossed by canonical checkpoint-only Zone blocks.
@@ -86,12 +87,11 @@ impl PendingDeposits {
         let block_hash = header.hash();
 
         if let Some(last) = self.last_enqueued {
-            if block_number < last.number {
-                eyre::bail!(
-                    "out-of-order finalized L1 block {block_number}; latest enqueued block is {}",
-                    last.number
-                );
-            }
+            eyre::ensure!(
+                block_number >= last.number,
+                "out-of-order finalized L1 block {block_number}; latest enqueued block is {}",
+                last.number
+            );
             if block_number == last.number {
                 eyre::ensure!(
                     block_hash == last.hash,
@@ -105,7 +105,7 @@ impl PendingDeposits {
             let expected = last
                 .number
                 .checked_add(1)
-                .ok_or_else(|| eyre::eyre!("finalized L1 block number overflow"))?;
+                .ok_or_eyre("finalized L1 block number overflow")?;
             eyre::ensure!(
                 block_number == expected,
                 "non-contiguous finalized L1 block: expected {expected}, received {block_number}"
@@ -161,7 +161,7 @@ impl PendingDeposits {
         let front = self
             .pending
             .front()
-            .ok_or_else(|| eyre::eyre!("cannot confirm an empty finalized L1 queue"))?;
+            .ok_or_eyre("cannot confirm an empty finalized L1 queue")?;
         eyre::ensure!(
             front.header.num_hash() == expected,
             "finalized L1 queue confirmation mismatch: expected {expected:?}, front is {:?}",
@@ -219,7 +219,7 @@ impl PendingDeposits {
         let current = self
             .pending
             .front()
-            .ok_or_else(|| eyre::eyre!("cannot prepare work from an empty finalized L1 queue"))?;
+            .ok_or_eyre("cannot prepare work from an empty finalized L1 queue")?;
         eyre::ensure!(
             current.header.num_hash() == expected,
             "operational L1 work does not match the expected anchor: expected {expected:?}, front is {:?}",

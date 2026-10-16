@@ -6,6 +6,7 @@ use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
+use eyre::OptionExt;
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
@@ -222,24 +223,25 @@ async fn configure_sequencing(
     zone_id: u32,
     mut node: ZoneNode,
 ) -> eyre::Result<ZoneNode> {
-    let p2p_config =
-        args.sequencer_manifest
-            .as_ref()
-            .map(|manifest_path| {
-                let ed25519_key_path = args.p2p_key.as_ref().ok_or_else(|| {
-                    eyre::eyre!("--p2p.key is required with --sequencer.manifest")
-                })?;
-                P2pConfig::load(
-                    manifest_path,
-                    ed25519_key_path,
-                    args.secp256k1_key.as_ref(),
-                    args.p2p_listen,
-                    args.p2p_bypass_ip_check,
-                    zone_id,
-                    args.sequencer_role,
-                )
-            })
-            .transpose()?;
+    let p2p_config = args
+        .sequencer_manifest
+        .as_ref()
+        .map(|manifest_path| {
+            let ed25519_key_path = args
+                .p2p_key
+                .as_ref()
+                .ok_or_eyre("--p2p.key is required with --sequencer.manifest")?;
+            P2pConfig::load(
+                manifest_path,
+                ed25519_key_path,
+                args.secp256k1_key.as_ref(),
+                args.p2p_listen,
+                args.p2p_bypass_ip_check,
+                zone_id,
+                args.sequencer_role,
+            )
+        })
+        .transpose()?;
     if let Some(config) = p2p_config.as_ref() {
         info!(
             target: "reth::cli",
@@ -273,11 +275,9 @@ async fn configure_sequencing(
     let prover_config = if !args.enable_prover {
         None
     } else if should_sequence_blocks {
-        let addresses = prover_addresses.ok_or_else(|| {
-            eyre::eyre!(
-                "settlement proving requires --sequencer.prover-address for Nitro attestation"
-            )
-        })?;
+        let addresses = prover_addresses.ok_or_eyre(
+            "settlement proving requires --sequencer.prover-address for Nitro attestation",
+        )?;
         Some(ZoneProverConfig::Settlement(addresses))
     } else {
         eyre::ensure!(
@@ -321,9 +321,8 @@ async fn configure_sequencing(
 async fn load_sequencer_signer(
     key_file: Option<&std::path::Path>,
 ) -> eyre::Result<PrivateKeySigner> {
-    let path = key_file.ok_or_else(|| {
-        eyre::eyre!("--sequencer-key-file is required when sequencing is enabled")
-    })?;
+    let path =
+        key_file.ok_or_eyre("--sequencer-key-file is required when sequencing is enabled")?;
     let path = path.to_path_buf();
     let source = format!("--sequencer-key-file {}", path.display());
     let display_path = path.display().to_string();

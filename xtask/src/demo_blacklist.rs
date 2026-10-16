@@ -64,7 +64,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
-use eyre::{WrapErr as _, eyre};
+use eyre::{OptionExt, WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
     IRolesAuth, ITIP20 as TIP20Token, ITIP20Factory as TIP20Factory,
@@ -371,7 +371,7 @@ impl DemoBlacklist {
         let blacklist_policy_id = receipt
             .decoded_log::<TIP403Registry::PolicyCreated>()
             .map(|e| e.policyId)
-            .ok_or_else(|| eyre!("no PolicyCreated event"))?;
+            .ok_or_eyre("no PolicyCreated event")?;
         println!("  Blacklist policy created: ID={blacklist_policy_id}");
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
 
@@ -686,7 +686,7 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
         portal_addr,
         key_index,
     )
-    .ok_or_else(|| eyre!("ECIES encryption failed"))?;
+    .ok_or_eyre("ECIES encryption failed")?;
 
     let payload = DepositPayload {
         ephemeralPubkeyX: enc.eph_pub_x,

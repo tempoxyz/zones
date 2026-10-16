@@ -7,7 +7,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
 };
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
-use eyre::{Context as _, ensure, eyre};
+use eyre::{Context as _, OptionExt, ensure, eyre};
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use tempo_alloy::TempoNetwork;
@@ -187,7 +187,7 @@ where
         .raw_request("eth_getBlockByNumber".into(), ("finalized", false))
         .await
         .wrap_err("failed reading finalized L1 block")?;
-    let finalized = finalized.ok_or_else(|| eyre!("Tempo L1 returned no finalized block"))?;
+    let finalized = finalized.ok_or_eyre("Tempo L1 returned no finalized block")?;
     let block_number = finalized.number.to::<u64>();
     let block_id = BlockId::number(block_number);
 

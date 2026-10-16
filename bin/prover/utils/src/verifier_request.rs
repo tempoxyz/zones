@@ -6,7 +6,7 @@ use alloy_primitives::{Address, Bytes};
 use alloy_provider::EthCallParams;
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
-use eyre::{Context, Result, bail};
+use eyre::{Context, Result, ensure};
 use serde_json::{Value, json};
 use tempo_precompiles::zone_factory::portal_address;
 use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
@@ -82,9 +82,10 @@ pub(super) fn build(witness: &Value, response: &Value) -> Result<VerifierRequest
     if let Some(value) = inputs.get("portal") {
         let supplied: Address =
             serde_json::from_value(value.clone()).context("invalid witness portal")?;
-        if supplied != portal {
-            bail!("witness portal {supplied} does not match canonical Zone portal {portal}");
-        }
+        ensure!(
+            supplied == portal,
+            "witness portal {supplied} does not match canonical Zone portal {portal}"
+        );
     }
     let data = Bytes::from(call.abi_encode());
     let tx = TransactionRequest {

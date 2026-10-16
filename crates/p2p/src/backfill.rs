@@ -7,6 +7,7 @@ use std::{
 
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{Recipients, Sender as _, authenticated::lookup};
+use eyre::OptionExt;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
@@ -261,7 +262,7 @@ where
                     );
                 }
                 command = self.commands.recv() => {
-                    let command = command.ok_or_else(|| eyre::eyre!("backfill command channel closed unexpectedly"))?;
+                    let command = command.ok_or_eyre("backfill command channel closed unexpectedly")?;
                     self.handle_command(command).await?;
                 }
                 result = self.request_receiver.recv() => {

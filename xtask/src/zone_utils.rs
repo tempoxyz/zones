@@ -7,7 +7,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
-use eyre::{WrapErr as _, eyre};
+use eyre::{OptionExt, WrapErr as _, eyre};
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
@@ -95,10 +95,10 @@ pub(crate) async fn find_zone_deployment_block<P: Provider<TempoNetwork>>(
     eyre::ensure!(!log.removed, "ZoneCreated query returned a removed log");
     let block_number = log
         .block_number
-        .ok_or_else(|| eyre!("ZoneCreated log is missing its block number"))?;
+        .ok_or_eyre("ZoneCreated log is missing its block number")?;
     let block_hash = log
         .block_hash
-        .ok_or_else(|| eyre!("ZoneCreated log is missing its block hash"))?;
+        .ok_or_eyre("ZoneCreated log is missing its block hash")?;
     let header = provider
         .get_header_by_number(block_number.into())
         .await

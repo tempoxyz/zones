@@ -1,4 +1,5 @@
 use super::*;
+use eyre::OptionExt;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -25,7 +26,7 @@ impl L1BlockDeposits {
         let mut blocks = blocks.into_iter();
         let first = blocks
             .next()
-            .ok_or_else(|| eyre::eyre!("cannot prepare an empty L1 range"))?;
+            .ok_or_eyre("cannot prepare an empty L1 range")?;
         let mut prepared = first.prepare(encryption_keys, portal_address).await?;
         for block in blocks {
             let next = block.prepare(encryption_keys, portal_address).await?;

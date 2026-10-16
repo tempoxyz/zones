@@ -9,7 +9,7 @@ use std::{
 };
 
 use alloy::primitives::{Address, B256};
-use eyre::{Context as _, ensure, eyre};
+use eyre::{Context as _, OptionExt, ensure, eyre};
 use serde::Deserialize;
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
@@ -192,10 +192,10 @@ pub(crate) fn merge_effective_config(
 ) -> eyre::Result<EffectiveConfig> {
     let zone_id = zone_id
         .or(file.zone.id)
-        .ok_or_else(|| eyre!("missing Zone ID; pass --zone-id or set zone.id in --config"))?;
-    let l1_rpc_url = l1_rpc_url.or(file.l1.rpc_url).ok_or_else(|| {
-        eyre!("missing Tempo L1 RPC URL; pass --l1-rpc-url or set l1.rpc_url in --config")
-    })?;
+        .ok_or_eyre("missing Zone ID; pass --zone-id or set zone.id in --config")?;
+    let l1_rpc_url = l1_rpc_url
+        .or(file.l1.rpc_url)
+        .ok_or_eyre("missing Tempo L1 RPC URL; pass --l1-rpc-url or set l1.rpc_url in --config")?;
     let manifest = zone_manifest.or_else(|| {
         file.zone.manifest.map(|path| {
             if path.is_relative() {

@@ -12,7 +12,7 @@ use alloy::{
     sol_types::SolCall,
 };
 use alloy_eips::Encodable2718;
-use eyre::{Context as _, eyre};
+use eyre::{Context as _, OptionExt, eyre};
 use std::{collections::BTreeMap, num::NonZeroU64, time::Instant};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20;
@@ -294,7 +294,7 @@ impl SpamDeposits {
             self.portal,
             key_index,
         )
-        .ok_or_else(|| eyre!("ECIES encryption failed"))?;
+        .ok_or_eyre("ECIES encryption failed")?;
 
         let payload = DepositPayload {
             ephemeralPubkeyX: encrypted.eph_pub_x,

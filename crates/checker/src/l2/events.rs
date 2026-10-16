@@ -107,12 +107,11 @@ fn authenticate_receipt_mints(
 
     while let Some(event) = receipt.get(index) {
         let Some(observed) = Mint::from_transfer(event) else {
-            if Mint::from_outcome(event).is_some() {
-                eyre::bail!(
-                    "transaction {} has an Inbox outcome without its mint",
-                    transaction_hash,
-                );
-            }
+            eyre::ensure!(
+                Mint::from_outcome(event).is_none(),
+                "transaction {} has an Inbox outcome without its mint",
+                transaction_hash,
+            );
             index += 1;
             continue;
         };
@@ -258,12 +257,11 @@ fn authenticate_receipt_withdrawals(
         );
     }
 
-    if burns.iter().enumerate().any(|(index, _)| !consumed[index]) {
-        eyre::bail!(
-            "transaction {} has an unexplained withdrawal debit and burn",
-            transaction_hash
-        );
-    }
+    eyre::ensure!(
+        !burns.iter().enumerate().any(|(index, _)| !consumed[index]),
+        "transaction {} has an unexplained withdrawal debit and burn",
+        transaction_hash
+    );
     Ok(())
 }
 
