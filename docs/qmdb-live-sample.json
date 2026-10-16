@@ -1,0 +1,22 @@
+{
+  "network": "devnet",
+  "namespace": "tempo-zone-prover",
+  "source": "dev-eu-vl-internal, Prover validated batch logs",
+  "capturedDate": "2026-10-05",
+  "kind": "MPT prover telemetry, not downloaded execution witnesses",
+  "samples": [
+    {"timestamp":"2026-10-05T21:54:45.173604339Z","zoneFrom":1234321,"zoneTo":1234440,"witnessBytes":277914,"blocks":120,"deposits":0,"withdrawals":0,"transactions":0,"zoneStateNodes":746,"tempoStateNodes":137,"elapsedMs":61},
+    {"timestamp":"2026-10-05T21:55:46.178855952Z","zoneFrom":1234441,"zoneTo":1234560,"witnessBytes":273225,"blocks":120,"deposits":0,"withdrawals":0,"transactions":0,"zoneStateNodes":746,"tempoStateNodes":131,"elapsedMs":66},
+    {"timestamp":"2026-10-05T21:56:47.173452783Z","zoneFrom":1234561,"zoneTo":1234680,"witnessBytes":273223,"blocks":120,"deposits":0,"withdrawals":0,"transactions":0,"zoneStateNodes":746,"tempoStateNodes":131,"elapsedMs":61},
+    {"timestamp":"2026-10-05T21:57:48.174103202Z","zoneFrom":1234681,"zoneTo":1234800,"witnessBytes":273224,"blocks":120,"deposits":0,"withdrawals":0,"transactions":0,"zoneStateNodes":746,"tempoStateNodes":131,"elapsedMs":60},
+    {"timestamp":"2026-10-05T21:58:49.180223757Z","zoneFrom":1234801,"zoneTo":1234920,"witnessBytes":273803,"blocks":120,"deposits":0,"withdrawals":0,"transactions":0,"zoneStateNodes":746,"tempoStateNodes":131,"elapsedMs":67},
+    {"timestamp":"2026-10-05T21:59:50.116779642Z","zoneFrom":1234921,"zoneTo":1235040,"witnessBytes":274031,"blocks":120,"deposits":0,"withdrawals":0,"transactions":0,"zoneStateNodes":746,"tempoStateNodes":137,"elapsedMs":62},
+    {"timestamp":"2026-10-05T22:00:51.012907764Z","zoneFrom":1235041,"zoneTo":1235160,"witnessBytes":274252,"blocks":120,"deposits":0,"withdrawals":0,"transactions":0,"zoneStateNodes":746,"tempoStateNodes":137,"elapsedMs":62},
+    {"timestamp":"2026-10-05T22:01:51.91272214Z","zoneFrom":1235161,"zoneTo":1235280,"witnessBytes":274487,"blocks":120,"deposits":0,"withdrawals":0,"transactions":0,"zoneStateNodes":746,"tempoStateNodes":137,"elapsedMs":63}
+  ],
+  "transactionBearingSamples": [
+    {"timestamp":"2026-10-05T06:47:59.031127828Z","zoneFrom":1127521,"zoneTo":1127521,"blocks":1,"transactions":2,"witnessBytes":73745,"elapsedMs":52},
+    {"timestamp":"2026-10-05T06:47:55.94959161Z","zoneFrom":1127515,"zoneTo":1127515,"blocks":1,"transactions":3,"witnessBytes":95020,"elapsedMs":20},
+    {"timestamp":"2026-10-05T06:47:55.439681702Z","zoneFrom":1127514,"zoneTo":1127514,"blocks":1,"transactions":2,"witnessBytes":74055,"elapsedMs":21}
+  ]
+}

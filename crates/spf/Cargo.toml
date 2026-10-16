@@ -41,11 +41,33 @@ revm.workspace = true
 serde = { workspace = true, optional = true }
 thiserror = "2"
 
+commonware-codec = { workspace = true, optional = true }
+commonware-cryptography = { workspace = true, optional = true }
+commonware-parallel = { workspace = true, optional = true }
+commonware-runtime = { workspace = true, optional = true }
+commonware-storage = { workspace = true, optional = true }
+commonware-utils = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
 [features]
 default = ["serde"]
+qmdb = [
+    "dep:commonware-codec",
+    "dep:commonware-cryptography",
+    "dep:commonware-parallel",
+    "dep:commonware-runtime",
+    "dep:commonware-storage",
+    "dep:commonware-utils",
+]
 serde = [
     "dep:serde",
     "alloy-primitives/serde",
     "tempo-zone-contracts/serde",
     "zone-primitives/serde",
 ]
+
+[[example]]
+name = "qmdb-data"
+required-features = ["qmdb", "serde"]

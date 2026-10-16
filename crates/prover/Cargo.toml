@@ -42,3 +42,6 @@ alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 reth-trie-common.workspace = true
 tempo-primitives.workspace = true
+
+[features]
+qmdb = ["zone-spf/qmdb"]

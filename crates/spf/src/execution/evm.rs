@@ -48,6 +48,8 @@ pub(crate) struct ExecutedZoneBlock {
     pub(crate) transactions: Vec<TempoTxEnvelope>,
     pub(crate) output: BlockExecutionResult<TempoReceipt>,
     pub(crate) evm_env: alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>,
+    #[cfg(feature = "qmdb")]
+    pub(crate) user_execution_errors: Vec<Option<String>>,
 }
 
 pub(crate) struct BlockReplayContext<'a> {
@@ -142,11 +144,9 @@ pub(crate) fn execute_zone_block(
             execute_advance_tempo_headers(&mut executor, headers_rlp, zone_block_index, chain_id)?,
         ),
     }
-    transactions.extend(execute_user_transactions(
-        &mut executor,
-        zone_block_index,
-        user_transactions,
-    )?);
+    let (executed_users, _user_execution_errors) =
+        execute_user_transactions(&mut executor, zone_block_index, user_transactions)?;
+    transactions.extend(executed_users);
     if let Some(count) = block.finalize_withdrawal_batch_count {
         transactions.push(execute_finalize_withdrawal_batch(
             &mut executor,
@@ -172,6 +172,8 @@ pub(crate) fn execute_zone_block(
         transactions,
         output,
         evm_env: assembly_env,
+        #[cfg(feature = "qmdb")]
+        user_execution_errors: _user_execution_errors,
     })
 }
 
@@ -379,14 +381,15 @@ fn execute_user_transactions<'a, 'db, I>(
     executor: &mut WitnessExecutor<'a, 'db, I>,
     block_index: usize,
     transactions: Vec<Recovered<TempoTxEnvelope>>,
-) -> Result<Vec<TempoTxEnvelope>, Error>
+) -> Result<(Vec<TempoTxEnvelope>, Vec<Option<String>>), Error>
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
 {
     let mut executed = Vec::with_capacity(transactions.len());
+    let mut errors = Vec::with_capacity(transactions.len());
     for (transaction_index, transaction) in transactions.into_iter().enumerate() {
         let envelope = transaction.clone_inner();
-        execute_recovered_transaction(
+        let error = execute_recovered_transaction(
             executor,
             transaction,
             Error::TransactionExecution {
@@ -395,10 +398,11 @@ where
             },
             false,
         )?;
+        errors.push(error);
         executed.push(envelope);
     }
 
-    Ok(executed)
+    Ok((executed, errors))
 }
 
 fn execute_recovered_transaction<'a, 'db, I>(
@@ -406,7 +410,7 @@ fn execute_recovered_transaction<'a, 'db, I>(
     transaction: Recovered<TempoTxEnvelope>,
     execution_error: Error,
     require_success: bool,
-) -> Result<(), Error>
+) -> Result<Option<String>, Error>
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
 {
@@ -427,8 +431,10 @@ where
             (error, _) => error,
         });
     }
+    let error =
+        (!result.result().result.is_success()).then(|| format!("{:?}", result.result().result));
     executor.commit_transaction(result);
-    Ok(())
+    Ok(error)
 }
 
 fn decode_advance_tempo_revert(output: &Bytes) -> String {

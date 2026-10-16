@@ -92,6 +92,9 @@ struct ProveArgs {
     /// Write the complete successful JSON response, including output and proofBundle.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
+    /// Complete QMDB history for a QMDB-enabled prover and QMDB-rooted batch.
+    #[arg(long, value_name = "PATH")]
+    qmdb_history: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -399,6 +402,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         version: PROTOCOL_VERSION,
         request_id,
         witness,
+        qmdb_state_witness: None,
     };
 
     let started = start_phase("output");
@@ -457,10 +461,20 @@ async fn prove_with_connection<IO: tokio::io::AsyncRead + tokio::io::AsyncWrite 
     info!(bytes = input.len(), "loaded batch witness");
     timings.record("read witness", started, ());
     let request_id = format!("prove-{}", keccak256(&input));
+    let qmdb_state_witness = args
+        .qmdb_history
+        .as_ref()
+        .map(|path| {
+            let encoded = std::fs::read(path)
+                .wrap_err_with(|| format!("read QMDB history from {}", path.display()))?;
+            serde_json::from_slice(&encoded).context("parse QMDB history JSON")
+        })
+        .transpose()?;
     let request = VerifyRequest {
         version: PROTOCOL_VERSION,
         request_id: request_id.clone(),
         witness,
+        qmdb_state_witness,
     };
     let started = start_phase("target prover");
     let stream = connect.await.wrap_err("authenticate target prover")?;
@@ -1470,6 +1484,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_explicit_qmdb_prover_history() {
+        let cli = Cli::try_parse_from([
+            "tempo-zone-prover-utils",
+            "prove",
+            "--input",
+            "batch.json",
+            "--target",
+            "localhost:5000",
+            "--attestation-policy",
+            "measurements.json",
+            "--output",
+            "proof.json",
+            "--qmdb-history",
+            "history.json",
+        ])
+        .unwrap();
+        let Command::Prove(args) = cli.command else {
+            panic!("expected prove")
+        };
+        assert_eq!(args.qmdb_history, Some(PathBuf::from("history.json")));
+    }
+
+    #[test]
     fn rejects_invalid_proof_responses() {
         let valid = successful_proof_response("test");
         validate_proof_response(&valid, "test").unwrap();
@@ -1547,6 +1584,7 @@ mod tests {
         prove_with_connection(
             ProveArgs {
                 input: input.clone(),
+                qmdb_history: None,
                 target: target.clone(),
                 attestation_policy: PathBuf::new(),
                 output: output.clone(),
@@ -1560,6 +1598,7 @@ mod tests {
         let error = prove_with_connection(
             ProveArgs {
                 input,
+                qmdb_history: None,
                 target,
                 attestation_policy: PathBuf::new(),
                 output: output.clone(),

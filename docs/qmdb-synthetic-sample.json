@@ -1,0 +1,19 @@
+{
+  "source": "synthetic qmdb-data --demo; not a live Zone witness",
+  "capturedDate": "2026-10-05",
+  "profile": "development, unoptimized",
+  "accounts": 256,
+  "storageSlotsPerAccount": 8,
+  "importedRows": 2304,
+  "qmdbRoot": "0x28cc9c8443472ce932c31c9ef206d5dcd609d8909faa5376771f369690194e50",
+  "historyJsonBytes": 561933,
+  "rootBuildMicros": 127778,
+  "timingMeaning": "includes full reconstruction; not a persistent-node performance comparison",
+  "proofSizeMeaning": "encoded read proof only; separate inclusion values, framing and attestations excluded",
+  "proofs": [
+    {"kind":"account inclusion","present":true,"proofBytes":519,"valueBytes":73,"verified":true},
+    {"kind":"storage inclusion","present":true,"proofBytes":519,"valueBytes":32,"verified":true},
+    {"kind":"storage exclusion","present":false,"proofBytes":585,"valueBytes":0,"verified":true},
+    {"kind":"account exclusion","present":false,"proofBytes":584,"valueBytes":0,"verified":true}
+  ]
+}

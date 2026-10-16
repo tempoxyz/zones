@@ -1,0 +1,44 @@
+{
+  "source": "HTTP smoke test of tempo-zone-qmdb with cast; synthetic local network, not devnet",
+  "mockL1": true,
+  "attested": false,
+  "settlement": false,
+  "chainId": 5742371274753,
+  "genesisStateRoot": "0x10e68bd2cf99ac1b64ed97cb0ac95f10b2fba2c45ef29dcb81acedd810448ce5",
+  "account": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "token": "0x20c0000000000000000000000000000000000000",
+  "spender": "0x000000000000000000000000000000000000b001",
+  "transactions": [
+    {
+      "method": "approve(address,uint256)",
+      "amount": 42,
+      "hash": "0xc26397e49c5cfc61f56949e39094ff36d9d1a3551781ef6f0afcd4c60368d5a0",
+      "block": 1,
+      "blockHash": "0x381c795464b15b62e3def8facbe2a052becad0b1cb3db8fdbaba66ab96af44a6",
+      "stateRoot": "0x0a728d99763b61565de5a60dfce7faf828d61f5455b65857b8e9600034cede79",
+      "receiptStatus": 1,
+      "allowanceAfterRestart": 42,
+      "nativeProofHeaderMatches": true
+    },
+    {
+      "method": "approve(address,uint256)",
+      "amount": 99,
+      "hash": "0xa037e059642f0ecf77403d97e472d0a3721165896f53ae7f643d0ab31013e4be",
+      "block": 2,
+      "blockHash": "0x2eae0beb33422c36bd85c77f53b4c48cb1ea473fe1dd8d365ca26354ce359a93",
+      "stateRoot": "0x98fd1fc9dee8243baf976f71208930f33fb3699355d1200d37705ec0f618ccb3",
+      "receiptStatus": 1,
+      "allowance": 99,
+      "senderNonce": 2,
+      "nativeProofHeaderMatches": true
+    }
+  ],
+  "readProofSampleAtBlock2": {
+    "accountInclusionEncodedBytes": 357,
+    "storageExclusionEncodedBytes": 423,
+    "storageSlot": "0x0",
+    "sizeMeaning": "read-proof encoding only; excludes separate values and update witness"
+  },
+  "estimateGasForApproval": 141356,
+  "performanceMeaning": "functional compatibility test only; no throughput or MPT performance comparison"
+}

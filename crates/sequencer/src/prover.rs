@@ -692,6 +692,7 @@ async fn verify_remotely(
             job.from, job.to, job.batch.next_block_hash
         ),
         witness,
+        qmdb_state_witness: None,
     };
     let started = Instant::now();
     let stream = remote.connect().await;
