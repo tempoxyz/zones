@@ -49,7 +49,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tempoxyz/earn
-          ref: main
+          # Keep the TokenAuthority ABI used by earn_zone_e2e until its PropAMM migration.
+          ref: 87478b4ffe41a3590bca0c340ecd79e65aeeffe2
           path: earn
           token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
@@ -101,6 +102,7 @@ jobs:
             --no-lint \
             --out "$GITHUB_WORKSPACE/crates/contracts/out"
           forge build --root crates/contracts --no-lint
+          test -s crates/contracts/out/DemoTokenAuthority.sol/DemoTokenAuthority.json
 
       - name: Build and archive tests
         run: cargo nextest archive --profile ci --archive-file nextest-archive.tar.zst

@@ -1,6 +1,6 @@
 //! Tempo Earn scenarios that cross the public L1 / private Zone boundary.
 //!
-//! CI builds the Solidity artifacts from the Tempo Earn `main` branch. These tests deliberately
+//! CI builds the Solidity artifacts from a pinned, compatible Tempo Earn revision. These tests
 //! exercise the complete callback path: a private withdrawal settles on L1, the Earn router
 //! deposits or redeems through the vault stack, and the output is encrypted back into the
 //! originating Zone.
