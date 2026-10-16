@@ -582,7 +582,7 @@ The sequencer provides the ECDH shared secret alongside a proof of its correct d
 
 If any step fails (invalid proof, GCM tag mismatch, or invalid decrypted plaintext length), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `tempoRefundRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `deposit` requires a non-zero `tempoRefundRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
 
-Every encrypted deposit must be processed with exactly one `DecryptionData` entry, consumed in deposit order. The inbox always performs the Chaum-Pedersen and AES-GCM verification; missing or extra decryption entries make `advanceTempo()` revert. There is no sequencer-supplied accept/reject decision.
+Every encrypted deposit with `QueuedDeposit.rejected == false` must be processed with exactly one `DecryptionData` entry, consumed in the order of non-rejected user deposits. For those deposits, the inbox performs the Chaum-Pedersen and AES-GCM verification; missing or extra decryption entries make `advanceTempo()` revert. Explicitly rejected user deposits consume no decryption entry and follow the operator-rejection path below.
 
 The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
 
@@ -614,13 +614,25 @@ sequenceDiagram
     end
 ```
 
+### Operator Deposit Rejection
+
+The zone operator MAY reject any user deposit by setting `QueuedDeposit.rejected = true` in the `advanceTempo` system transaction. The decision may depend on an offchain allowlist or other private admission policy. The protocol does not require a rejection reason or prove that the decision follows that policy.
+
+For a rejected `Deposit` entry, the inbox MUST authenticate the same canonical deposit payload and queue order as for an accepted entry, advance the processed-deposit hash and number, skip decryption and minting, and enqueue exactly one deposit bounce-back for the deposit's token and full amount to its original `tempoRefundRecipient`. It MUST emit `DepositRejected` instead of `DepositProcessed` or `DepositFailed`. The rejection branch consumes no `DecryptionData` entry and does not require an encryption-key witness. Extra decryption entries still invalidate the system transaction. The normal Tempo-side bounce-back delivery and fee rules apply.
+
+`rejected` is an operator-selected execution input, not part of the L1 deposit identity or queue commitment. It is included in the system calldata and resulting block hash, and the batch proof MUST replay its effect. Changing the decision requires a different proven block transition. The proof establishes correct execution of the rejection and refund; it does not establish offchain allowlist membership or the legitimacy of the operator's reason.
+
+`WithdrawalBounceBack` entries MUST have `rejected == false`; setting it to true invalidates `advanceTempo`. These internal entries recover an existing withdrawal and cannot be arbitrarily rejected by the operator. Explicit rejection does not permit changing a deposit's payload, refund recipient, amount, or queue position.
+
+This changes consensus execution semantics: operators, followers, and the approved prover image MUST use the same rejection rules when the change is activated. Older executors ignore the flag and cannot replay the new branch.
+
 ### Deposit Failures and Bounce-Back
 
-Deposits can fail because the zone-side mint reverts (including a TIP-403 policy rejection) or because onchain decryption verification fails. To make sure that all cases can be handled without loss of user funds, every user deposit carries a `tempoRefundRecipient`: a Tempo address that receives a refund if zone-side processing fails. Every encrypted deposit is verified and attempts its mint only when decryption succeeds.
+Deposits can fail because the zone-side mint reverts (including a TIP-403 policy rejection) or because onchain decryption verification fails. To make sure that all cases can be handled without loss of user funds, every user deposit carries a `tempoRefundRecipient`: a Tempo address that receives a refund if zone-side processing fails. Every non-rejected encrypted deposit is verified and attempts its mint only when decryption succeeds. Explicit operator rejections skip both steps and use the same bounce-back delivery mechanism.
 
 **Validation at deposit time.** `deposit(...)` requires an allowed, non-zero `tempoRefundRecipient` and requires it to be authorized by the token's TIP-403 recipient policy. Zone recipients are not checked against closed-loop membership because they are encrypted. If the on-Tempo refund transfer later reverts because policy changed, the funds are parked in a per-recipient refund registry on the portal and may be claimed only by that allowed recipient via `claimRefund(token)`.
 
-**Triggering conditions.** There are two triggering sites:
+**Triggering conditions.** In addition to explicit [operator rejection](#operator-deposit-rejection), the following execution failures trigger a bounce-back:
 
 - **Encrypted deposit.** Two failure modes, both of which unconditionally bounce back (no zone-side mint is attempted as a fallback):
   - **Invalid encryption.** The Chaum-Pedersen proof, AES-GCM tag, or decrypted plaintext length check fails during [Onchain Decryption Verification](#onchain-decryption-verification). There is no well-defined recipient on the zone in this case, so the zone does not try to mint to the depositor; it bounces back immediately.
@@ -1228,7 +1240,7 @@ flowchart TB
 
 ### Detailed Input Definitions
 
-The prover-side inputs are defined concretely below. Types that mirror the onchain ABI (`QueuedDeposit`, `DecryptionData`, `EnabledToken`, and the transition structs) keep the same field ordering and semantics as the interface definitions in [Common Types](#common-types). `Bytes` contains exact wire bytes. The `QueuedDeposit.rejected` ABI field does not authorize a sequencer decision: every user deposit still consumes one `DecryptionData` entry and follows onchain verification.
+The prover-side inputs are defined concretely below. Types that mirror the onchain ABI (`QueuedDeposit`, `DecryptionData`, `EnabledToken`, and the transition structs) keep the same field ordering and semantics as the interface definitions in [Common Types](#common-types). `Bytes` contains exact wire bytes. The `QueuedDeposit.rejected` ABI field carries the operator decision: rejected user deposits consume no `DecryptionData` entry and enqueue a bounce-back without minting; non-rejected user deposits consume one entry and follow onchain verification. Internal withdrawal bounce-backs cannot be rejected.
 
 ```rust
 /// Trusted network configuration for zone execution.
@@ -1428,7 +1440,7 @@ The stateless execution function must reject the witness on any failed check, mi
 
    For `Full`, execute `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)`. Require at most `MAX_UNPROCESSED_DEPOSITS` (230) deposits and `MAX_UNPROCESSED_TOKEN_ENABLEMENTS` (8) token enablements. Against the imported Tempo root, authenticate the exact ordered enabled-token suffix from `processedTokenEnablementHash` to the portal's `tokenEnablementHash`, initialize those tokens, and update the processed hash and count as specified in [Token Enablement Commitment](#token-enablement-commitment).
 
-   Process deposits oldest-first under the [Deposit Queue](#deposit-queue) rules. Every encrypted user deposit consumes exactly one `DecryptionData` entry in deposit order; missing or extra entries make the system transaction revert. Verify the Chaum-Pedersen proof and AES-GCM ciphertext as described in [Onchain Decryption Verification](#onchain-decryption-verification). Invalid encryption or a failed recipient mint enqueues a bounce-back, while malformed queue inputs or inconsistent queue commitments reject the witness. Token initialization precedes deposit processing. In either import form, the opening transaction must leave `TempoState.tempoBlockHash` equal to `keccak256` of the final imported header. All system calldata, logs, receipts, and state changes contribute to the resulting block hash.
+   Process deposits oldest-first under the [Deposit Queue](#deposit-queue) rules. Every non-rejected encrypted user deposit consumes exactly one `DecryptionData` entry in non-rejected deposit order; missing or extra entries make the system transaction revert. For a rejected user deposit, skip decryption and minting, enqueue the exact bounce-back to the authenticated refund recipient, and emit `DepositRejected`. Reject any `WithdrawalBounceBack` entry with `rejected == true`. Verify the Chaum-Pedersen proof and AES-GCM ciphertext as described in [Onchain Decryption Verification](#onchain-decryption-verification). Invalid encryption or a failed recipient mint enqueues a bounce-back, while malformed queue inputs or inconsistent queue commitments reject the witness. Token initialization precedes deposit processing. In either import form, the opening transaction must leave `TempoState.tempoBlockHash` equal to `keccak256` of the final imported header. All system calldata, logs, receipts, and state changes contribute to the resulting block hash.
 
 7. **Execute user transactions.**
    Decode each supplied byte string as one complete signed Tempo EIP-2718 envelope, reject system transactions in the user list, recover its signer, and execute the transactions in order under the current zone EVM environment.
@@ -1717,7 +1729,7 @@ enum DepositType {
 struct QueuedDeposit {
     DepositType depositType;
     bytes depositData;  // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
-    bool rejected;       // retained ABI field; does not bypass onchain verification
+    bool rejected;    // operator rejection for Deposit only; skips decryption and minting
 }
 
 struct EnabledToken {
@@ -2125,12 +2137,12 @@ Address: `0x1c00000000000000000000000000000000000001`
 ```solidity
 interface IZoneInbox {
     /// @notice A canonical deposit queued by the portal for processing on the zone.
-    /// @dev WithdrawalBounceBack entries are internal. Every Deposit entry consumes
-    ///      one DecryptionData item and performs onchain verification.
+    /// @dev WithdrawalBounceBack entries cannot be rejected. Non-rejected Deposit
+    ///      entries consume one DecryptionData item; rejected entries consume none.
     struct QueuedDeposit {
         DepositType depositType;
         bytes depositData; // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
-        bool rejected; // does not bypass onchain verification
+        bool rejected; // Deposit only: refund without decryption or minting
     }
 
     event TempoAdvanced(
@@ -2145,6 +2157,11 @@ interface IZoneInbox {
     );
     event DepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
+    );
+    /// @notice Emitted when the operator rejects a user deposit and enqueues its refund.
+    event DepositRejected(
+        bytes32 indexed depositHash, address indexed sender, DepositType depositType,
+        address token, uint128 amount, address tempoRefundRecipient
     );
     /// @notice Emitted when a withdrawal-bounce-back deposit (synthesized by the portal
     ///         with `tempoRefundRecipient == address(0)`) was minted successfully to the
